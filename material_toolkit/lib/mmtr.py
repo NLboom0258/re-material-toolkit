@@ -86,20 +86,14 @@ class Mmtr:
             m.params.append(pr)
         return m
 
-    def add_cbuffer_param(self, cbuffer_name, param_name, size, offset):
-        """在指定 cbuffer 成员表末尾插入新参数,返回新的完整文件 bytes。
+    def _scan_cbuffer_entries(self, cbuffer_name):
+        """扫描 cbuffer 绑定条目(32B/条: name_off(8) hash(4) 0(4) size(4) count(4) members_off(8))。
 
-        头部变长插入会同步重映射三类绝对偏移:
-          - 字符串池引用(pool_lo..blob_start): +16(字符串池后移)
-          - blob 起点引用(>=blob_start): +16+len(name_bytes)(字符串池又变长)
-          - 参数表后半偏移(insert_pos..pool_lo): +16
-        并更新 cbuffer 绑定条目的 count/size 与文件头 blob_start。
+        返回 [[pos, members_off, count, size], ...](同一 cbuffer 每变体一条,内容相同)。
         """
         data = self.data
         blob_start = self.blob_start
         pool_lo, pool_hi = self.string_pool_lo, self.string_pool_hi
-
-        # 1. 定位 cbuffer 绑定条目(32B: name_off(8) hash(4) 0(4) size(4) count(4) members_off(8))
         cb_entries = []
         for p in range(0, blob_start - 32, 4):
             name_off = struct.unpack_from("<Q", data, p)[0]
@@ -120,6 +114,32 @@ class Mmtr:
             if not (0x1000 < m_name < blob_start):
                 continue
             cb_entries.append([p, members_off, count, size_v])
+        return cb_entries
+
+    def cbuffer_members(self, cbuffer_name):
+        """返回该 cbuffer 的成员参数列表(按成员表顺序)。"""
+        entries = self._scan_cbuffer_entries(cbuffer_name)
+        if not entries:
+            return []
+        _, members_off, count, _ = entries[0]
+        lo, hi = members_off, members_off + count * 16
+        return [pr for pr in self.params if lo <= pr.entry_off < hi]
+
+    def add_cbuffer_param(self, cbuffer_name, param_name, size, offset):
+        """在指定 cbuffer 成员表末尾插入新参数,返回新的完整文件 bytes。
+
+        头部变长插入会同步重映射三类绝对偏移:
+          - 字符串池引用(pool_lo..blob_start): +16(字符串池后移)
+          - blob 起点引用(>=blob_start): +16+len(name_bytes)(字符串池又变长)
+          - 参数表后半偏移(insert_pos..pool_lo): +16
+        并更新 cbuffer 绑定条目的 count/size 与文件头 blob_start。
+        """
+        data = self.data
+        blob_start = self.blob_start
+        pool_lo, pool_hi = self.string_pool_lo, self.string_pool_hi
+
+        # 1. 定位 cbuffer 绑定条目
+        cb_entries = self._scan_cbuffer_entries(cbuffer_name)
         if not cb_entries:
             raise ValueError(f"cbuffer {cbuffer_name!r} not found")
         members_off = cb_entries[0][1]
