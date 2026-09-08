@@ -223,6 +223,17 @@ class Mdf2:
                 return pr
         raise ValueError(f"material {material_name!r} not found")
 
+    def add_texture(self, material_name, texture_type, texture_path):
+        """给指定材质新增一个贴图条目(类型名 + 路径)。类型名需与 shader RDEF 资源名一致。"""
+        for mat in self.materials:
+            if mat.name == material_name:
+                tb = TextureBinding()
+                tb.texture_type = texture_type
+                tb.texture_path = texture_path
+                mat.textures.append(tb)
+                return tb
+        raise ValueError(f"material {material_name!r} not found")
+
     def save(self, path: str):
         """写入 mdf2(重排所有偏移 + 重算 hash)。version<19 的布局。"""
         ver = self.game_version
