@@ -122,13 +122,21 @@ def add_bound_resource(blob: bytes, name: str, slot: int, type_=TYPE_TEXTURE,
 
 
 def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
-    """把第 blob_idx 个 blob 换为 new_blob(长度可变), 重映射头部引用。"""
+    """把第 blob_idx 个 blob 换为 new_blob(长度可变), 重映射头部引用。
+
+    ⚠ 大小字段必须"按记录"更新, 不能按"值"全局替换:
+      变体记录 264B: +0x00=blob 起点, +0x9c=该 blob 大小。
+      若有两条记录引用的 blob 恰好大小相同, 按值替换会误伤另一条(实测进游戏 createPixelShader 崩)。
+      故: 仅当某处 u32 == 某 blob 起点、且其 +0x9c 恰等于该 blob 原大小时, 才更新 +0x9c。
+    """
     bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
-    head = bytearray(data[:bs])
+    orig_head = data[:bs]
+    head = bytearray(orig_head)
     new_blobs = []
-    old_to_new, old_sz_to_new = {}, {}
+    old_to_new = {}          # old_start -> new_start
+    changed = {}             # old_start -> (old_size, new_size) 仅变长/变短的 blob
     cursor = bs
     for i, (start, size) in enumerate(bl):
         raw = new_blob if i == blob_idx else data[start:start + size]
@@ -136,16 +144,22 @@ def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
         new_blobs.append(raw)
         old_to_new[start] = cursor
         if sz != size:
-            old_sz_to_new[size] = sz
+            changed[start] = (size, sz)
         cursor += sz
-    old_starts = set(old_to_new)
-    old_sizes = set(old_sz_to_new)
-    for i in range(0, len(head) - 3, 4):
-        w = _u32(head, i)
-        if w in old_starts:
-            struct.pack_into("<I", head, i, old_to_new[w])
-        elif w in old_sizes:
-            struct.pack_into("<I", head, i, old_sz_to_new[w])
+
+    # 先按"原始头"检测所有写入位置, 再统一落盘(避免读改写互相干扰)
+    writes = []
+    for p in range(0, len(orig_head) - 3, 4):
+        w = _u32(orig_head, p)
+        if w in old_to_new:
+            writes.append((p, old_to_new[w]))                 # blob 起点引用
+            if w in changed and p + 0x9C + 4 <= len(orig_head):
+                old_size, new_size = changed[w]
+                if _u32(orig_head, p + 0x9C) == old_size:     # 确认是"该 blob 的大小字段"
+                    writes.append((p + 0x9C, new_size))
+    for pos, val in writes:
+        struct.pack_into("<I", head, pos, val)
+
     out = bytearray(head)
     for raw in new_blobs:
         out += raw
