@@ -234,6 +234,27 @@ class Mdf2:
                 return tb
         raise ValueError(f"material {material_name!r} not found")
 
+    def set_texture(self, material_name, texture_type, texture_path=None,
+                    default_path="Null.tex"):
+        """新增或修改某材质的贴图槽(按 type 名匹配; 已存在则改路径, 否则新增)。
+
+        绑定键 = type 名(需与 mmtr header 的池名一致); path 为空则用 default_path 占位。
+        占位路径无需真实存在(只为让槽位成立)。
+        """
+        path = texture_path or default_path
+        for mat in self.materials:
+            if mat.name == material_name:
+                for tb in mat.textures:
+                    if tb.texture_type == texture_type:
+                        tb.texture_path = path
+                        return tb
+                tb = TextureBinding()
+                tb.texture_type = texture_type
+                tb.texture_path = path
+                mat.textures.append(tb)
+                return tb
+        raise ValueError(f"material {material_name!r} not found")
+
     def save(self, path: str):
         """写入 mdf2(重排所有偏移 + 重算 hash)。version<19 的布局。"""
         ver = self.game_version

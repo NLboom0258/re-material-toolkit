@@ -9,6 +9,7 @@
   python material_toolkit.py tex-list   <in.mmtr> <blob_idx>
   python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] -o <out.mmtr>
   python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
+  python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
@@ -83,6 +84,15 @@ def main():
         open(out, "wb").write(nd)
         print(f"OK: rename t{slot} -> {new_name!r} (blob {blob_idx}) -> {out} "
               f"({len(data)} -> {len(nd)} bytes)")
+    elif cmd == "mdf2-set-texture":
+        src, mat_name, tex_type = a[0], a[1], a[2]
+        path = a[3] if len(a) > 3 and not a[3].startswith("-") else None
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mdf2.10"
+        nullp = a[a.index("--null") + 1] if "--null" in a else "Null.tex"
+        mf = Mdf2.load(src)
+        tb = mf.set_texture(mat_name, tex_type, path, default_path=nullp)
+        n = mf.save(out)
+        print(f"OK: {mat_name} texture {tex_type!r} -> {tb.texture_path!r} -> {out} ({n} bytes)")
     else:
         print(__doc__)
 
