@@ -186,38 +186,53 @@ def _tex_indices(data, desc, type_=TYPE_TEX2D, window=12):
 
 
 def add_texture_slot(data: bytes, blob_idx: int, name: str, slot=None,
-                     type_=TYPE_TEX2D, stage=STAGE_PS, reuse_name=True):
+                     type_=TYPE_TEX2D, stage=STAGE_PS, reuse_name=True, rdef=True):
     """给指定 blob 的**所有**绑定组新增一个纹理槽, 返回新文件 bytes。
 
     name: 池名(绑定键)。若 mmtr 内已存在则原地复用; 否则追加到字符串区末尾。
     slot: t 序号; None=取各组"最后一个 texture2d"之后的下一个。
+    rdef: True(默认)同时对**目标 blob 的 RDEF** 加同名 bound resource
+          (缺它则 SHEX/RDEF 不一致 → D3DReflect 非法 → 材质黑)。
     """
     data = bytes(data)
     bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
-        raise ValueError(f"blob idx out of range")
+        raise ValueError("blob idx out of range")
     blob_off = bl[blob_idx][0]
     groups = discover_groups(data, blob_off)
     if not groups:
         raise ValueError(f"no binding group found for blob {blob_idx}")
+
+    # 新槽 slot: 取各组"已有 texture2d 最大 slot + 1"的最大值(各组应一致)
+    if slot is None:
+        slot = max(max((_u32(data, desc + 4 + i * 8) & 0xffff)
+                       for i in _tex_indices(data, desc)) + 1
+                   for (desc, pool) in groups)
+
+    # 先改 RDEF(目标 blob), 再放回(blob 变长 -> 重映射头部引用)
+    if rdef:
+        from .rdef import add_bound_resource, replace_blob
+        blob_size = bl[blob_idx][1]
+        new_blob = add_bound_resource(data[blob_off:blob_off + blob_size], name, slot, type_=type_)
+        data = replace_blob(data, blob_idx, new_blob)
+        bs, bl = blob_list(data)
+        blob_off = bl[blob_idx][0]
+        groups = discover_groups(data, blob_off)
 
     found = data.find(name.encode("ascii") + b"\x00", 0, bs)
     append = (found < 0) or (not reuse_name)
     hash_ = ascii_hash(name)
     name_bytes = name.encode("ascii") + b"\x00" if append else b""
 
-    # 各组插入点(池/描述符同索引) + 该组新槽 slot 值; 同一数组可能被多组共用 -> 按偏移去重
+    # 各组插入点(池/描述符同索引); 同一数组可能被多组共用 -> 按偏移去重
     pool_ins, desc_ins = {}, {}
     for (desc, pool), recs in groups.items():
         idxs = _tex_indices(data, desc)
         if not idxs:
             raise ValueError(f"no texture2d desc@0x{desc:x}")
         idx = idxs[-1] + 1
-        # 新槽 slot = 已有纹理的最大 slot + 1(描述符数组下标 != slot 值, 故不能直接用 idx)
-        max_slot = max((_u32(data, desc + 4 + i * 8) & 0xffff) for i in idxs)
-        slot_v = slot if slot is not None else (max_slot + 1)
-        pool_ins.setdefault(pool + idx * 16, slot_v)
-        desc_ins.setdefault(desc + 4 + idx * 8, slot_v)
+        pool_ins.setdefault(pool + idx * 16, slot)
+        desc_ins.setdefault(desc + 4 + idx * 8, slot)
 
     # 新名字落位(考虑插入造成的位移)
     sizes = [(o, 16) for o in pool_ins] + [(o, 8) for o in desc_ins]

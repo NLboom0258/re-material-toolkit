@@ -7,7 +7,7 @@
   python material_toolkit.py mmtr-add-param <in.mmtr> <cbuffer> <name> <size> <offset> -o <out.mmtr>
   python material_toolkit.py sync <in.mmtr> <in.mdf2> -o <out.mdf2> [--cbuffer UserMaterial] [--prune]
   python material_toolkit.py tex-list   <in.mmtr> <blob_idx>
-  python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] -o <out.mmtr>
+  python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] [--no-rdef] -o <out.mmtr>
   python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
 
@@ -71,11 +71,13 @@ def main():
     elif cmd == "tex-add":
         src, blob_idx, name = a[0], int(a[1]), a[2]
         slot = int(a[a.index("--slot") + 1]) if "--slot" in a else None
+        rdef = "--no-rdef" not in a
         out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
         data = open(src, "rb").read()
-        nd = add_texture_slot(data, blob_idx, name, slot=slot)
+        nd = add_texture_slot(data, blob_idx, name, slot=slot, rdef=rdef)
         open(out, "wb").write(nd)
-        print(f"OK: +tex {name!r} (blob {blob_idx}) -> {out} ({len(data)} -> {len(nd)} bytes)")
+        print(f"OK: +tex {name!r} (blob {blob_idx}, rdef={rdef}) -> {out} "
+              f"({len(data)} -> {len(nd)} bytes)")
     elif cmd == "tex-rename":
         src, blob_idx, slot, new_name = a[0], int(a[1]), int(a[2]), a[3]
         out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
