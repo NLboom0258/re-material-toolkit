@@ -6,10 +6,15 @@
   python material_toolkit.py mmtr-dump    <file.mmtr>
   python material_toolkit.py mmtr-add-param <in.mmtr> <cbuffer> <name> <size> <offset> -o <out.mmtr>
   python material_toolkit.py sync <in.mmtr> <in.mdf2> -o <out.mdf2> [--cbuffer UserMaterial] [--prune]
+  python material_toolkit.py tex-list   <in.mmtr> <blob_idx>
+  python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] -o <out.mmtr>
+  python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
   - sync 同步层见 lib/sync.py(mdf2 参数集合跟随 mmtr);
+  - 纹理槽(资源绑定)见 lib/binding.py: 自动对该 blob 的**所有**绑定组操作
+    (同一 shader 有多组"池+描述符", 必须全做); 绑定键=header 池名。
   - hash = murmur3(名字, 0xFFFFFFFF),见 lib/hashes.py。
 """
 import os, sys
@@ -19,6 +24,7 @@ sys.path.insert(0, HERE)
 from lib.mdf2 import Mdf2      # noqa: E402
 from lib.mmtr import Mmtr      # noqa: E402
 from lib.sync import sync_mdf2  # noqa: E402
+from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E402
 
 
 def main():
@@ -52,6 +58,31 @@ def main():
         for mat_name, new_names in report:
             if new_names:
                 print(f"  {mat_name}: +{', '.join(new_names)}")
+    elif cmd == "tex-list":
+        data = open(a[0], "rb").read()
+        tyname = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler", 0xff: "cbuffer"}
+        for gi, g in enumerate(group_summary(data, int(a[1]))):
+            print(f"group[{gi}] desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
+                  f"n_rec={g['n_rec']} a4={g['a4']} ac={g['ac']} b8={g['b8']} cc={g['cc']}")
+            for s in g["srvs"]:
+                tn = tyname.get(s["type"], f"0x{s['type']:02x}")
+                print(f"    [{s['idx']}] t{s['slot']:<3} {tn:<7} {s['name']:<40} 0x{s['hash']:08x}")
+    elif cmd == "tex-add":
+        src, blob_idx, name = a[0], int(a[1]), a[2]
+        slot = int(a[a.index("--slot") + 1]) if "--slot" in a else None
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
+        data = open(src, "rb").read()
+        nd = add_texture_slot(data, blob_idx, name, slot=slot)
+        open(out, "wb").write(nd)
+        print(f"OK: +tex {name!r} (blob {blob_idx}) -> {out} ({len(data)} -> {len(nd)} bytes)")
+    elif cmd == "tex-rename":
+        src, blob_idx, slot, new_name = a[0], int(a[1]), int(a[2]), a[3]
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
+        data = open(src, "rb").read()
+        nd = rename_slot(data, blob_idx, slot, new_name)
+        open(out, "wb").write(nd)
+        print(f"OK: rename t{slot} -> {new_name!r} (blob {blob_idx}) -> {out} "
+              f"({len(data)} -> {len(nd)} bytes)")
     else:
         print(__doc__)
 
