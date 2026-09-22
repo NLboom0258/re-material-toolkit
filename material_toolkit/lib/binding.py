@@ -160,12 +160,15 @@ def _splice_and_remap(data, inserts):
     return bytes(out)
 
 
-def _inc_count(buf, blob_off, fields=(0xa4, 0xb8, 0xcc)):
-    """对 u32(p)==blob_off 的记录计数 +1(就地, 在 splice 之前调用)。"""
+def _inc_count(buf, blob_off, fields=(0xa4, 0xb8, 0xcc), recs_only=None):
+    """对 u32(p)==blob_off 的记录计数 +1(就地, 在 splice 之前调用)。
+
+    recs_only: 若非 None, 只对其中包含的记录偏移 +1(逐组实验用)。
+    """
     bs = _u32(buf, 8)
     n = 0
     for p in range(0, bs - 3, 4):
-        if _u32(buf, p) == blob_off:
+        if _u32(buf, p) == blob_off and (recs_only is None or p in recs_only):
             for fo in fields:
                 struct.pack_into("<I", buf, p + fo, _u32(buf, p + fo) + 1)
             n += 1
@@ -186,13 +189,16 @@ def _tex_indices(data, desc, type_=TYPE_TEX2D, window=12):
 
 
 def add_texture_slot(data: bytes, blob_idx: int, name: str, slot=None,
-                     type_=TYPE_TEX2D, stage=STAGE_PS, reuse_name=True, rdef=True):
-    """给指定 blob 的**所有**绑定组新增一个纹理槽, 返回新文件 bytes。
+                     type_=TYPE_TEX2D, stage=STAGE_PS, reuse_name=True, rdef=True,
+                     only_indices=None):
+    """给指定 blob 的绑定组新增一个纹理槽, 返回新文件 bytes。
 
     name: 池名(绑定键)。若 mmtr 内已存在则原地复用; 否则追加到字符串区末尾。
     slot: t 序号; None=取各组"最后一个 texture2d"之后的下一个。
     rdef: True(默认)同时对**目标 blob 的 RDEF** 加同名 bound resource
           (缺它则 SHEX/RDEF 不一致 → D3DReflect 非法 → 材质黑)。
+    only_indices: None=所有组(默认, 面向引擎"多组须一致"); 或指定"按池偏移排序后的
+          组下标"子集(逐组实验用, 只改某几组; 计数也只对所选组的记录 +1)。
     """
     data = bytes(data)
     bs, bl = blob_list(data)
@@ -202,6 +208,13 @@ def add_texture_slot(data: bytes, blob_idx: int, name: str, slot=None,
     groups = discover_groups(data, blob_off)
     if not groups:
         raise ValueError(f"no binding group found for blob {blob_idx}")
+    sel = None
+    if only_indices is not None:
+        sel = set(only_indices)
+        ordered = sorted(groups.items(), key=lambda kv: kv[0][1])
+        groups = dict(ordered[i] for i in range(len(ordered)) if i in sel)
+        if not groups:
+            raise ValueError(f"only_indices {sorted(sel)} select no group (have {len(ordered)})")
 
     # 新槽 slot: 取各组"已有 texture2d 最大 slot + 1"的最大值(各组应一致)
     if slot is None:
@@ -218,6 +231,9 @@ def add_texture_slot(data: bytes, blob_idx: int, name: str, slot=None,
         bs, bl = blob_list(data)
         blob_off = bl[blob_idx][0]
         groups = discover_groups(data, blob_off)
+        if sel is not None:
+            ordered = sorted(groups.items(), key=lambda kv: kv[0][1])
+            groups = dict(ordered[i] for i in range(len(ordered)) if i in sel)
 
     found = data.find(name.encode("ascii") + b"\x00", 0, bs)
     append = (found < 0) or (not reuse_name)
@@ -251,9 +267,10 @@ def add_texture_slot(data: bytes, blob_idx: int, name: str, slot=None,
     if append:
         inserts.append((bs, name_bytes))
 
-    # 先落计数(在 splice 之前, 此时记录还在原偏移)
+    # 先落计数(在 splice 之前, 此时记录还在原偏移); 只对"所选组"的记录 +1
+    target_recs = set(p for recs in groups.values() for p in recs)
     counted = bytearray(data)
-    _inc_count(counted, blob_off)
+    _inc_count(counted, blob_off, recs_only=target_recs)
     out = _splice_and_remap(bytes(counted), inserts)
     return bytes(out)
 
