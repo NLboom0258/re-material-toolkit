@@ -1,1 +1,1 @@
-"""material_toolkit 内部库。"""
+"""material_toolkit.lib: 核心读写库(hashes/mdf2/mmtr/sync/binding/rdef/mmtr_info)。"""
