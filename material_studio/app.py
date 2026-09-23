@@ -5,7 +5,8 @@
 (binding / rdef / mdf2 / mmtr / mmtr_info)。将来换 UI 或升级为更完整的编辑器时, 逻辑不动。
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
-- MMTR 页: 左=Blob 列表; 右标签 = 「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
+- MMTR 页: **多文件标签页**(每文件一页, 可关闭/拖动; 右上「打开 mmtr…」; 无法从0新建, 故空时显示不可关闭的「(未打开)」占位页);
+  每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
 - MDF2 页: **多文件标签页**(每文件一页, 可关闭/拖动, 右上「＋」新建空文件, 关掉最后一个自动补空文件);
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QStyleOptionViewItem, QTabBar, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -304,14 +305,21 @@ def relayout_offsets(mat):
 
 
 class MmtrPanel(QWidget):
-    """mmtr 检视/编辑面板。"""
+    """mmtr 检视/编辑面板(单个文件)。
 
-    def __init__(self):
+    由 MmtrTabs 承载时传入 container: 「打开 mmtr」改为在容器里新开标签页,
+    文件路径变化经 title_changed 通知容器刷新标签文字。
+    """
+
+    title_changed = Signal(str)
+
+    def __init__(self, container=None):
         super().__init__()
         self.data = None            # 当前 mmtr bytes
         self.path = None
         self.mmtr = None            # Mmtr 对象(用于参数栏)
         self._um = []               # UserMaterial 成员缓存
+        self._container = container
 
         hb = QHBoxLayout()
         self.btn_open = QPushButton("打开 mmtr")
@@ -356,16 +364,28 @@ class MmtrPanel(QWidget):
                                self._commit_slot_rename))
 
     # ---- 打开 / 导出 ----
+    def doc_title(self):
+        """标签页标题: 已打开文件用文件名; 未加载用(未打开)。"""
+        return os.path.basename(self.path) if self.path else "(未打开)"
+
+    def _emit_title(self):
+        self.title_changed.emit(self.doc_title())
+
     def load_path(self, path):
         self.data = open(path, "rb").read()
         self.path = path
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
         self.refresh_blobs()
+        self._emit_title()
 
     def open_mmtr(self):
         p, _ = QFileDialog.getOpenFileName(self, "打开 mmtr", "", "mmtr (*.mmtr.*);;所有文件 (*)")
-        if p:
+        if not p:
+            return
+        if self._container is not None:
+            self._container.open_path(p)      # 容器接管: 每个文件一个新标签页
+        else:
             self.load_path(p)
 
     def export_mmtr(self):
@@ -600,6 +620,14 @@ class Mdf2Panel(QWidget):
         rowt.addWidget(self.cmb_shading)
         rowt.addStretch(1)
         mv.addLayout(rowt)
+        # MasterMaterial = 该材质引用的 mmtr 路径(MDF-Manager 的命名; 导出时进字符串表)
+        rowm = QHBoxLayout()
+        rowm.addWidget(QLabel("MasterMaterial (mmtr 路径)"))
+        self.ed_mmtr = QLineEdit()
+        self.ed_mmtr.setPlaceholderText("材质引用的 mmtr 路径(留空 = 无)")
+        self.ed_mmtr.editingFinished.connect(self._apply_mmtr_path)
+        rowm.addWidget(self.ed_mmtr, 1)
+        mv.addLayout(rowm)
         gb = QGroupBox("材质 flags")
         grid = QGridLayout(gb)
         self.flag_checks = {}
@@ -834,6 +862,9 @@ class Mdf2Panel(QWidget):
         self.cmb_shading.blockSignals(True)
         self.cmb_shading.setCurrentText(m.shading_type_name())
         self.cmb_shading.blockSignals(False)
+        self.ed_mmtr.blockSignals(True)
+        self.ed_mmtr.setText(m.mmtr_path or "")
+        self.ed_mmtr.blockSignals(False)
         d = m.flags_dict()
         for name, cb in self.flag_checks.items():
             cb.blockSignals(True)
@@ -851,6 +882,13 @@ class Mdf2Panel(QWidget):
         v = shading_type_value(name)
         if v is not None:
             m.shader_type = v
+
+    def _apply_mmtr_path(self):
+        """MasterMaterial 编辑: 写回材质引用的 mmtr 路径(导出时进字符串表)。"""
+        m = self._cur_material()
+        if m is None:
+            return
+        m.mmtr_path = self.ed_mmtr.text().strip()
 
     def _apply_flag(self, name, val):
         m = self._cur_material()
@@ -1049,6 +1087,88 @@ class Mdf2Panel(QWidget):
         _copy_to_clipboard(f"{ty} | {path}")
 
 
+class MmtrTabs(QTabWidget):
+    """MMTR 多文件容器: 每个打开的 mmtr 一个标签页。
+
+    - 标签可关闭 / 可拖动重排; 右上角「打开 mmtr…」;
+    - mmtr 无法从 0 新建(与 mdf2 不同), 故没有「＋新建」, 也不在启动时预建空文件;
+    - 无文件时显示一个不可关闭的「(未打开)」占位页, 避免"无内容且无处可点"。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.tabCloseRequested.connect(self._on_close)
+        corner = QPushButton("打开 mmtr…")
+        corner.setToolTip("打开一个 mmtr 文件(新标签页)")
+        corner.clicked.connect(self.open_dialog)
+        self.setCornerWidget(corner, Qt.TopRightCorner)
+        self._placeholder = None
+        self._ensure_placeholder()
+
+    def open_path(self, path):
+        """打开一个 mmtr 文件并新增标签页。"""
+        self._drop_placeholder()
+        panel = MmtrPanel(container=self)
+        panel.load_path(path)
+        return self._add_panel(panel)
+
+    def open_dialog(self):
+        p, _ = QFileDialog.getOpenFileName(self, "打开 mmtr", "", "mmtr (*.mmtr.*);;所有文件 (*)")
+        if p:
+            self.open_path(p)
+
+    def current_panel(self):
+        w = self.currentWidget()
+        return w if isinstance(w, MmtrPanel) else None
+
+    def _add_panel(self, panel):
+        panel.title_changed.connect(lambda _t, p=panel: self._on_title(p))
+        idx = self.addTab(panel, panel.doc_title())
+        self.setTabToolTip(idx, panel.path or panel.doc_title())
+        self.setCurrentIndex(idx)
+        return panel
+
+    def _on_title(self, panel):
+        i = self.indexOf(panel)
+        if i >= 0:
+            self.setTabText(i, panel.doc_title())
+            self.setTabToolTip(i, panel.path or panel.doc_title())
+
+    def _on_close(self, index):
+        w = self.widget(index)
+        self.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+        self._ensure_placeholder()      # 关掉最后一个 -> 回到占位页
+
+    def _ensure_placeholder(self):
+        if self._placeholder is not None or self.count() > 0:
+            return
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addStretch(1)
+        lab = QLabel("尚未打开 mmtr。\n点击右上角「打开 mmtr…」，或把 .mmtr 文件拖进窗口。")
+        lab.setAlignment(Qt.AlignCenter)
+        lab.setStyleSheet("color:#888;")
+        v.addWidget(lab)
+        v.addStretch(1)
+        self._placeholder = w
+        idx = self.addTab(w, "(未打开)")
+        self.tabBar().setTabButton(idx, QTabBar.RightSide, None)   # 占位页不可关闭
+        self.setCurrentIndex(idx)
+
+    def _drop_placeholder(self):
+        if self._placeholder is None:
+            return
+        i = self.indexOf(self._placeholder)
+        if i >= 0:
+            self.removeTab(i)
+        self._placeholder = None
+
+
 class Mdf2Tabs(QTabWidget):
     """MDF2 多文件容器: 每个打开的文件一个标签页。
 
@@ -1121,7 +1241,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Material Studio — mmtr / mdf2")
         self.resize(1150, 720)
         tabs = QTabWidget()
-        self.mmtr = MmtrPanel()
+        self.mmtr = MmtrTabs()
         self.mdf2 = Mdf2Tabs()
         tabs.addTab(self.mmtr, "MMTR")
         tabs.addTab(self.mdf2, "MDF2")
@@ -1133,7 +1253,7 @@ class MainWindow(QMainWindow):
         if ".mdf2." in path.lower():
             self.mdf2.open_path(path)
         else:
-            self.mmtr.load_path(path)
+            self.mmtr.open_path(path)
 
     # ---- 拖拽导入(支持多文件): mmtr -> MMTR 页, mdf2 -> MDF2 页(每文件一个标签页) ----
     def dragEnterEvent(self, e):
@@ -1145,7 +1265,8 @@ class MainWindow(QMainWindow):
         mmtr = [p for p in paths if ".mmtr." in p.lower()]
         mdf2 = [p for p in paths if ".mdf2." in p.lower()]
         if mmtr:
-            self.mmtr.load_path(mmtr[0])
+            for p in mmtr:
+                self.mmtr.open_path(p)
             self.tabs.setCurrentIndex(0)
         if mdf2:
             for p in mdf2:
@@ -1180,12 +1301,13 @@ def main(argv):
     if selftest:
         if args:
             win.open_file(args[0])
-            win.mmtr.tree_blob.setCurrentItem(win.mmtr.tree_blob.topLevelItem(33))
-            win.mmtr.refresh_detail()
-            print("blobs:", win.mmtr.tree_blob.topLevelItemCount())
-            print("UserMaterial 参数:", win.mmtr.tree_param.topLevelItemCount())
-            for i in range(win.mmtr.tree_grp.topLevelItemCount()):
-                top = win.mmtr.tree_grp.topLevelItem(i)
+            mp = win.mmtr.current_panel()
+            mp.tree_blob.setCurrentItem(mp.tree_blob.topLevelItem(33))
+            mp.refresh_detail()
+            print("blobs:", mp.tree_blob.topLevelItemCount())
+            print("UserMaterial 参数:", mp.tree_param.topLevelItemCount())
+            for i in range(mp.tree_grp.topLevelItemCount()):
+                top = mp.tree_grp.topLevelItem(i)
                 print("  ", top.text(0), "|", top.text(1))
         print("selftest OK")
         return 0
@@ -1199,10 +1321,11 @@ def main(argv):
             win.tabs.setCurrentIndex(1)
             panel = win.mdf2.current_panel()
         else:
-            panel = win.mmtr
-            if args and panel.tree_blob.topLevelItemCount() > 33:
+            panel = win.mmtr.current_panel()
+            if panel is not None and panel.tree_blob.topLevelItemCount() > 33:
                 panel.tree_blob.setCurrentItem(panel.tree_blob.topLevelItem(33))
-        panel.tabs.setCurrentIndex(1 if pane == "param" else 0)
+        if panel is not None:
+            panel.tabs.setCurrentIndex({"param": 1, "props": 2}.get(pane, 0))
         win.show()
         for _ in range(3):
             app.processEvents()
