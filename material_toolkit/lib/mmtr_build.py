@@ -152,8 +152,25 @@ class MmtrImage:
         off = self.blob_start
         i = 0
         while i + 4 <= len(b) and b[i:i + 4] == b"DXBC":
-            sz = _u32(b, i + 24)
+            sz = _u32(b, i + 4 * 6)  # +0x18=size
             out[off] = sz
             off += sz
             i += sz
         return out
+
+    # ---- 程序指针批量编辑 ----
+    def slots_using(self, blob_off, role="PS"):
+        """返回程序指针指向 blob_off 的槽下标列表。"""
+        return [s for s in range(REC_N)
+                if any(self.rec_field(s, fo) == blob_off for fo in ROLE_FIELDS[role])]
+
+    def repoint_program(self, src_off, dst_off, role="PS", size=None):
+        """把所有该角色指向 src_off 的槽改为指向 dst_off; 返回改动槽数。
+
+        注: 目标须与源"资源布局同构"(否则槽的绑定组会对不上)。
+        """
+        n = 0
+        for s in self.slots_using(src_off, role):
+            self.set_program(s, role, dst_off, size=size)
+            n += 1
+        return n
