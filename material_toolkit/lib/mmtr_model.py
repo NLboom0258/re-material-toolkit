@@ -119,7 +119,7 @@ class VariantRecord:
     __slots__ = ("off", "blob_off", "blob_size", "name_ptr", "name",
                  "cs_blob", "vs_blob", "vs_blob2", "aux_ptrs", "vm_ptr",
                  "count_total", "count_cb", "count_smp_hi", "count_srv",
-                 "count_smp_cb", "cb", "smp", "tex")
+                 "count_smp_cb", "count_srv2", "cb", "smp", "tex")
 
     def __init__(self, data, off):
         u32 = lambda o: _u32(data, o)
@@ -138,6 +138,7 @@ class VariantRecord:
         self.count_smp_hi = u32(off + REC_OFF_CNT_SMP_HI)
         self.count_srv = u32(off + REC_OFF_CNT_SRV)
         self.count_smp_cb = u32(off + REC_OFF_CNT_SMP_CB)
+        self.count_srv2 = u32(off + REC_OFF_CNT_SRV2)
         self.cb = (u32(off + REC_OFF_CB_DESC), u32(off + REC_OFF_CB_POOL))
         self.smp = (u32(off + REC_OFF_SMP_DESC), u32(off + REC_OFF_SMP_POOL))
         self.tex = (u32(off + REC_OFF_TEX_DESC), u32(off + REC_OFF_TEX_POOL))
@@ -428,6 +429,66 @@ class MmtrModel:
         print(f"  program blobs: PS={s['ps_blobs']} VS={s['vs_blobs']} CS={s['cs_blobs']}")
         print(f"  string_ptr(+0x10) -> {s['string_ptr_name']!r}")
         print(f"  program_table: {s['program_table']}")
+
+    # ---- 一致性校验(编辑后自检, 无需进游戏) ----
+    def _check_pool(self, pool, count, label, rec_i, issues):
+        """校验名称池前 count 条条目的 hash 与名字一致(池坏/指针错会在此暴露)。"""
+        if not pool or not (1 <= count <= 64):
+            return
+        from .hashes import ascii_hash
+        data = self.data
+        for k in range(count):
+            off = pool + k * 16
+            if off + 16 > len(data):
+                issues.append(f"rec[{rec_i}] {label} 池条目越界 @0x{off:x}")
+                return
+            name_off = _u64(data, off)
+            h = _u32(data, off + 8)
+            if not (0x1000 <= name_off < self.blob_start):
+                issues.append(f"rec[{rec_i}] {label} 池[{k}] name_off=0x{name_off:x} 越界")
+                return
+            nm = _str(data, name_off)
+            if not nm or ascii_hash(nm) != h:
+                issues.append(f"rec[{rec_i}] {label} 池[{k}] hash 与名字不符 "
+                              f"({nm!r}/0x{h:08x})")
+                return
+
+    def validate(self):
+        """头部一致性校验; 返回问题列表(空=自洽)。用于任何编辑后的离线自检。
+
+        覆盖: blob 连续性、记录程序指针有效性、`+0x9c` 与 PS 实际大小一致
+        (捕获“按值重映射”类地雷)、名字指针/名称池 hash。
+        """
+        issues = []
+        data = self.data
+        size_of = {o: s for o, s in self.blobs}
+
+        # 1) blob 区应连续到期文件尾
+        if self.blobs:
+            end = self.blobs[-1][0] + self.blobs[-1][1]
+            if end != len(data):
+                issues.append(f"blob 区未到文件尾: last_end=0x{end:x} 文件大小=0x{len(data):x}")
+
+        # 2) 逐记录: 程序指针有效 + +0x9c 与 PS 实际大小一致 + 名字指针
+        for i, r in enumerate(self.parse_records()):
+            if r.blob_off and not r.name:
+                continue  # 末条哨兵记录(有 blob 无名字), 字段非程序指针, 跳过
+            if r.blob_off:
+                if r.blob_off not in size_of:
+                    issues.append(f"rec[{i}] {r.name!r}: PS blob 0x{r.blob_off:x} 非有效 blob")
+                elif r.blob_size != size_of[r.blob_off]:
+                    issues.append(f"rec[{i}] {r.name!r}: +0x9c=0x{r.blob_size:x} != PS 实际大小 "
+                                  f"0x{size_of[r.blob_off]:x}(误改大小地雷?)")
+            for nm, o in (("VS", r.vs_blob), ("VS2", r.vs_blob2), ("CS", r.cs_blob)):
+                if o and o not in size_of:
+                    issues.append(f"rec[{i}] {r.name!r}: {nm} blob 0x{o:x} 非有效 blob")
+            if r.name_ptr and not (0x1000 <= r.name_ptr < self.blob_start):
+                issues.append(f"rec[{i}]: 名字指针 0x{r.name_ptr:x} 越界")
+
+            # 3) 名称池 hash(纹理池长度取 +0xcc)
+            self._check_pool(r.tex[1], r.count_srv2, "tex", i, issues)
+
+        return issues
 
 
 if __name__ == "__main__":

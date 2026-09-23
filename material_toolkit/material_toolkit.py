@@ -11,6 +11,7 @@
   python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
+  python material_toolkit.py model-verify <in.mmtr>
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
@@ -117,6 +118,18 @@ def main():
         if "--variants" in a:
             for r in m.iter_records():
                 print(f"    {r.name:40s} blob=0x{r.blob_off:x} sz={r.blob_size}")
+    elif cmd == "model-verify":
+        m = MmtrModel.load(a[0])
+        issues = m.validate()
+        if not issues:
+            print(f"OK: {a[0]} 头部自洽")
+        else:
+            print(f"发现问题 {len(issues)} 处:")
+            for s in issues[:50]:
+                print("  -", s)
+            if len(issues) > 50:
+                print(f"  ...(共 {len(issues)})")
+            sys.exit(1)
     else:
         print(__doc__)
 
