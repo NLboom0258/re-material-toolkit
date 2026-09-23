@@ -6,7 +6,8 @@
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
 - MMTR 页: 左=Blob 列表; 右标签 = 「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
-- MDF2 页: 左=材质列表; 右标签 = 「贴图槽」(type 双击改名 / 路径常驻输入框 / 增·删) / 「材质参数」(名字可双击改名·类型·值可编辑)。
+- MDF2 页: **多文件标签页**(每文件一页, 可关闭/拖动, 右上「＋」新建空文件, 关掉最后一个自动补空文件);
+  每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
 MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/float4 额外带**颜色块**(点击取色)。
 
@@ -34,7 +35,7 @@ from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
 )
 
-from PySide6.QtCore import Qt, QTimer  # noqa: E402
+from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
@@ -548,19 +549,25 @@ class MmtrPanel(QWidget):
 
 
 class Mdf2Panel(QWidget):
-    """mdf2 检视/编辑面板。"""
+    """mdf2 检视/编辑面板(单个文件)。
 
-    def __init__(self):
+    由 Mdf2Tabs 承载时传入 container: 「打开 mdf2」改为在容器里新开标签页,
+    文件路径/标题变化经 title_changed 通知容器刷新标签文字。
+    """
+
+    title_changed = Signal(str)
+
+    def __init__(self, container=None):
         super().__init__()
         self.obj = None
         self.path = None
+        self._container = container
 
         hb = QHBoxLayout()
-        self.btn_new = QPushButton("新建 mdf2")
         self.btn_open = QPushButton("打开 mdf2")
         self.btn_set = QPushButton("设置/新增贴图槽")
         self.btn_exp = QPushButton("导出 mdf2")
-        for b in (self.btn_new, self.btn_open, self.btn_set, self.btn_exp):
+        for b in (self.btn_open, self.btn_set, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
 
@@ -645,7 +652,6 @@ class Mdf2Panel(QWidget):
         lay.addWidget(split, 1)
 
         self.btn_open.clicked.connect(self.open_mdf2)
-        self.btn_new.clicked.connect(self.new_mdf2)
         self.btn_set.clicked.connect(self.set_texture)
         self.btn_exp.clicked.connect(self.export_mdf2)
         self.tree_mat.currentItemChanged.connect(lambda *_: self.refresh_detail())
@@ -653,21 +659,34 @@ class Mdf2Panel(QWidget):
         attach_menu(self.tree_tex, self._menu_tex)
         attach_menu(self.tree_param, self._menu_param)
 
+    def doc_title(self):
+        """标签页标题: 已打开文件用文件名; 未命名(新建)用 NewMDF2.mdf2.10。"""
+        return os.path.basename(self.path) if self.path else "NewMDF2.mdf2.10"
+
+    def _emit_title(self):
+        self.title_changed.emit(self.doc_title())
+
     def load_path(self, path):
         self.obj = Mdf2.load(path)
         self.path = path
         self.refresh_mats()
+        self._emit_title()
 
     def open_mdf2(self):
         p, _ = QFileDialog.getOpenFileName(self, "打开 mdf2", "", "mdf2 (*.mdf2.*);;所有文件 (*)")
-        if p:
+        if not p:
+            return
+        if self._container is not None:
+            self._container.open_path(p)      # 容器接管: 每个文件一个新标签页
+        else:
             self.load_path(p)
 
-    def new_mdf2(self):
-        """从 0 新建一个空 mdf2(DMC5, version 10)。"""
+    def reset_new(self):
+        """把本面板重置为一个空的 mdf2(DMC5, version 10)。"""
         self.obj = Mdf2.new(10)
         self.path = None
         self.refresh_mats()
+        self._emit_title()
 
     def refresh_mats(self):
         keep = self.cur_mat()
@@ -728,6 +747,9 @@ class Mdf2Panel(QWidget):
             return
         relayout_offsets(m)   # 让 offset 显示与实际导出一致(新参数不再显示 0)
         names = [n for n, _ in PARAM_TYPES]
+        # 类型列宽度按"最长的类型名"算(如 float4x4), 避免固定宽度截断长名
+        fm = self.tree_param.fontMetrics()
+        type_w = max(fm.horizontalAdvance(n) for n in names) + 36   # 文字 + 下拉箭头/内边距
         for pr in m.properties:
             it = QTreeWidgetItem([pr.name, "", "", f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
@@ -736,7 +758,7 @@ class Mdf2Panel(QWidget):
             # 类型列: 常驻下拉(改类型 = 改值个数)
             cb = QComboBox()
             cb.addItems(names)
-            cb.setFixedWidth(84)
+            cb.setMinimumWidth(type_w)
             if pr.type in names:
                 cb.setCurrentText(pr.type)
             cb.currentTextChanged.connect(
@@ -744,7 +766,8 @@ class Mdf2Panel(QWidget):
             self.tree_param.setItemWidget(it, 1, cb)
             # 值列: 类型化控件(分量输入框; float3/4 带颜色块)
             self.tree_param.setItemWidget(it, 2, ValueEditor(pr))
-        fit_columns(self.tree_param, [0, 1, 3], pad=24, min_w=90, max_w=420)
+        fit_columns(self.tree_param, [0, 3], pad=24, min_w=90, max_w=420)
+        self.tree_param.setColumnWidth(1, type_w + 12)
         self.tree_param.setColumnWidth(2, 360)
 
     # ---- 材质级编辑(新增/删除/改名 + 着色类型/flags) ----
@@ -1026,6 +1049,72 @@ class Mdf2Panel(QWidget):
         _copy_to_clipboard(f"{ty} | {path}")
 
 
+class Mdf2Tabs(QTabWidget):
+    """MDF2 多文件容器: 每个打开的文件一个标签页。
+
+    - 标签可关闭 / 可拖动重排; 右上角「＋」新建空 mdf2;
+    - 关闭最后一个标签页后自动补一个空文件(不进入"无标签"状态);
+    - 启动默认开一个空文件(NewMDF2.mdf2.10)。
+    """
+
+    DEFAULT_TITLE = "NewMDF2.mdf2.10"
+
+    def __init__(self):
+        super().__init__()
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.tabCloseRequested.connect(self._on_close)
+        corner = QPushButton("＋")
+        corner.setToolTip("新建空 mdf2")
+        corner.setFixedSize(26, 22)
+        corner.clicked.connect(self.new_tab)
+        self.setCornerWidget(corner, Qt.TopRightCorner)
+        self.new_tab()      # 启动默认开一个空文件
+
+    def new_tab(self):
+        """新增一个空 mdf2 标签页。"""
+        panel = Mdf2Panel(container=self)
+        panel.reset_new()
+        return self._add_panel(panel)
+
+    def open_path(self, path):
+        """打开一个 mdf2 文件并新增标签页。"""
+        panel = Mdf2Panel(container=self)
+        panel.load_path(path)
+        return self._add_panel(panel)
+
+    def open_dialog(self):
+        p, _ = QFileDialog.getOpenFileName(self, "打开 mdf2", "", "mdf2 (*.mdf2.*);;所有文件 (*)")
+        if p:
+            self.open_path(p)
+
+    def current_panel(self):
+        w = self.currentWidget()
+        return w if isinstance(w, Mdf2Panel) else None
+
+    def _add_panel(self, panel):
+        panel.title_changed.connect(lambda _t, p=panel: self._on_title(p))
+        idx = self.addTab(panel, panel.doc_title())
+        self.setTabToolTip(idx, panel.path or self.DEFAULT_TITLE)
+        self.setCurrentIndex(idx)
+        return panel
+
+    def _on_title(self, panel):
+        i = self.indexOf(panel)
+        if i >= 0:
+            self.setTabText(i, panel.doc_title())
+            self.setTabToolTip(i, panel.path or panel.doc_title())
+
+    def _on_close(self, index):
+        w = self.widget(index)
+        self.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+        if self.count() == 0:      # 关掉最后一个 -> 自动补一个空文件
+            self.new_tab()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1033,7 +1122,7 @@ class MainWindow(QMainWindow):
         self.resize(1150, 720)
         tabs = QTabWidget()
         self.mmtr = MmtrPanel()
-        self.mdf2 = Mdf2Panel()
+        self.mdf2 = Mdf2Tabs()
         tabs.addTab(self.mmtr, "MMTR")
         tabs.addTab(self.mdf2, "MDF2")
         self.tabs = tabs
@@ -1042,11 +1131,11 @@ class MainWindow(QMainWindow):
 
     def open_file(self, path):
         if ".mdf2." in path.lower():
-            self.mdf2.load_path(path)
+            self.mdf2.open_path(path)
         else:
             self.mmtr.load_path(path)
 
-    # ---- 拖拽导入(支持多文件): mmtr -> MMTR 页, mdf2 -> MDF2 页 ----
+    # ---- 拖拽导入(支持多文件): mmtr -> MMTR 页, mdf2 -> MDF2 页(每文件一个标签页) ----
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
@@ -1059,7 +1148,8 @@ class MainWindow(QMainWindow):
             self.mmtr.load_path(mmtr[0])
             self.tabs.setCurrentIndex(0)
         if mdf2:
-            self.mdf2.load_path(mdf2[0])
+            for p in mdf2:
+                self.mdf2.open_path(p)
             if not mmtr:
                 self.tabs.setCurrentIndex(1)
         if mmtr or mdf2:
@@ -1107,7 +1197,7 @@ def main(argv):
         is_mdf2 = bool(args) and ".mdf2." in args[0].lower()
         if is_mdf2:
             win.tabs.setCurrentIndex(1)
-            panel = win.mdf2
+            panel = win.mdf2.current_panel()
         else:
             panel = win.mmtr
             if args and panel.tree_blob.topLevelItemCount() > 33:
