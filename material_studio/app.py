@@ -30,11 +30,12 @@ from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
 )
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QFileDialog, QHBoxLayout, QInputDialog, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout,
+    QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter,
+    QStyledItemDelegate, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 TYPENAME = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler", 0xFF: "cbuffer"}
@@ -105,6 +106,32 @@ def type_size(type_name):
         if n == type_name:
             return s
     return 4
+
+
+class TypeComboDelegate(QStyledItemDelegate):
+    """仅在指定列内联显示类型下拉(选中即提交); 其他列不提供编辑器。"""
+
+    def __init__(self, items, col=1, parent=None):
+        super().__init__(parent)
+        self.items = list(items)
+        self.col = col
+
+    def createEditor(self, parent, option, index):
+        if index.column() != self.col:
+            return None
+        cb = QComboBox(parent)
+        cb.addItems(self.items)
+        cb.textActivated.connect(
+            lambda _=None: (self.commitData.emit(cb), self.closeEditor.emit(cb)))
+        return cb
+
+    def setEditorData(self, editor, index):
+        i = editor.findText(index.data(Qt.EditRole) or "")
+        if i >= 0:
+            editor.setCurrentIndex(i)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.EditRole)
 
 
 def wrap_with_add_button(tree, text, slot):
@@ -375,6 +402,9 @@ class Mdf2Panel(QWidget):
         self.tree_tex.setHeaderLabels(["贴图槽(type)", "贴图路径"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "值", "offset"])
+        # 类型列内联下拉(双击该列即编辑); 其他列不可编辑
+        self.tree_param.setItemDelegate(
+            TypeComboDelegate([n for n, _ in PARAM_TYPES], col=1, parent=self.tree_param))
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_tex, "贴图槽")
@@ -398,6 +428,8 @@ class Mdf2Panel(QWidget):
         attach_menu(self.tree_mat, self._menu_mat)
         attach_menu(self.tree_tex, self._menu_tex)
         attach_menu(self.tree_param, self._menu_param)
+        self.tree_param.itemDoubleClicked.connect(self._edit_param_type)
+        self.tree_param.itemChanged.connect(self._on_param_item_changed)
 
     def load_path(self, path):
         self.obj = Mdf2.load(path)
@@ -457,6 +489,7 @@ class Mdf2Panel(QWidget):
             vals = ", ".join(f"{v:g}" for v in pr.values)
             it = QTreeWidgetItem([pr.name, pr.type, vals, f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
+            it.setFlags(it.flags() | Qt.ItemIsEditable)   # 允许“类型”列内联编辑
             self.tree_param.addTopLevelItem(it)
         fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=90, max_w=420)
 
@@ -586,6 +619,37 @@ class Mdf2Panel(QWidget):
         if ty is None:
             return
         pr.set_type(ty)
+        relayout_offsets(m)
+        self.refresh_detail()
+
+    def _edit_param_type(self, item, col):
+        """双击“类型”列 -> 内联下拉改类型。"""
+        if col != 1:
+            return
+        d = item.data(0, Qt.UserRole)
+        if d and d[0] == "param":
+            self.tree_param.editItem(item, 1)
+
+    def _on_param_item_changed(self, item, col):
+        if col != 1:
+            return
+        d = item.data(0, Qt.UserRole)
+        if not d or d[0] != "param":
+            return
+        # 延迟到信号处理后再应用(会重建树, 避免在信号中删掉 item)
+        QTimer.singleShot(0, lambda: self._apply_param_type(d[1], item.text(1)))
+
+    def _apply_param_type(self, name, new_ty):
+        m = self._cur_material()
+        if m is None:
+            return
+        pr = m.get_parameter(name)
+        if pr is None or pr.type == new_ty:
+            return
+        try:
+            pr.set_type(new_ty)
+        except ValueError:
+            return
         relayout_offsets(m)
         self.refresh_detail()
 
