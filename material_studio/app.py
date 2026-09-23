@@ -88,6 +88,47 @@ def _copy_to_clipboard(text):
     QApplication.clipboard().setText(text)
 
 
+PARAM_TYPES = [("float", 4), ("float2", 8), ("float3", 12), ("float4", 16),
+               ("float4x3", 48), ("float4x4", 64)]
+
+
+def pick_type_size(parent, title):
+    """下拉选择参数类型 - 返回字节大小(取消返回 None)。"""
+    items = [f"{n}  ({s} 字节)" for n, s in PARAM_TYPES]
+    choice, ok = QInputDialog.getItem(parent, title, "类型:", items, 0, False)
+    if not ok:
+        return None
+    return PARAM_TYPES[items.index(choice)][1]
+
+
+def wrap_with_add_button(tree, text, slot):
+    """把 tree 与下方一个“新增”按钮包成可放进标签页的 widget。"""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.addWidget(tree)
+    btn = QPushButton(text)
+    btn.clicked.connect(slot)
+    v.addWidget(btn)
+    return w
+
+
+def relayout_offsets(mat):
+    """按 cb_offset/顺序重算材质各参数的 data_offset(与 save 的口径一致)。
+
+    用于让“新参数”的 offset 显示正确(不再是一开始的 0), 且与实际导出一致。
+    """
+    off = 0
+    for pr in mat.properties:
+        if pr.cb_offset is not None:
+            pr.data_offset = pr.cb_offset
+            off = max(off, pr.cb_offset + pr.param_count * 4)
+        else:
+            pr.data_offset = off
+            off += pr.param_count * 4
+    mat.prop_block_size = off
+
+
 class MmtrPanel(QWidget):
     """mmtr 检视/编辑面板。"""
 
@@ -115,7 +156,8 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
-        self.tabs.addTab(self.tree_param, "材质参数")
+        self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
+                         "材质参数")
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tree_blob)
@@ -287,9 +329,8 @@ class MmtrPanel(QWidget):
         name, ok = QInputDialog.getText(self, "新增参数", "参数名(加入 UserMaterial):")
         if not (ok and name):
             return
-        size, ok = QInputDialog.getInt(self, "新增参数",
-                                       f"{name} 的字节大小(4=float, 16=float4):", 4, 1, 4096)
-        if not ok:
+        size = pick_type_size(self, "新增参数")
+        if size is None:
             return
         entries = self.mmtr._scan_cbuffer_entries("UserMaterial")
         offset = entries[0][3] if entries else 0   # 追加到现有成员之后
@@ -329,7 +370,8 @@ class Mdf2Panel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_tex, "贴图槽")
-        self.tabs.addTab(self.tree_param, "材质参数")
+        self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
+                         "材质参数")
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tree_mat)
@@ -402,6 +444,7 @@ class Mdf2Panel(QWidget):
         m = self._cur_material()
         if m is None:
             return
+        relayout_offsets(m)   # 让 offset 显示与实际导出一致(新参数不再显示 0)
         for pr in m.properties:
             vals = ", ".join(f"{v:g}" for v in pr.values)
             it = QTreeWidgetItem([pr.name, type_label(pr.param_count * 4), vals,
@@ -505,7 +548,13 @@ class Mdf2Panel(QWidget):
         name, ok = QInputDialog.getText(self, "新增参数", "参数名:")
         if not (ok and name):
             return
-        text, ok = QInputDialog.getText(self, "新增参数", "值(逗号/空格分隔, 如 1,1,1,1):")
+        size = pick_type_size(self, "新增参数")
+        if size is None:
+            return
+        count = max(1, size // 4)
+        default = ", ".join("0" for _ in range(count))
+        text, ok = QInputDialog.getText(self, "新增参数", f"值({count} 个, 逗号/空格分隔):",
+                                        text=default)
         if not ok:
             return
         try:
@@ -521,6 +570,8 @@ class Mdf2Panel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
+        for m in self.obj.materials:
+            relayout_offsets(m)
         self.refresh_detail()
 
     def _set_path(self, ty, old):
