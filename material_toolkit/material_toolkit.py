@@ -12,6 +12,7 @@
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
+  python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
@@ -30,6 +31,7 @@ from lib.mmtr import Mmtr      # noqa: E402
 from lib.sync import sync_mdf2  # noqa: E402
 from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E402
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
+from lib.mmtr_build import MmtrTemplate, content_count  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -145,6 +147,12 @@ def main():
             if len(issues) > 50:
                 print(f"  ...(共 {len(issues)})")
             sys.exit(1)
+    elif cmd == "model-skeleton":
+        out = a[a.index("-o") + 1] if "-o" in a else "skeleton.bin"
+        sk = MmtrTemplate.load(a[0]).skeleton
+        open(out, "wb").write(sk)
+        print(f"OK: 版本骨架 {len(sk)} 字节 -> {out} "
+              f"(内容字段 {content_count()} 字节已清零)")
     else:
         print(__doc__)
 
