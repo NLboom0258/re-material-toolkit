@@ -18,6 +18,14 @@
 """
 import struct
 
+try:
+    from .hashes import ascii_hash
+except ImportError:  # 允许脚本直接 import
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from hashes import ascii_hash
+
 SKELETON_HI = 0x46350
 
 HEAD_CONTENT_U32 = (0x08, 0x10)      # blob_start / 字符串指针
@@ -49,9 +57,28 @@ BINDING_FIELDS = (0x38, 0x40, 0x48, 0x50, 0x58, 0x60)
 COUNT_FIELDS = (0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xC4, 0xC8, 0xCC)
 SYNC_FIELDS = BINDING_FIELDS + COUNT_FIELDS
 
+# 变体记录内"指向 头/尾/blob 区"的指针字段(值 >= 插入点时需重映射)
+HEADER_REC_PTR_FIELDS = (0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+                         0x48, 0x50, 0x58, 0x60, 0xD8, 0xE0, 0xE8)
+# 名称池字段(16B 条目: [name_off(u64)][hash(u32)][0])
+POOL_FIELDS = (0x40, 0x50, 0x60)
+
 
 def _u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
+
+
+def _u64(b, o):
+    return struct.unpack_from("<Q", b, o)[0]
+
+
+def _ascii(b, off, n=64):
+    if not (0 <= off < len(b)):
+        return None
+    e = off
+    while e < len(b) and b[e] != 0 and e - off < n:
+        e += 1
+    return b[off:e].decode("latin1", "replace")
 
 
 def content_positions():
@@ -214,3 +241,112 @@ class MmtrImage:
             self.sync_binding_from(s, d, role=role, blob_off=dst_off, size=dst_size)
             n += 1
         return n, skip
+
+    # ---- 尾部插入 + 绝对偏移重映射 ----
+    def _remap_header(self, orig_head, pos, old_len, delta):
+        """重映射 header 里"已知结构"的指针字段(旧值>=pos 的 +=delta)。
+
+        old_len: 旧文件长度 (>= blob_start) —— 上界必须覆盖 blob 区(blob 偏移 >= blob_start)。
+        """
+        for slot in range(REC_N):
+            base = REC_LO + slot * REC_SIZE
+            for fo in HEADER_REC_PTR_FIELDS:
+                v = _u32(orig_head, base + fo)
+                if pos <= v < old_len:
+                    struct.pack_into("<I", self.buf, base + fo, v + delta)
+        for i in range(PT_N):
+            base = PT_LO + i * PT_SIZE
+            for fo in range(0, PT_SIZE, 4):
+                v = _u32(orig_head, base + fo)
+                if pos <= v < old_len:
+                    struct.pack_into("<I", self.buf, base + fo, v + delta)
+        v = _u32(orig_head, 0x10)
+        if pos <= v < old_len:
+            struct.pack_into("<I", self.buf, 0x10, v + delta)
+
+    def _remap_pools(self, orig_head, orig_tail, new_tail, orig_all, pos, old_bs, delta):
+        """重映射所有可识别名称池(16B 条目)的 name_off(旧值>=pos 的 +=delta)。"""
+        pools = set()
+        for slot in range(REC_N):
+            base = REC_LO + slot * REC_SIZE
+            for fo in POOL_FIELDS:
+                p = _u32(orig_head, base + fo)
+                if p:
+                    pools.add(p)
+        for P in pools:
+            k = 0
+            while True:
+                oe = P + k * 16
+                if oe + 16 > old_bs or oe < SKELETON_HI:
+                    break
+                i = oe - SKELETON_HI
+                no = _u64(orig_tail, i)
+                h = _u32(orig_tail, i + 8)
+                if not (SKELETON_HI <= no < old_bs):
+                    break
+                nm = _ascii(orig_all, no)
+                if not nm or ascii_hash(nm) != h:
+                    break
+                if no >= pos:
+                    ne = oe + (delta if oe >= pos else 0)
+                    struct.pack_into("<Q", new_tail, ne - SKELETON_HI, no + delta)
+                k += 1
+
+    def _remap_tables(self, orig_tail, new_tail, orig_all, pos, old_bs, delta):
+        """重映射 参数表(16B: name_off@0) 与 cbuffer 绑定表(32B: name_off@0, members_off@24)。"""
+        def newpos(oe):
+            return oe + (delta if oe >= pos else 0)
+
+        # 参数定义条目(16B): [name_off u32][0 u32][hash u32][size|offset u32]
+        for off in range(SKELETON_HI, old_bs - 16, 4):
+            i = off - SKELETON_HI
+            name_off = _u32(orig_tail, i)
+            if not (0x1000 <= name_off < old_bs) or _u32(orig_tail, i + 4) != 0:
+                continue
+            h = _u32(orig_tail, i + 8)
+            nm = _ascii(orig_all, name_off)
+            if not nm or ascii_hash(nm) != h or (_u32(orig_tail, i + 12) >> 16) == 0:
+                continue
+            if name_off >= pos:
+                struct.pack_into("<I", new_tail, newpos(off) - SKELETON_HI, name_off + delta)
+
+        # cbuffer 绑定条目(32B): name_off(u64)@0, members_off(u64)@24
+        for off in range(SKELETON_HI, old_bs - 32, 4):
+            i = off - SKELETON_HI
+            name_off = _u64(orig_tail, i)
+            if not (0x1000 <= name_off < old_bs):
+                continue
+            h = _u32(orig_tail, i + 8)
+            nm = _ascii(orig_all, name_off)
+            if not nm or ascii_hash(nm) != h:
+                continue
+            mo = _u64(orig_tail, i + 24)
+            if not (0x1000 < mo < old_bs) or _u32(orig_tail, mo - SKELETON_HI) < 0x1000:
+                continue
+            ne = newpos(off) - SKELETON_HI
+            if name_off >= pos:
+                struct.pack_into("<Q", new_tail, ne, name_off + delta)
+            if mo >= pos:
+                struct.pack_into("<Q", new_tail, ne + 24, mo + delta)
+
+    def insert_tail(self, pos, blob):
+        """在尾段绝对位置 pos 处插入 blob, 并重映射所有"已建模"的绝对偏移。
+
+        pos: 绝对偏移, 位于 [SKELETON_HI, blob_start]。
+        Note: 仅重映射"已知结构"的指针(记录指针字段 / 程序表 / 头串 / 名称池 name_off);
+             若尾段存在未建模的内部指针, 插入会破坏它(用"语义等价"验证自查)。
+        """
+        delta = len(blob)
+        orig_head = bytes(self.buf)
+        orig_tail = bytes(self.tail)
+        orig_all = orig_head + orig_tail
+        old_bs = len(orig_all)
+        if not (SKELETON_HI <= pos <= old_bs):
+            raise ValueError(f"pos 0x{pos:x} 不在尾段 [0x{SKELETON_HI:x},0x{old_bs:x}]")
+        t = pos - SKELETON_HI
+        new_tail = bytearray(orig_tail[:t] + bytes(blob) + orig_tail[t:])
+        old_len = old_bs + len(self.blobs)
+        self._remap_header(orig_head, pos, old_len, delta)
+        self._remap_pools(orig_head, orig_tail, new_tail, orig_all, pos, old_bs, delta)
+        self._remap_tables(orig_tail, new_tail, orig_all, pos, old_bs, delta)
+        self.tail = bytes(new_tail)
