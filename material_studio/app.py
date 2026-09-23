@@ -25,7 +25,10 @@ if ROOT not in sys.path:
 from tools.material_toolkit.lib.binding import (  # noqa: E402
     add_texture_slot, group_summary, rename_slot,
 )
-from tools.material_toolkit.lib.mdf2 import Mdf2, PARAM_TYPES  # noqa: E402
+from tools.material_toolkit.lib.mdf2 import (  # noqa: E402
+    Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
+    encode_material_flags, shading_type_value,
+)
 from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
@@ -34,9 +37,10 @@ from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
 from PySide6.QtCore import Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractSpinBox, QApplication, QComboBox, QColorDialog, QDoubleSpinBox,
-    QFileDialog, QHBoxLayout, QInputDialog, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QSplitter, QStyle, QStyledItemDelegate,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
+    QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -552,15 +556,20 @@ class Mdf2Panel(QWidget):
         self.path = None
 
         hb = QHBoxLayout()
+        self.btn_new = QPushButton("新建 mdf2")
         self.btn_open = QPushButton("打开 mdf2")
         self.btn_set = QPushButton("设置/新增贴图槽")
         self.btn_exp = QPushButton("导出 mdf2")
-        for b in (self.btn_open, self.btn_set, self.btn_exp):
+        for b in (self.btn_new, self.btn_open, self.btn_set, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
 
         self.tree_mat = QTreeWidget()
         self.tree_mat.setHeaderLabels(["材质"])
+        # 材质名双击内联改名
+        self.tree_mat.setItemDelegate(
+            InlineNameDelegate(self.tree_mat, 0, self._mat_name,
+                               self._commit_mat_rename))
         self.tree_tex = QTreeWidget()
         self.tree_tex.setHeaderLabels(["贴图槽(type)", "贴图路径"])
         # 贴图槽 type 双击内联改名
@@ -574,14 +583,59 @@ class Mdf2Panel(QWidget):
             InlineNameDelegate(self.tree_param, 0, self._param_name,
                                self._commit_param_rename))
 
+        # 材质属性页: 着色类型 + flags 位 + Tess/Phong
+        self.tab_matprops = QWidget()
+        mv = QVBoxLayout(self.tab_matprops)
+        rowt = QHBoxLayout()
+        rowt.addWidget(QLabel("着色类型 (shaderType)"))
+        self.cmb_shading = QComboBox()
+        self.cmb_shading.addItems([n for n, _ in SHADING_TYPES])
+        rowt.addWidget(self.cmb_shading)
+        rowt.addStretch(1)
+        mv.addLayout(rowt)
+        gb = QGroupBox("材质 flags")
+        grid = QGridLayout(gb)
+        self.flag_checks = {}
+        self.flag_spins = {}
+        ints = []
+        r = c = 0
+        for name, width in MATERIAL_FLAG_FIELDS:
+            if width == 1:
+                cb = QCheckBox(name)
+                cb.toggled.connect(lambda v, nm=name: self._apply_flag(nm, v))
+                self.flag_checks[name] = cb
+                grid.addWidget(cb, r, c)
+                c += 1
+                if c >= 3:
+                    c = 0
+                    r += 1
+            else:
+                ints.append((name, width))
+        if c != 0:
+            r += 1
+        for name, width in ints:
+            sp = QSpinBox()
+            sp.setRange(0, (1 << width) - 1)
+            sp.valueChanged.connect(lambda v, nm=name: self._apply_flag(nm, v))
+            self.flag_spins[name] = sp
+            grid.addWidget(QLabel(name), r, 0)
+            grid.addWidget(sp, r, 1)
+            r += 1
+        mv.addWidget(gb)
+        mv.addStretch(1)
+        self.cmb_shading.currentTextChanged.connect(self._apply_shading)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(wrap_with_add_button(self.tree_tex, "＋ 新增贴图槽", self.set_texture),
                          "贴图槽")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
+        self.tabs.addTab(self.tab_matprops, "材质属性")
 
+        self.tree_mat_wrap = wrap_with_add_button(self.tree_mat, "＋ 新增材质",
+                                                  self.add_material_gui)
         split = QSplitter(Qt.Horizontal)
-        split.addWidget(self.tree_mat)
+        split.addWidget(self.tree_mat_wrap)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
@@ -591,6 +645,7 @@ class Mdf2Panel(QWidget):
         lay.addWidget(split, 1)
 
         self.btn_open.clicked.connect(self.open_mdf2)
+        self.btn_new.clicked.connect(self.new_mdf2)
         self.btn_set.clicked.connect(self.set_texture)
         self.btn_exp.clicked.connect(self.export_mdf2)
         self.tree_mat.currentItemChanged.connect(lambda *_: self.refresh_detail())
@@ -608,15 +663,26 @@ class Mdf2Panel(QWidget):
         if p:
             self.load_path(p)
 
+    def new_mdf2(self):
+        """从 0 新建一个空 mdf2(DMC5, version 10)。"""
+        self.obj = Mdf2.new(10)
+        self.path = None
+        self.refresh_mats()
+
     def refresh_mats(self):
+        keep = self.cur_mat()
         self.tree_mat.clear()
         for m in self.obj.materials:
             it = QTreeWidgetItem([m.name])
             it.setData(0, Qt.UserRole, m.name)
+            it.setFlags(it.flags() | Qt.ItemIsEditable)   # 名可双击改名
             self.tree_mat.addTopLevelItem(it)
         fit_columns(self.tree_mat, [0], pad=24, min_w=120, max_w=280)
-        if self.tree_mat.topLevelItemCount():
-            self.tree_mat.setCurrentItem(self.tree_mat.topLevelItem(0))
+        n = self.tree_mat.topLevelItemCount()
+        if n:
+            names = [self.tree_mat.topLevelItem(i).text(0) for i in range(n)]
+            row = names.index(keep) if keep in names else 0
+            self.tree_mat.setCurrentItem(self.tree_mat.topLevelItem(row))
 
     def cur_mat(self):
         it = self.tree_mat.currentItem()
@@ -634,6 +700,7 @@ class Mdf2Panel(QWidget):
     def refresh_detail(self):
         self.refresh_tex()
         self.refresh_params()
+        self.refresh_mat_props()
 
     def refresh_tex(self):
         self.tree_tex.clear()
@@ -680,6 +747,96 @@ class Mdf2Panel(QWidget):
         fit_columns(self.tree_param, [0, 1, 3], pad=24, min_w=90, max_w=420)
         self.tree_param.setColumnWidth(2, 360)
 
+    # ---- 材质级编辑(新增/删除/改名 + 着色类型/flags) ----
+    def _mat_name(self, item):
+        return item.data(0, Qt.UserRole) if item else ""
+
+    def _commit_mat_rename(self, key, text):
+        if not key or not text or text == key or self.obj is None:
+            return
+        if self.obj.get_material(text) is not None:
+            QMessageBox.warning(self, "提示", f"已存在同名材质 {text!r}")
+            return
+        try:
+            self.obj.rename_material(key, text)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self.refresh_mats()
+
+    def _unique_material_name(self, base):
+        names = {m.name for m in self.obj.materials} if self.obj else set()
+        if base not in names:
+            return base
+        i = 1
+        while f"{base}_{i}" in names:
+            i += 1
+        return f"{base}_{i}"
+
+    def add_material_gui(self):
+        if self.obj is None:
+            QMessageBox.warning(self, "提示", "请先打开/新建一个 mdf2")
+            return
+        name, ok = QInputDialog.getText(self, "新增材质", "材质名:",
+                                        text=self._unique_material_name("NewMaterial"))
+        if not (ok and name):
+            return
+        if self.obj.get_material(name) is not None:
+            QMessageBox.warning(self, "提示", f"已存在同名材质 {name!r}")
+            return
+        mmtr, ok = QInputDialog.getText(self, "新增材质", "mmtr 路径(可留空):")
+        if not ok:
+            return
+        self.obj.add_material(name, mmtr)
+        self.refresh_mats()
+        for i in range(self.tree_mat.topLevelItemCount()):
+            if self.tree_mat.topLevelItem(i).text(0) == name:
+                self.tree_mat.setCurrentItem(self.tree_mat.topLevelItem(i))
+                break
+
+    def delete_material_gui(self, name):
+        if self.obj is None or not name:
+            return
+        ok = QMessageBox.question(self, "删除材质", f"确定删除材质 {name!r}?")
+        if ok != QMessageBox.Yes:
+            return
+        if self.obj.delete_material(name):
+            self.refresh_mats()
+            self.refresh_detail()
+
+    def refresh_mat_props(self):
+        m = self._cur_material()
+        if m is None:
+            return
+        self.cmb_shading.blockSignals(True)
+        self.cmb_shading.setCurrentText(m.shading_type_name())
+        self.cmb_shading.blockSignals(False)
+        d = m.flags_dict()
+        for name, cb in self.flag_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(bool(d.get(name, False)))
+            cb.blockSignals(False)
+        for name, sp in self.flag_spins.items():
+            sp.blockSignals(True)
+            sp.setValue(int(d.get(name, 0)))
+            sp.blockSignals(False)
+
+    def _apply_shading(self, name):
+        m = self._cur_material()
+        if m is None:
+            return
+        v = shading_type_value(name)
+        if v is not None:
+            m.shader_type = v
+
+    def _apply_flag(self, name, val):
+        m = self._cur_material()
+        if m is None:
+            return
+        d = m.flags_dict()
+        d[name] = val
+        m.flags = encode_material_flags(d)
+
     def set_texture(self):
         if self.obj is None:
             QMessageBox.warning(self, "提示", "请先打开一个 mdf2")
@@ -712,7 +869,10 @@ class Mdf2Panel(QWidget):
     def _menu_mat(self, item):
         if item is None:
             return None
-        return [("设置/新增贴图槽", self.set_texture),
+        return [("新增材质", self.add_material_gui),
+                ("重命名", lambda: self.tree_mat.editItem(item, 0)),
+                ("删除材质", lambda: self.delete_material_gui(item.text(0))),
+                ("设置/新增贴图槽", self.set_texture),
                 ("复制材质名", lambda: _copy_to_clipboard(item.text(0)))]
 
     def _menu_tex(self, item):

@@ -51,6 +51,73 @@ def param_type_float_count(type_name: str) -> int:
     return PARAM_TYPE_BYTES[type_name] // 4
 
 
+# 材质着色类型(ShadingType; 参考 MDF-Manager / RE-Mesh-Editor)
+SHADING_TYPES = [
+    ("Standard", 0), ("Decal", 1), ("DecalWithMetallic", 2), ("DecalNRMR", 3),
+    ("Transparent", 4), ("Distortion", 5), ("PrimitiveMesh", 6),
+    ("PrimitiveSolidMesh", 7), ("Water", 8), ("SpeedTree", 9), ("GUI", 10),
+    ("GUIMesh", 11), ("GUIMeshTransparent", 12), ("ExpensiveTransparent", 13),
+    ("Forward", 14), ("RenderTarget", 15), ("PostProcess", 16),
+    ("PrimitiveMaterial", 17), ("PrimitiveSolidMaterial", 18),
+    ("SpineMaterial", 19), ("ReflectiveTransparent", 20),
+]
+SHADING_TYPE_VALUES = dict(SHADING_TYPES)
+
+
+def shading_type_name(v: int) -> str:
+    for n, val in SHADING_TYPES:
+        if val == v:
+            return n
+    return f"0x{v:x}"
+
+
+def shading_type_value(name: str):
+    return SHADING_TYPE_VALUES.get(name)
+
+
+# 材质 flags(4B) 位布局(LSB 在前; 参考 RE-Mesh-Editor 的 MDFFlags)。
+# 每项 (名字, 位宽): 位宽=1 为布尔; TessFactor/PhongFactor 为整数。
+MATERIAL_FLAG_FIELDS = [
+    ("BaseTwoSideEnable", 1), ("BaseAlphaTestEnable", 1), ("ShadowCastDisable", 1),
+    ("VertexShaderUsed", 1), ("EmissiveUsed", 1), ("TessellationEnable", 1),
+    ("EnableIgnoreDepth", 1), ("AlphaMaskUsed", 1), ("ForcedTwoSideEnable", 1),
+    ("TwoSideEnable", 1), ("TransparentZPostPassEnable", 1),
+    ("TessFactor", 5), ("PhongFactor", 8),
+    ("RoughTransparentEnable", 1), ("ForcedAlphaTestEnable", 1),
+    ("AlphaTestEnable", 1), ("SSSProfileUsed", 1), ("EnableStencilPriority", 1),
+    ("RequireDualQuaternion", 1), ("PixelDepthOffsetUsed", 1), ("NoRayTracing", 1),
+]
+
+
+def _flag_bit_offsets():
+    out, bit = [], 0
+    for name, width in MATERIAL_FLAG_FIELDS:
+        out.append((name, width, bit))
+        bit += width
+    return out
+
+
+FLAG_BIT_OFFSETS = _flag_bit_offsets()
+
+
+def decode_material_flags(v: int) -> dict:
+    """u32 -> {名字: True/False 或 整数(TessFactor/PhongFactor)}。"""
+    out = {}
+    for name, width, bit in FLAG_BIT_OFFSETS:
+        val = (v >> bit) & ((1 << width) - 1)
+        out[name] = bool(val) if width == 1 else val
+    return out
+
+
+def encode_material_flags(d: dict) -> int:
+    """{名字: 值} -> u32(未提供的位视作 0)。"""
+    out = 0
+    for name, width, bit in FLAG_BIT_OFFSETS:
+        val = int(d.get(name, 0)) & ((1 << width) - 1)
+        out |= val << bit
+    return out
+
+
 def read_utf16(data: bytes, off: int) -> str:
     end = off
     while end + 1 < len(data) and data[end:end + 2] != b"\x00\x00":
@@ -206,6 +273,26 @@ class Material:
                 return True
         return False
 
+    # ---- 域模型: 材质级属性(着色类型 / flags) ----
+    def shading_type_name(self):
+        return shading_type_name(self.shader_type)
+
+    def set_shading_type(self, name):
+        v = shading_type_value(name)
+        if v is None:
+            raise ValueError(f"unknown shading type {name!r}")
+        self.shader_type = v
+        return self
+
+    def flags_dict(self):
+        """{flag 名: bool 或 整数(TessFactor/PhongFactor)}。"""
+        return decode_material_flags(self.flags & 0xFFFFFFFF)
+
+    def set_flags_dict(self, d):
+        """按 {flag 名: 值} 回写 flags 位。"""
+        self.flags = encode_material_flags(d)
+        return self
+
 
 class Mdf2:
     """mdf2 只读解析(version 10 优先,其他版本部分支持)。"""
@@ -323,6 +410,21 @@ class Mdf2:
         mat.shader_type = shader_type
         mat.flags = flags
         self.materials.append(mat)
+        return mat
+
+    def delete_material(self, name):
+        """按名字删除材质, 返回是否删除。"""
+        for i, mat in enumerate(self.materials):
+            if mat.name == name:
+                del self.materials[i]
+                return True
+        return False
+
+    def rename_material(self, old, new):
+        mat = self.get_material(old)
+        if mat is None:
+            raise ValueError(f"material {old!r} not found")
+        mat.name = new
         return mat
 
     def _collect_strings(self):
