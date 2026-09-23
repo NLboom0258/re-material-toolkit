@@ -13,11 +13,13 @@
   blob 区 [blob_start, EOF): 83 个标准 DXBC
 
 变体记录(264B)关键字段:
-    +0x00 blob 偏移; +0x9c blob 大小; +0xd8 变体名指针
-    +0x38/+0x40 cbuffer(描述符/名称池); +0x48/+0x50 sampler; +0x58/+0x60 纹理
+    程序指针: +0x00=PS; +0xe0/+0xe8=VS; +0x08=CS(部分); 三字段并集=全部 83 blob。
+    其它指针(u64, 高 32 位通常 0): +0x10/+0x18/+0x20/+0x28 辅助表; +0x30 共用 VM;
+        +0x38/+0x40 cbuffer(描述符/名称池); +0x48/+0x50 sampler; +0x58/+0x60 纹理。
+    +0x00 blob 偏移; +0x9c blob 大小; +0xd8 变体名指针。
     计数: +0xa4=资源总数+1; +0xac=cbuffer 数; +0xb0=sampler<<16; +0xb8/+0xcc=SRV 数;
-          +0xc4=(sampler<<24)|(cbuffer<<16)
-  其余字段语义未定: 见 REC_TBD。
+          +0xc4=(sampler<<24)|(cbuffer<<16)。
+    语义未定(TBD, 见 REC_TBD): +0x88/+0x8c/+0xa8/+0xb4/+0xbc/+0xc8/+0xd0/+0xd4; 辅助表语义。
 
 描述符 8B: (code,0), code=(type<<24)|(stage<<16)|slot;
   type: 0x00=sampler / 0x02=texture2d / 0x80=raw / 0xff=cbuffer;
@@ -58,13 +60,20 @@ REC_OFF_CNT_SRV2 = 0xCC     # 亦为 SRV 数(与 +0xb8 同)
 REC_OFF_CS_BLOB = 0x08      # CS 程序(仅部分记录, 如预变换/蒙皮)
 REC_OFF_VS_BLOB = 0xE0      # VS 程序
 REC_OFF_VS_BLOB2 = 0xE8     # 第二个 VS 指针(通常与 +0xe0 相同)
+# 其它指针(u64, 高 32 位通常为 0)
+REC_OFF_AUX_PTRS = (0x10, 0x18, 0x20, 0x28)  # 4 个辅助表指针(→头部小表; 语义 TBD)
+REC_OFF_VM_PTR = 0x30                        # 共用 VM/程序指针(如 0x48780)
 
 # 语义已确认的字段偏移(其余视为 TBD)
 REC_KNOWN = {
     0x00, 0x08, 0x9C, 0xD8, 0xE0, 0xE8,
+    0x10, 0x18, 0x20, 0x28, 0x30,
     0x38, 0x40, 0x48, 0x50, 0x58, 0x60,
     0xA4, 0xAC, 0xB0, 0xB8, 0xC4, 0xCC,
 }
+
+# 尚未定语义的字段偏移(TBD)
+REC_TBD = {0x04, 0x0C, 0x88, 0x8C, 0xA8, 0xB4, 0xBC, 0xC0, 0xC8, 0xD0, 0xD4}
 
 DESC_TYPE = {0x00: "sampler", 0x02: "tex2d", 0x80: "raw", 0xFF: "cbuffer"}
 
@@ -108,7 +117,7 @@ class VariantRecord:
     """264B 变体记录。"""
 
     __slots__ = ("off", "blob_off", "blob_size", "name_ptr", "name",
-                 "cs_blob", "vs_blob", "vs_blob2",
+                 "cs_blob", "vs_blob", "vs_blob2", "aux_ptrs", "vm_ptr",
                  "count_total", "count_cb", "count_smp_hi", "count_srv",
                  "count_smp_cb", "cb", "smp", "tex")
 
@@ -122,6 +131,8 @@ class VariantRecord:
         self.cs_blob = u32(off + REC_OFF_CS_BLOB)    # 部分记录(CS)
         self.vs_blob = u32(off + REC_OFF_VS_BLOB)    # VS
         self.vs_blob2 = u32(off + REC_OFF_VS_BLOB2)  # 第二个 VS 指针
+        self.aux_ptrs = tuple(u32(off + fo) for fo in REC_OFF_AUX_PTRS)
+        self.vm_ptr = u32(off + REC_OFF_VM_PTR)
         self.count_total = u32(off + REC_OFF_CNT_TOTAL)
         self.count_cb = u32(off + REC_OFF_CNT_CB)
         self.count_smp_hi = u32(off + REC_OFF_CNT_SMP_HI)
@@ -153,6 +164,11 @@ class VariantRecord:
         if self.cs_blob:
             out["CS"] = self.cs_blob
         return out
+
+    def tbd_fields(self, data):
+        """返回该记录中语义未定(REC_TBD 且非 0)的字段: [(field_off, value), ...]。"""
+        return [(fo, _u32(data, self.off + fo)) for fo in sorted(REC_TBD)
+                if _u32(data, self.off + fo) != 0]
 
     def __repr__(self):
         return (f"VariantRecord(#{self.name or '<unnamed>'} blob=0x{self.blob_off:x} "
