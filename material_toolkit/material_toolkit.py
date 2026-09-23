@@ -32,6 +32,18 @@ from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E4
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
 
 
+def _selfcheck_mmtr(data: bytes):
+    """编辑 mmtr 后自动跑头部一致性自检; 有问题则告警(不阻断)。见 CLI model-verify。"""
+    issues = MmtrModel(bytes(data)).validate()
+    if issues:
+        print(f"  [WARN] 头部自检: {len(issues)} 处问题(可用 model-verify 查看详情)")
+        for s in issues[:5]:
+            print("     -", s)
+    else:
+        print("  [OK] 头部自检通过")
+    return issues
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__); return
@@ -50,6 +62,7 @@ def main():
         open(out, "wb").write(data)
         print(f"OK: {src} + param {name}(size={size},off={offset}) -> {out} "
               f"({len(m.data)} -> {len(data)} bytes)")
+        _selfcheck_mmtr(data)
     elif cmd == "sync":
         src_mmtr, src_mdf2 = a[0], a[1]
         out = a[a.index("-o") + 1] if "-o" in a else "out.mdf2.10"
@@ -82,6 +95,7 @@ def main():
         open(out, "wb").write(nd)
         print(f"OK: +tex {name!r} (blob {blob_idx}, rdef={rdef}) -> {out} "
               f"({len(data)} -> {len(nd)} bytes)")
+        _selfcheck_mmtr(nd)
     elif cmd == "tex-rename":
         src, blob_idx, slot, new_name = a[0], int(a[1]), int(a[2]), a[3]
         out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
@@ -90,6 +104,7 @@ def main():
         open(out, "wb").write(nd)
         print(f"OK: rename t{slot} -> {new_name!r} (blob {blob_idx}) -> {out} "
               f"({len(data)} -> {len(nd)} bytes)")
+        _selfcheck_mmtr(nd)
     elif cmd == "mdf2-set-texture":
         src, mat_name, tex_type = a[0], a[1], a[2]
         path = a[3] if len(a) > 3 and not a[3].startswith("-") else None
