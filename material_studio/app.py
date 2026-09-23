@@ -27,7 +27,7 @@ from tools.material_toolkit.lib.binding import (  # noqa: E402
 from tools.material_toolkit.lib.mdf2 import Mdf2  # noqa: E402
 from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
-    blob_count, blob_group_counts, blob_info, group_mode,
+    blob_count, blob_group_counts, blob_info, group_mode, type_label,
 )
 
 from PySide6.QtCore import Qt  # noqa: E402
@@ -111,7 +111,7 @@ class MmtrPanel(QWidget):
         self.tree_grp = QTreeWidget()
         self.tree_grp.setHeaderLabels(["槽 / 组", "类型 / 说明"])
         self.tree_param = QTreeWidget()
-        self.tree_param.setHeaderLabels(["参数名", "类型/大小", "offset"])
+        self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
@@ -203,8 +203,9 @@ class MmtrPanel(QWidget):
         self.tree_param.clear()
         for pr in self._um:
             self.tree_param.addTopLevelItem(
-                QTreeWidgetItem([pr.name, f"{pr.size}B", f"0x{pr.offset:04x}"]))
-        fit_columns(self.tree_param, [0, 1, 2], pad=24, min_w=80, max_w=320)
+                QTreeWidgetItem([pr.name, type_label(pr.size), f"{pr.size}B",
+                                 f"0x{pr.offset:04x}"]))
+        fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=80, max_w=320)
 
     # ---- 编辑 ----
     def _need_mmtr(self):
@@ -273,10 +274,34 @@ class MmtrPanel(QWidget):
         return None
 
     def _menu_param(self, item):
-        if item is None:
-            return None
-        return [("复制行",
-                 lambda: _copy_to_clipboard(" | ".join(item.text(c) for c in range(3))))]
+        acts = [("新增参数(UserMaterial)", self.add_param)]
+        if item is not None:
+            acts.append(("复制行",
+                         lambda: _copy_to_clipboard(
+                             " | ".join(item.text(c) for c in range(4)))))
+        return acts
+
+    def add_param(self):
+        if not self._need_mmtr():
+            return
+        name, ok = QInputDialog.getText(self, "新增参数", "参数名(加入 UserMaterial):")
+        if not (ok and name):
+            return
+        size, ok = QInputDialog.getInt(self, "新增参数",
+                                       f"{name} 的字节大小(4=float, 16=float4):", 4, 1, 4096)
+        if not ok:
+            return
+        entries = self.mmtr._scan_cbuffer_entries("UserMaterial")
+        offset = entries[0][3] if entries else 0   # 追加到现有成员之后
+        try:
+            self.data = self.mmtr.add_cbuffer_param("UserMaterial", name, size, offset)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self.mmtr = Mmtr.from_bytes(self.data)
+        self._um = self.mmtr.cbuffer_members("UserMaterial")
+        self.refresh_blobs()
+        self.refresh_detail()
 
 
 class Mdf2Panel(QWidget):
@@ -300,7 +325,7 @@ class Mdf2Panel(QWidget):
         self.tree_tex = QTreeWidget()
         self.tree_tex.setHeaderLabels(["贴图槽(type)", "贴图路径"])
         self.tree_param = QTreeWidget()
-        self.tree_param.setHeaderLabels(["参数名", "值", "offset"])
+        self.tree_param.setHeaderLabels(["参数名", "类型", "值", "offset"])
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_tex, "贴图槽")
@@ -379,9 +404,11 @@ class Mdf2Panel(QWidget):
             return
         for pr in m.properties:
             vals = ", ".join(f"{v:g}" for v in pr.values)
-            self.tree_param.addTopLevelItem(
-                QTreeWidgetItem([pr.name, vals, f"0x{pr.data_offset:04x}"]))
-        fit_columns(self.tree_param, [0, 1, 2], pad=24, min_w=90, max_w=420)
+            it = QTreeWidgetItem([pr.name, type_label(pr.param_count * 4), vals,
+                                  f"0x{pr.data_offset:04x}"])
+            it.setData(0, Qt.UserRole, ("param", pr.name))
+            self.tree_param.addTopLevelItem(it)
+        fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=90, max_w=420)
 
     def set_texture(self):
         if self.obj is None:
@@ -428,10 +455,73 @@ class Mdf2Panel(QWidget):
                  lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
 
     def _menu_param(self, item):
-        if item is None:
+        acts = [("新增参数", self.add_param)]
+        d = item.data(0, Qt.UserRole) if item else None
+        if d and d[0] == "param":
+            acts.insert(0, ("编辑值", lambda: self.edit_param(d[1])))
+            acts.append(("复制行",
+                         lambda: _copy_to_clipboard(
+                             " | ".join(item.text(c) for c in range(4)))))
+        return acts
+
+    def _find_prop(self, name):
+        m = self._cur_material()
+        if m is None:
             return None
-        return [("复制行",
-                 lambda: _copy_to_clipboard(" | ".join(item.text(c) for c in range(3))))]
+        for pr in m.properties:
+            if pr.name == name:
+                return pr
+        return None
+
+    def edit_param(self, name):
+        if self.obj is None:
+            return
+        pr = self._find_prop(name)
+        if pr is None:
+            return
+        cur = ", ".join(f"{v:g}" for v in pr.values)
+        text, ok = QInputDialog.getText(self, "编辑值",
+                                        f"{name} 的值({pr.param_count} 个, 逗号/空格分隔):",
+                                        text=cur)
+        if not ok:
+            return
+        try:
+            vals = [float(x) for x in text.replace(",", " ").split()]
+        except ValueError:
+            QMessageBox.critical(self, "失败", "无法解析为数字(用逗号/空格分隔)")
+            return
+        if not vals:
+            return
+        pr.values = vals
+        self.refresh_detail()
+
+    def add_param(self):
+        if self.obj is None:
+            QMessageBox.warning(self, "提示", "请先打开一个 mdf2")
+            return
+        mn = self.cur_mat()
+        if not mn:
+            return
+        name, ok = QInputDialog.getText(self, "新增参数", "参数名:")
+        if not (ok and name):
+            return
+        text, ok = QInputDialog.getText(self, "新增参数", "值(逗号/空格分隔, 如 1,1,1,1):")
+        if not ok:
+            return
+        try:
+            vals = [float(x) for x in text.replace(",", " ").split()]
+        except ValueError:
+            QMessageBox.critical(self, "失败", "无法解析为数字")
+            return
+        if not vals:
+            QMessageBox.critical(self, "失败", "值不能为空")
+            return
+        try:
+            self.obj.add_property(mn, name, vals)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self.refresh_detail()
 
     def _set_path(self, ty, old):
         mn = self.cur_mat()

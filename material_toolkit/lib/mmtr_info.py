@@ -67,3 +67,15 @@ def group_mode(srv_names):
     """由池名列表推该组的顶点处理模式: Static / Instance / Skinning / Indirect 的组合。"""
     tags = [lab for key, lab in _RAW_MODES if any(key in n for n in srv_names)]
     return "+".join(tags) if tags else "Static"
+
+
+def type_label(nbytes):
+    """按字节大小给出类型标签(与 MDF-Manager 的口径一致: 只看大小/个数)。
+
+    4->float, 8->float2, 12->float3, 16->float4, 48->float4x3, 64->float4x4,
+    其它 -> "N*float"。
+    """
+    n = nbytes // 4
+    if n >= 4 and nbytes % 16 == 0:
+        return "float4" if n == 4 else f"float4x{n // 4}"
+    return {1: "float", 2: "float2", 3: "float3"}.get(n, f"{n}*float")
