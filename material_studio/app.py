@@ -24,7 +24,7 @@ if ROOT not in sys.path:
 from tools.material_toolkit.lib.binding import (  # noqa: E402
     add_texture_slot, group_summary, rename_slot,
 )
-from tools.material_toolkit.lib.mdf2 import Mdf2  # noqa: E402
+from tools.material_toolkit.lib.mdf2 import Mdf2, PARAM_TYPES  # noqa: E402
 from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
@@ -88,17 +88,23 @@ def _copy_to_clipboard(text):
     QApplication.clipboard().setText(text)
 
 
-PARAM_TYPES = [("float", 4), ("float2", 8), ("float3", 12), ("float4", 16),
-               ("float4x3", 48), ("float4x4", 64)]
+# PARAM_TYPES 由 lib.mdf2 提供(单一来源: [(类型名, 字节大小), ...])
 
 
-def pick_type_size(parent, title):
-    """下拉选择参数类型 - 返回字节大小(取消返回 None)。"""
-    items = [f"{n}  ({s} 字节)" for n, s in PARAM_TYPES]
-    choice, ok = QInputDialog.getItem(parent, title, "类型:", items, 0, False)
-    if not ok:
-        return None
-    return PARAM_TYPES[items.index(choice)][1]
+def pick_type(parent, title, default="float4"):
+    """下拉选择参数类型 - 返回类型名(取消返回 None)。"""
+    names = [n for n, _ in PARAM_TYPES]
+    idx = names.index(default) if default in names else 0
+    choice, ok = QInputDialog.getItem(parent, title, "类型:", names, idx, False)
+    return choice if ok else None
+
+
+def type_size(type_name):
+    """类型名 -> 字节大小。"""
+    for n, s in PARAM_TYPES:
+        if n == type_name:
+            return s
+    return 4
 
 
 def wrap_with_add_button(tree, text, slot):
@@ -120,6 +126,7 @@ def relayout_offsets(mat):
     """
     off = 0
     for pr in mat.properties:
+        pr.param_count = len(pr.values)
         if pr.cb_offset is not None:
             pr.data_offset = pr.cb_offset
             off = max(off, pr.cb_offset + pr.param_count * 4)
@@ -329,9 +336,10 @@ class MmtrPanel(QWidget):
         name, ok = QInputDialog.getText(self, "新增参数", "参数名(加入 UserMaterial):")
         if not (ok and name):
             return
-        size = pick_type_size(self, "新增参数")
-        if size is None:
+        ty = pick_type(self, "新增参数")
+        if ty is None:
             return
+        size = type_size(ty)
         entries = self.mmtr._scan_cbuffer_entries("UserMaterial")
         offset = entries[0][3] if entries else 0   # 追加到现有成员之后
         try:
@@ -447,8 +455,7 @@ class Mdf2Panel(QWidget):
         relayout_offsets(m)   # 让 offset 显示与实际导出一致(新参数不再显示 0)
         for pr in m.properties:
             vals = ", ".join(f"{v:g}" for v in pr.values)
-            it = QTreeWidgetItem([pr.name, type_label(pr.param_count * 4), vals,
-                                  f"0x{pr.data_offset:04x}"])
+            it = QTreeWidgetItem([pr.name, pr.type, vals, f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
             self.tree_param.addTopLevelItem(it)
         fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=90, max_w=420)
@@ -501,10 +508,13 @@ class Mdf2Panel(QWidget):
         acts = [("新增参数", self.add_param)]
         d = item.data(0, Qt.UserRole) if item else None
         if d and d[0] == "param":
-            acts.insert(0, ("编辑值", lambda: self.edit_param(d[1])))
-            acts.append(("复制行",
-                         lambda: _copy_to_clipboard(
-                             " | ".join(item.text(c) for c in range(4)))))
+            acts = [("编辑值", lambda: self.edit_param(d[1])),
+                    ("改类型", lambda: self.set_param_type(d[1])),
+                    ("删除参数", lambda: self.delete_param(d[1])),
+                    ("新增参数", self.add_param),
+                    ("复制行",
+                     lambda: _copy_to_clipboard(
+                         " | ".join(item.text(c) for c in range(4))))]
         return acts
 
     def _find_prop(self, name):
@@ -524,7 +534,7 @@ class Mdf2Panel(QWidget):
             return
         cur = ", ".join(f"{v:g}" for v in pr.values)
         text, ok = QInputDialog.getText(self, "编辑值",
-                                        f"{name} 的值({pr.param_count} 个, 逗号/空格分隔):",
+                                        f"{name} 的值({len(pr.values)} 个, 逗号/空格分隔):",
                                         text=cur)
         if not ok:
             return
@@ -536,42 +546,56 @@ class Mdf2Panel(QWidget):
         if not vals:
             return
         pr.values = vals
+        pr.param_count = len(vals)
+        m = self._cur_material()
+        if m is not None:
+            relayout_offsets(m)
         self.refresh_detail()
 
     def add_param(self):
         if self.obj is None:
             QMessageBox.warning(self, "提示", "请先打开一个 mdf2")
             return
-        mn = self.cur_mat()
-        if not mn:
+        m = self._cur_material()
+        if m is None:
             return
-        name, ok = QInputDialog.getText(self, "新增参数", "参数名:")
+        # 1. 参数名(预填一个不重名占位)
+        name, ok = QInputDialog.getText(self, "新增参数", "参数名:",
+                                        text=m.unique_parameter_name("NewParam"))
         if not (ok and name):
             return
-        size = pick_type_size(self, "新增参数")
-        if size is None:
+        if m.get_parameter(name) is not None:
+            QMessageBox.warning(self, "提示", f"已存在同名参数 {name!r}")
             return
-        count = max(1, size // 4)
-        default = ", ".join("0" for _ in range(count))
-        text, ok = QInputDialog.getText(self, "新增参数", f"值({count} 个, 逗号/空格分隔):",
-                                        text=default)
-        if not ok:
+        # 2. 类型(值 = 全 0 占位, 之后可编辑)
+        ty = pick_type(self, "新增参数")
+        if ty is None:
             return
-        try:
-            vals = [float(x) for x in text.replace(",", " ").split()]
-        except ValueError:
-            QMessageBox.critical(self, "失败", "无法解析为数字")
+        m.add_parameter(name, ty)
+        relayout_offsets(m)
+        self.refresh_detail()
+
+    def set_param_type(self, name):
+        m = self._cur_material()
+        if m is None:
             return
-        if not vals:
-            QMessageBox.critical(self, "失败", "值不能为空")
+        pr = m.get_parameter(name)
+        if pr is None:
             return
-        try:
-            self.obj.add_property(mn, name, vals)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
+        ty = pick_type(self, "改类型", default=pr.type)
+        if ty is None:
             return
-        for m in self.obj.materials:
-            relayout_offsets(m)
+        pr.set_type(ty)
+        relayout_offsets(m)
+        self.refresh_detail()
+
+    def delete_param(self, name):
+        m = self._cur_material()
+        if m is None:
+            return
+        if not m.delete_parameter(name):
+            return
+        relayout_offsets(m)
         self.refresh_detail()
 
     def _set_path(self, ty, old):

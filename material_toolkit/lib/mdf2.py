@@ -28,6 +28,29 @@ def _i32(b, o): return struct.unpack_from("<i", b, o)[0]
 def _f32(b, o): return struct.unpack_from("<f", b, o)[0]
 
 
+# 参数类型表:(类型名, 字节大小)。mdf2 本身不存"类型", 只存"值的个数";
+# 类型 = 个数推导(与 MDF-Manager / RE-Mesh-Editor 口径一致)。
+PARAM_TYPES = [("float", 4), ("float2", 8), ("float3", 12), ("float4", 16),
+               ("float4x3", 48), ("float4x4", 64)]
+PARAM_TYPE_BYTES = dict(PARAM_TYPES)
+
+
+def param_type_name(nbytes: int) -> str:
+    """字节大小 -> 类型名(与 mmtr_info.type_label 口径一致)。"""
+    n = nbytes // 4
+    if n >= 4 and nbytes % 16 == 0:
+        return "float4" if n == 4 else f"float4x{n // 4}"
+    return {1: "float", 2: "float2", 3: "float3"}.get(n, f"{n}*float")
+
+
+def param_type_float_count(type_name: str) -> int:
+    """类型名 -> float 个数(float 个数 x4 = 字节大小)。未知名抛错。"""
+    if type_name not in PARAM_TYPE_BYTES:
+        raise ValueError(f"unknown param type {type_name!r} "
+                         f"(可选: {', '.join(n for n, _ in PARAM_TYPES)})")
+    return PARAM_TYPE_BYTES[type_name] // 4
+
+
 def read_utf16(data: bytes, off: int) -> str:
     end = off
     while end + 1 < len(data) and data[end:end + 2] != b"\x00\x00":
@@ -67,8 +90,23 @@ class Property:
         self.values = []
         self.cb_offset = None   # 若不为 None,值区按此(cbuffer 内偏移)定位,而非顺序累加
 
+    @property
+    def type(self):
+        """参数类型名(由值个数推导; mdf2 不存类型)。"""
+        return param_type_name(len(self.values) * 4)
+
+    def set_type(self, type_name):
+        """改类型 = 改值的个数(不足补 0、超出截断), 返回 self。"""
+        n = param_type_float_count(type_name)
+        if n > len(self.values):
+            self.values = list(self.values) + [0.0] * (n - len(self.values))
+        else:
+            self.values = list(self.values[:n])
+        self.param_count = len(self.values)
+        return self
+
     def __repr__(self):
-        return f"Prop({self.name!r} n={self.param_count} off=0x{self.data_offset:x} {self.values})"
+        return f"Prop({self.name!r} type={self.type} off=0x{self.data_offset:x} {self.values})"
 
 
 class Material:
@@ -92,6 +130,73 @@ class Material:
     def __repr__(self):
         return (f"Material({self.name!r} mmtr={self.mmtr_path!r} "
                 f"tex={len(self.textures)} prop={len(self.properties)} block={self.prop_block_size})")
+
+    # ---- 域模型: 参数 - 名字/类型/值 (offset/hash 只在编解码内部处理) ----
+    def get_parameter(self, name):
+        for pr in self.properties:
+            if pr.name == name:
+                return pr
+        return None
+
+    def add_parameter(self, name, type_name="float", values=None):
+        """新增参数。values=None 时按 type_name 生成全 0 默认值。返回 Property。"""
+        pr = Property()
+        pr.name = name
+        if values is not None:
+            pr.values = [float(v) for v in values]
+        else:
+            pr.values = [0.0] * param_type_float_count(type_name)
+        pr.param_count = len(pr.values)
+        self.properties.append(pr)
+        return pr
+
+    def delete_parameter(self, name):
+        """按名字删除参数, 返回是否删除。"""
+        for i, pr in enumerate(self.properties):
+            if pr.name == name:
+                del self.properties[i]
+                return True
+        return False
+
+    def rename_parameter(self, old, new):
+        pr = self.get_parameter(old)
+        if pr is None:
+            raise ValueError(f"parameter {old!r} not found")
+        pr.name = new
+        return pr
+
+    def unique_parameter_name(self, base="NewParam"):
+        """生成一个不重名的占位参数名(base / base_1 / base_2 ...)。"""
+        names = {pr.name for pr in self.properties}
+        if base not in names:
+            return base
+        i = 1
+        while f"{base}_{i}" in names:
+            i += 1
+        return f"{base}_{i}"
+
+    # ---- 域模型: 贴图 - 名字/路径 ----
+    def get_texture(self, texture_type):
+        for tb in self.textures:
+            if tb.texture_type == texture_type:
+                return tb
+        return None
+
+    def add_texture(self, texture_type, texture_path):
+        """新增贴图槽(type 名 + 路径)。返回 TextureBinding。"""
+        tb = TextureBinding()
+        tb.texture_type = texture_type
+        tb.texture_path = texture_path
+        self.textures.append(tb)
+        return tb
+
+    def delete_texture(self, texture_type):
+        """按 type 名删除贴图槽, 返回是否删除。"""
+        for i, tb in enumerate(self.textures):
+            if tb.texture_type == texture_type:
+                del self.textures[i]
+                return True
+        return False
 
 
 class Mdf2:
@@ -185,6 +290,32 @@ class Mdf2:
                 pr.values = [_f32(data, vbase + i * 4) for i in range(pr.param_count)]
                 mat.properties.append(pr)
         return m
+
+    @classmethod
+    def new(cls, game_version=10, file_version=1):
+        """从 0 新建一个空 mdf2(仅结构; 材料类型/flags 等默认值尚未完善)。"""
+        m = cls()
+        m.file_version = file_version
+        m.game_version = game_version
+        m.material_flags = 0
+        m.materials = []
+        return m
+
+    def get_material(self, name):
+        for mat in self.materials:
+            if mat.name == name:
+                return mat
+        return None
+
+    def add_material(self, name, mmtr_path="", shader_type=0, flags=0):
+        """新增材质(名字 + mmtr路径 + shaderType/flags 原样保存)。返回 Material。"""
+        mat = Material()
+        mat.name = name
+        mat.mmtr_path = mmtr_path
+        mat.shader_type = shader_type
+        mat.flags = flags
+        self.materials.append(mat)
+        return mat
 
     def _collect_strings(self):
         """收集所有字符串(去重,保持首次出现顺序)并回填各对象的偏移索引。"""
