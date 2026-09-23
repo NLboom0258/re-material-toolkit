@@ -102,9 +102,10 @@ def main():
         path = a[0]
         m = MmtrModel.load(path)
         m.dump()
-        print("  referenced blobs (blob_idx: n_records):")
-        for bi, off, n in m.referenced_blobs():
-            print(f"    blob[{bi}] 0x{off:x}: {n}")
+        print("  blobs (idx: role, n_records_using):")
+        for i in range(m.blob_count()):
+            print(f"    blob[{i}] 0x{m.blob_off(i):x}  role={m.blob_role(i)}  "
+                  f"n_rec={len(m.records_using(i))}")
         if "--blob" in a:
             bi = int(a[a.index("--blob") + 1])
             print(f"  groups of blob[{bi}]:")

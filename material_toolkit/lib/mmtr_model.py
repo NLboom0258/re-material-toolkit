@@ -54,10 +54,14 @@ REC_OFF_CNT_SMP_HI = 0xB0   # sampler << 16
 REC_OFF_CNT_SRV = 0xB8      # SRV 数(tex+raw+struct)
 REC_OFF_CNT_SMP_CB = 0xC4   # (sampler<<24)|(cbuffer<<16)
 REC_OFF_CNT_SRV2 = 0xCC     # 亦为 SRV 数(与 +0xb8 同)
+# 记录捆绑的**多个 shader 程序指针**(实测: +0x00=PS, +0xe0/+0xe8=VS, +0x08=CS(部分))
+REC_OFF_CS_BLOB = 0x08      # CS 程序(仅部分记录, 如预变换/蒙皮)
+REC_OFF_VS_BLOB = 0xE0      # VS 程序
+REC_OFF_VS_BLOB2 = 0xE8     # 第二个 VS 指针(通常与 +0xe0 相同)
 
 # 语义已确认的字段偏移(其余视为 TBD)
 REC_KNOWN = {
-    0x00, 0x9C, 0xD8,
+    0x00, 0x08, 0x9C, 0xD8, 0xE0, 0xE8,
     0x38, 0x40, 0x48, 0x50, 0x58, 0x60,
     0xA4, 0xAC, 0xB0, 0xB8, 0xC4, 0xCC,
 }
@@ -104,16 +108,20 @@ class VariantRecord:
     """264B 变体记录。"""
 
     __slots__ = ("off", "blob_off", "blob_size", "name_ptr", "name",
+                 "cs_blob", "vs_blob", "vs_blob2",
                  "count_total", "count_cb", "count_smp_hi", "count_srv",
                  "count_smp_cb", "cb", "smp", "tex")
 
     def __init__(self, data, off):
         u32 = lambda o: _u32(data, o)
         self.off = off
-        self.blob_off = u32(off + REC_OFF_BLOB)
+        self.blob_off = u32(off + REC_OFF_BLOB)      # 主程序(PS)
         self.blob_size = u32(off + REC_OFF_SIZE)
         self.name_ptr = u32(off + REC_OFF_NAME_PTR)
         self.name = _str(data, self.name_ptr, 64) if 0x1000 <= self.name_ptr < len(data) else ""
+        self.cs_blob = u32(off + REC_OFF_CS_BLOB)    # 部分记录(CS)
+        self.vs_blob = u32(off + REC_OFF_VS_BLOB)    # VS
+        self.vs_blob2 = u32(off + REC_OFF_VS_BLOB2)  # 第二个 VS 指针
         self.count_total = u32(off + REC_OFF_CNT_TOTAL)
         self.count_cb = u32(off + REC_OFF_CNT_CB)
         self.count_smp_hi = u32(off + REC_OFF_CNT_SMP_HI)
@@ -134,6 +142,17 @@ class VariantRecord:
     @property
     def tech(self):
         return split_variant_name(self.name)[1]
+
+    def programs(self):
+        """该变体记录捆绑的 shader 程序: {'PS': blob_off, 'VS':..., 'CS':...}(无则省略)。"""
+        out = {}
+        if self.blob_off:
+            out["PS"] = self.blob_off
+        if self.vs_blob:
+            out["VS"] = self.vs_blob
+        if self.cs_blob:
+            out["CS"] = self.cs_blob
+        return out
 
     def __repr__(self):
         return (f"VariantRecord(#{self.name or '<unnamed>'} blob=0x{self.blob_off:x} "
@@ -270,9 +289,10 @@ class MmtrModel:
         return out
 
     def referenced_blobs(self):
-        """变体数组实际引用的 blob: [(blob_idx, off, n_records), ...](按 blob 顺序)。
+        """变体数组 **主程序字段(+0x00, 即 PS)** 引用的 blob: [(blob_idx, off, n_records), ...]。
 
-        注意: 变体数组只引用**部分** blob(env=17 / 共 83); 其余由程序表/记录其它指针引用。
+        注: 一条记录还捆绑 VS(+0xe0/+0xe8) 与部分 CS(+0x08); 全部字段的并集 = 全部 blob
+        (见 all_referenced_blobs / blob_role)。
         """
         from collections import Counter
         cnt = Counter(r.blob_off for r in self.iter_records())
@@ -280,9 +300,41 @@ class MmtrModel:
         return [(idx_of.get(o), o, n) for o, n in sorted(cnt.items()) if o in idx_of]
 
     def unreferenced_blob_indices(self):
-        """变体数组**未**引用的 blob 下标(见 referenced_blobs 说明)。"""
+        """变体数组 **+0x00(PS)** 字段未引用的 blob 下标(非“全局未引用”)。"""
         used = {o for _, o, _ in self.referenced_blobs()}
         return [i for i, (o, _s) in enumerate(self.blobs) if o not in used]
+
+    def all_referenced_blob_indices(self):
+        """被变体记录**任一程序字段**(PS+VS+CS)引用的 blob 下标(应为全部)。
+
+        注: 含“空槽”(PS=0 但有 VS)记录, 故必须遍历全部记录。
+        """
+        idx_of = {o: i for i, (o, _s) in enumerate(self.blobs)}
+        used = set()
+        for r in self.parse_records():
+            for off in (r.blob_off, r.vs_blob, r.vs_blob2, r.cs_blob):
+                if off in idx_of:
+                    used.add(idx_of[off])
+        return sorted(used)
+
+    def blob_role(self, idx):
+        """该 blob 在记录中充当的程序角色: 'PS'/'VS'/'CS'(可多个, 用 '+' 连)/'?'。"""
+        off = self.blob_off(idx)
+        roles = []
+        for r in self.parse_records():
+            if r.blob_off == off and "PS" not in roles:
+                roles.append("PS")
+            if (r.vs_blob == off or r.vs_blob2 == off) and "VS" not in roles:
+                roles.append("VS")
+            if r.cs_blob == off and "CS" not in roles:
+                roles.append("CS")
+        return "+".join(roles) if roles else "?"
+
+    def records_using(self, idx):
+        """所有引用该 blob(任一程序字段)的变体记录。"""
+        off = self.blob_off(idx)
+        return [r for r in self.parse_records()
+                if off in (r.blob_off, r.vs_blob, r.vs_blob2, r.cs_blob)]
 
     def record_for(self, idx):
         """该 blob 的第一条(非空)变体记录。"""
@@ -337,17 +389,18 @@ class MmtrModel:
 
     def summary(self):
         recs = self.parse_records()
-        blob_to_names = {}
-        for r in recs:
-            if not r.is_empty:
-                blob_to_names.setdefault(r.blob_off, []).append(r.name)
+        ps = {r.blob_off for r in recs if r.blob_off}
+        vs = {o for r in recs for o in (r.vs_blob, r.vs_blob2) if o}
+        cs = {r.cs_blob for r in recs if r.cs_blob}
         return {
             "version": f"0x{self.version:08x}",
             "blob_start": self.blob_start,
             "blobs": len(self.blobs),
             "records": len(recs),
             "empty_records": sum(1 for r in recs if r.is_empty),
-            "distinct_blobs_referenced": len(blob_to_names),
+            "ps_blobs": len(ps),
+            "vs_blobs": len(vs),
+            "cs_blobs": len(cs),
             "program_table": [p.name for p in self.parse_program_table()],
             "string_ptr_name": self.string_ptr_name,
         }
@@ -355,8 +408,8 @@ class MmtrModel:
     def dump(self):
         s = self.summary()
         print(f"mmtr version={s['version']} blob_start=0x{s['blob_start']:x} "
-              f"blobs={s['blobs']} records={s['records']} empty={s['empty_records']} "
-              f"distinct_blobs={s['distinct_blobs_referenced']}")
+              f"blobs={s['blobs']} records={s['records']} empty={s['empty_records']}")
+        print(f"  program blobs: PS={s['ps_blobs']} VS={s['vs_blobs']} CS={s['cs_blobs']}")
         print(f"  string_ptr(+0x10) -> {s['string_ptr_name']!r}")
         print(f"  program_table: {s['program_table']}")
 
