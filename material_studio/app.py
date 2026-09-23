@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Material Studio — RE Engine 材质(mmtr/mdf2)底层检视/编辑器(MVP, PySide6)。
+"""Material Studio — RE Engine 材质(mmtr/mdf2)底层检视/编辑器(PySide6)。
 
 定位: 一个"底层材质编辑器"薄壳; 核心读写全部复用 tools/material_toolkit/lib
-(binding / rdef / mdf2 / mmtr_info)。将来换 UI 或升级为更完整的编辑器时, 逻辑不动。
+(binding / rdef / mdf2 / mmtr / mmtr_info)。将来换 UI 或升级为更完整的编辑器时, 逻辑不动。
 
-功能(MVP):
-- MMTR: 打开 → blob 列表(阶段/大小/组数/SRV 数) → 选 blob 看"各绑定组 + 贴图槽"
-  (组 = 顶点处理模式: Static/Instance/Skinning/Indirect) → 加贴图槽(全部组)/改名槽 → 导出。
-- MDF2: 打开 → 材质列表 → 看贴图槽 → 设置/新增贴图槽(type+路径) → 导出。
+布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
+- MMTR 页: 左=Blob 列表; 右标签 = 「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
+- MDF2 页: 左=材质列表; 右标签 = 「贴图槽」 / 「材质参数」(该材质的参数值, 只读)。
+交互: 常用按钮保留, 另支持对选中项**右键菜单**。
 
 用法: python app.py [<file.mmtr.*> | <file.mdf2.*>]
-自检: python app.py --selftest <file.mmtr.*>   (offscreen 构建并打印, 不开窗)
+自检: python app.py --selftest <file.mmtr.*>                 (offscreen 构建并打印)
+截图: python app.py --shot <out.png> [--pane bind|param] <file>   (渲染截图, 调试用)
 """
 import os
 import sys
@@ -24,6 +25,7 @@ from tools.material_toolkit.lib.binding import (  # noqa: E402
     add_texture_slot, group_summary, rename_slot,
 )
 from tools.material_toolkit.lib.mdf2 import Mdf2  # noqa: E402
+from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode,
 )
@@ -31,9 +33,11 @@ from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QFileDialog, QHBoxLayout, QInputDialog, QMainWindow,
-    QMessageBox, QPushButton, QSplitter, QTabWidget, QTreeWidget,
+    QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+TYPENAME = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler", 0xFF: "cbuffer"}
 
 
 def _iter_items(tree):
@@ -46,7 +50,7 @@ def _iter_items(tree):
 
 
 def fit_columns(tree, cols, pad=28, min_w=80, max_w=600):
-    """按当前条目(含表头)最长文本设置列宽(带上下限); 之后用户仍可手动拖动。"""
+    """按当前条目(含表头 + 子项缩进)最长文本设置列宽(带上下限); 之后用户仍可手动拖动。"""
     fm = tree.fontMetrics()
     hdr = tree.headerItem()
     widths = {c: (fm.horizontalAdvance(hdr.text(c)) if hdr else 0) for c in cols}
@@ -63,6 +67,27 @@ def fit_columns(tree, cols, pad=28, min_w=80, max_w=600):
         tree.setColumnWidth(c, max(min_w, min(widths[c] + pad, max_w)))
 
 
+def attach_menu(tree, build_actions):
+    """给 tree 挂右键菜单: build_actions(item) 返回 [(标题, 回调), ...] 或 None。"""
+    tree.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def handler(pos):
+        item = tree.itemAt(pos)
+        acts = build_actions(item)
+        if not acts:
+            return
+        menu = QMenu(tree)
+        for title, cb in acts:
+            menu.addAction(title, cb)
+        menu.exec(tree.viewport().mapToGlobal(pos))
+
+    tree.customContextMenuRequested.connect(handler)
+
+
+def _copy_to_clipboard(text):
+    QApplication.clipboard().setText(text)
+
+
 class MmtrPanel(QWidget):
     """mmtr 检视/编辑面板。"""
 
@@ -70,13 +95,14 @@ class MmtrPanel(QWidget):
         super().__init__()
         self.data = None            # 当前 mmtr bytes
         self.path = None
+        self.mmtr = None            # Mmtr 对象(用于参数栏)
+        self._um = []               # UserMaterial 成员缓存
 
         hb = QHBoxLayout()
         self.btn_open = QPushButton("打开 mmtr")
         self.btn_add = QPushButton("加贴图槽(全部组)")
-        self.btn_ren = QPushButton("改名槽")
         self.btn_exp = QPushButton("导出 mmtr")
-        for b in (self.btn_open, self.btn_add, self.btn_ren, self.btn_exp):
+        for b in (self.btn_open, self.btn_add, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
 
@@ -84,10 +110,16 @@ class MmtrPanel(QWidget):
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_grp = QTreeWidget()
         self.tree_grp.setHeaderLabels(["槽 / 组", "类型 / 说明"])
+        self.tree_param = QTreeWidget()
+        self.tree_param.setHeaderLabels(["参数名", "类型/大小", "offset"])
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.tree_grp, "贴图绑定")
+        self.tabs.addTab(self.tree_param, "材质参数")
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tree_blob)
-        split.addWidget(self.tree_grp)
+        split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
 
@@ -96,15 +128,19 @@ class MmtrPanel(QWidget):
         lay.addWidget(split, 1)
 
         self.btn_open.clicked.connect(self.open_mmtr)
-        self.btn_add.clicked.connect(self.add_slot)
-        self.btn_ren.clicked.connect(self.rename_slot)
+        self.btn_add.clicked.connect(lambda: self.add_slot(None))
         self.btn_exp.clicked.connect(self.export_mmtr)
-        self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_groups())
+        self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_detail())
+        attach_menu(self.tree_blob, self._menu_blob)
+        attach_menu(self.tree_grp, self._menu_grp)
+        attach_menu(self.tree_param, self._menu_param)
 
     # ---- 打开 / 导出 ----
     def load_path(self, path):
         self.data = open(path, "rb").read()
         self.path = path
+        self.mmtr = Mmtr.from_bytes(self.data)
+        self._um = self.mmtr.cbuffer_members("UserMaterial")
         self.refresh_blobs()
 
     def open_mmtr(self):
@@ -138,6 +174,10 @@ class MmtrPanel(QWidget):
         it = self.tree_blob.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
+    def refresh_detail(self):
+        self.refresh_groups()
+        self.refresh_params()
+
     def refresh_groups(self):
         self.tree_grp.clear()
         idx = self.cur_blob()
@@ -145,20 +185,26 @@ class MmtrPanel(QWidget):
             return
         for k, g in enumerate(group_summary(self.data, idx)):
             names = [s["name"] for s in g["srvs"]]
-            mode = group_mode(names)
-            top = QTreeWidgetItem([f"组{k} · {mode}",
+            top = QTreeWidgetItem([f"组{k} · {group_mode(names)}",
                                    f"desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
                                    f"n_rec={g['n_rec']} srv={g['b8']}"])
+            top.setData(0, Qt.UserRole, ("group", k))
             self.tree_grp.addTopLevelItem(top)
             for s in g["srvs"]:
-                tyname = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler",
-                          0xff: "cbuffer"}.get(s["type"], f"0x{s['type']:02x}")
+                tyname = TYPENAME.get(s["type"], f"0x{s['type']:02x}")
                 child = QTreeWidgetItem([f"t{s['slot']}  {s['name']}",
                                          f"{tyname}  hash=0x{s['hash']:08x}"])
-                child.setData(0, Qt.UserRole, (k, s["slot"], s["name"]))
+                child.setData(0, Qt.UserRole, ("slot", k, s["slot"], s["name"]))
                 top.addChild(child)
             top.setExpanded(True)
         fit_columns(self.tree_grp, [0], pad=28, min_w=200, max_w=480)
+
+    def refresh_params(self):
+        self.tree_param.clear()
+        for pr in self._um:
+            self.tree_param.addTopLevelItem(
+                QTreeWidgetItem([pr.name, f"{pr.size}B", f"0x{pr.offset:04x}"]))
+        fit_columns(self.tree_param, [0, 1, 2], pad=24, min_w=80, max_w=320)
 
     # ---- 编辑 ----
     def _need_mmtr(self):
@@ -167,7 +213,7 @@ class MmtrPanel(QWidget):
             return False
         return True
 
-    def add_slot(self):
+    def add_slot(self, only_indices=None):
         if not self._need_mmtr():
             return
         idx = self.cur_blob()
@@ -176,22 +222,18 @@ class MmtrPanel(QWidget):
         if not (ok and name):
             return
         try:
-            self.data = add_texture_slot(self.data, idx, name)
+            self.data = add_texture_slot(self.data, idx, name, only_indices=only_indices)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
+        self.mmtr = Mmtr.from_bytes(self.data)
+        self._um = self.mmtr.cbuffer_members("UserMaterial")
         self.refresh_blobs()
-        self.refresh_groups()
+        self.refresh_detail()
 
-    def rename_slot(self):
+    def rename_cur(self, slot, oldname):
         if not self._need_mmtr():
             return
-        it = self.tree_grp.currentItem()
-        got = it.data(0, Qt.UserRole) if it else None
-        if not got:
-            QMessageBox.warning(self, "提示", "请在右侧选中一个贴图槽(t?)")
-            return
-        _gi, slot, oldname = got
         name, ok = QInputDialog.getText(self, "改名槽", f"把 t{slot}({oldname}) 改名为:")
         if not (ok and name):
             return
@@ -200,8 +242,41 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
+        self.mmtr = Mmtr.from_bytes(self.data)
+        self._um = self.mmtr.cbuffer_members("UserMaterial")
         self.refresh_blobs()
-        self.refresh_groups()
+        self.refresh_detail()
+
+    # ---- 右键菜单 ----
+    def _menu_blob(self, item):
+        if item is None or self.data is None:
+            return None
+        return [("加贴图槽(全部组)", lambda: self.add_slot(None)),
+                ("复制 blob 信息",
+                 lambda: _copy_to_clipboard(
+                     f"blob {item.text(0)} {item.text(1)} size={item.text(2)} "
+                     f"groups={item.text(3)} srv={item.text(4)}"))]
+
+    def _menu_grp(self, item):
+        d = item.data(0, Qt.UserRole) if item else None
+        if not d:
+            return None
+        if d[0] == "group":
+            k = d[1]
+            return [("加贴图槽(仅本组)", lambda: self.add_slot([k])),
+                    ("复制组信息", lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
+        if d[0] == "slot":
+            _tag, _k, slot, name = d
+            return [("改名槽", lambda: self.rename_cur(slot, name)),
+                    ("复制 名字+hash",
+                     lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
+        return None
+
+    def _menu_param(self, item):
+        if item is None:
+            return None
+        return [("复制行",
+                 lambda: _copy_to_clipboard(" | ".join(item.text(c) for c in range(3))))]
 
 
 class Mdf2Panel(QWidget):
@@ -224,10 +299,16 @@ class Mdf2Panel(QWidget):
         self.tree_mat.setHeaderLabels(["材质"])
         self.tree_tex = QTreeWidget()
         self.tree_tex.setHeaderLabels(["贴图槽(type)", "贴图路径"])
+        self.tree_param = QTreeWidget()
+        self.tree_param.setHeaderLabels(["参数名", "值", "offset"])
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.tree_tex, "贴图槽")
+        self.tabs.addTab(self.tree_param, "材质参数")
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tree_mat)
-        split.addWidget(self.tree_tex)
+        split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
 
@@ -238,7 +319,10 @@ class Mdf2Panel(QWidget):
         self.btn_open.clicked.connect(self.open_mdf2)
         self.btn_set.clicked.connect(self.set_texture)
         self.btn_exp.clicked.connect(self.export_mdf2)
-        self.tree_mat.currentItemChanged.connect(lambda *_: self.refresh_tex())
+        self.tree_mat.currentItemChanged.connect(lambda *_: self.refresh_detail())
+        attach_menu(self.tree_mat, self._menu_mat)
+        attach_menu(self.tree_tex, self._menu_tex)
+        attach_menu(self.tree_param, self._menu_param)
 
     def load_path(self, path):
         self.obj = Mdf2.load(path)
@@ -256,6 +340,7 @@ class Mdf2Panel(QWidget):
             it = QTreeWidgetItem([m.name])
             it.setData(0, Qt.UserRole, m.name)
             self.tree_mat.addTopLevelItem(it)
+        fit_columns(self.tree_mat, [0], pad=24, min_w=120, max_w=280)
         if self.tree_mat.topLevelItemCount():
             self.tree_mat.setCurrentItem(self.tree_mat.topLevelItem(0))
 
@@ -263,18 +348,40 @@ class Mdf2Panel(QWidget):
         it = self.tree_mat.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
-    def refresh_tex(self):
-        self.tree_tex.clear()
+    def _cur_material(self):
         mn = self.cur_mat()
         if not mn:
-            return
+            return None
         for m in self.obj.materials:
             if m.name == mn:
-                for t in m.textures:
-                    self.tree_tex.addTopLevelItem(
-                        QTreeWidgetItem([t.texture_type, t.texture_path]))
-                break
+                return m
+        return None
+
+    def refresh_detail(self):
+        self.refresh_tex()
+        self.refresh_params()
+
+    def refresh_tex(self):
+        self.tree_tex.clear()
+        m = self._cur_material()
+        if m is None:
+            return
+        for t in m.textures:
+            it = QTreeWidgetItem([t.texture_type, t.texture_path])
+            it.setData(0, Qt.UserRole, ("tex", t.texture_type, t.texture_path))
+            self.tree_tex.addTopLevelItem(it)
         fit_columns(self.tree_tex, [0], pad=28, min_w=200, max_w=340)
+
+    def refresh_params(self):
+        self.tree_param.clear()
+        m = self._cur_material()
+        if m is None:
+            return
+        for pr in m.properties:
+            vals = ", ".join(f"{v:g}" for v in pr.values)
+            self.tree_param.addTopLevelItem(
+                QTreeWidgetItem([pr.name, vals, f"0x{pr.data_offset:04x}"]))
+        fit_columns(self.tree_param, [0, 1, 2], pad=24, min_w=90, max_w=420)
 
     def set_texture(self):
         if self.obj is None:
@@ -294,7 +401,7 @@ class Mdf2Panel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self.refresh_tex()
+        self.refresh_detail()
 
     def export_mdf2(self):
         if self.obj is None:
@@ -304,12 +411,48 @@ class Mdf2Panel(QWidget):
             self.obj.save(p)
             QMessageBox.information(self, "导出", f"已写出:\n{p}")
 
+    # ---- 右键菜单 ----
+    def _menu_mat(self, item):
+        if item is None:
+            return None
+        return [("设置/新增贴图槽", self.set_texture),
+                ("复制材质名", lambda: _copy_to_clipboard(item.text(0)))]
+
+    def _menu_tex(self, item):
+        d = item.data(0, Qt.UserRole) if item else None
+        if not d or d[0] != "tex":
+            return None
+        _tag, ty, old = d
+        return [("改路径", lambda: self._set_path(ty, old)),
+                ("复制 type/路径",
+                 lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
+
+    def _menu_param(self, item):
+        if item is None:
+            return None
+        return [("复制行",
+                 lambda: _copy_to_clipboard(" | ".join(item.text(c) for c in range(3))))]
+
+    def _set_path(self, ty, old):
+        mn = self.cur_mat()
+        if not mn:
+            return
+        p, ok = QInputDialog.getText(self, "改路径", f"{ty} 的贴图路径:", text=old)
+        if not ok:
+            return
+        try:
+            self.obj.set_texture(mn, ty, p or None)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self.refresh_detail()
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Material Studio — mmtr / mdf2")
-        self.resize(1100, 700)
+        self.resize(1150, 720)
         tabs = QTabWidget()
         self.mmtr = MmtrPanel()
         self.mdf2 = Mdf2Panel()
@@ -319,8 +462,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(tabs)
 
     def open_file(self, path):
-        low = path.lower()
-        if ".mdf2." in low:
+        if ".mdf2." in path.lower():
             self.mdf2.load_path(path)
         else:
             self.mmtr.load_path(path)
@@ -332,10 +474,16 @@ def main(argv):
 
     rest = list(argv[1:])
     shot = None
-    if "--shot" in rest:
-        i = rest.index("--shot")
-        shot = rest[i + 1] if i + 1 < len(rest) else None
-        del rest[i:i + 2]
+    pane = None
+    for opt in ("--shot", "--pane"):
+        if opt in rest:
+            i = rest.index(opt)
+            val = rest[i + 1] if i + 1 < len(rest) else None
+            del rest[i:i + 2]
+            if opt == "--shot":
+                shot = val
+            else:
+                pane = val
     selftest = "--selftest" in rest
     if selftest:
         rest.remove("--selftest")
@@ -345,14 +493,12 @@ def main(argv):
         if args:
             win.open_file(args[0])
             win.mmtr.tree_blob.setCurrentItem(win.mmtr.tree_blob.topLevelItem(33))
-            win.mmtr.refresh_groups()
+            win.mmtr.refresh_detail()
             print("blobs:", win.mmtr.tree_blob.topLevelItemCount())
+            print("UserMaterial 参数:", win.mmtr.tree_param.topLevelItemCount())
             for i in range(win.mmtr.tree_grp.topLevelItemCount()):
                 top = win.mmtr.tree_grp.topLevelItem(i)
                 print("  ", top.text(0), "|", top.text(1))
-                for j in range(top.childCount()):
-                    c = top.child(j)
-                    print("      ", c.text(0), "|", c.text(1))
         print("selftest OK")
         return 0
 
@@ -360,10 +506,15 @@ def main(argv):
         win.open_file(args[0])
     win.resize(1150, 720)
     if shot:
-        if args and ".mdf2." in args[0].lower():
+        is_mdf2 = bool(args) and ".mdf2." in args[0].lower()
+        if is_mdf2:
             win.tabs.setCurrentIndex(1)
-        elif args and win.mmtr.tree_blob.topLevelItemCount() > 33:
-            win.mmtr.tree_blob.setCurrentItem(win.mmtr.tree_blob.topLevelItem(33))
+            panel = win.mdf2
+        else:
+            panel = win.mmtr
+            if args and panel.tree_blob.topLevelItemCount() > 33:
+                panel.tree_blob.setCurrentItem(panel.tree_blob.topLevelItem(33))
+        panel.tabs.setCurrentIndex(1 if pane == "param" else 0)
         win.show()
         for _ in range(3):
             app.processEvents()

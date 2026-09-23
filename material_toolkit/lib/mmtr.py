@@ -54,8 +54,12 @@ class Mmtr:
 
     @classmethod
     def load(cls, path: str) -> "Mmtr":
+        return cls.from_bytes(open(path, "rb").read())
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "Mmtr":
         m = cls()
-        m.data = open(path, "rb").read()
+        m.data = data
         if m.data[:4] != b"SDF\0":
             raise ValueError("not an SDF/mmtr file")
         m.blob_start = _u32(m.data, 8)
