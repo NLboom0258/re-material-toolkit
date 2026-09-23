@@ -6,7 +6,7 @@
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
 - MMTR 页: 左=Blob 列表; 右标签 = 「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
-- MDF2 页: 左=材质列表; 右标签 = 「贴图槽」 / 「材质参数」(该材质的参数值, 只读)。
+- MDF2 页: 左=材质列表; 右标签 = 「贴图槽」(type 双击改名 / 路径常驻输入框 / 增·删) / 「材质参数」(名字可双击改名·类型·值可编辑)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
 MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/float4 额外带**颜色块**(点击取色)。
 
@@ -563,6 +563,10 @@ class Mdf2Panel(QWidget):
         self.tree_mat.setHeaderLabels(["材质"])
         self.tree_tex = QTreeWidget()
         self.tree_tex.setHeaderLabels(["贴图槽(type)", "贴图路径"])
+        # 贴图槽 type 双击内联改名
+        self.tree_tex.setItemDelegate(
+            InlineNameDelegate(self.tree_tex, 0, self._tex_name,
+                               self._commit_tex_rename))
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "值", "offset"])
         # 参数名双击内联改名(预选原名); 类型/值列为常驻控件
@@ -571,7 +575,8 @@ class Mdf2Panel(QWidget):
                                self._commit_param_rename))
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.tree_tex, "贴图槽")
+        self.tabs.addTab(wrap_with_add_button(self.tree_tex, "＋ 新增贴图槽", self.set_texture),
+                         "贴图槽")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
 
@@ -636,10 +641,18 @@ class Mdf2Panel(QWidget):
         if m is None:
             return
         for t in m.textures:
-            it = QTreeWidgetItem([t.texture_type, t.texture_path])
-            it.setData(0, Qt.UserRole, ("tex", t.texture_type, t.texture_path))
+            it = QTreeWidgetItem([t.texture_type, ""])
+            it.setData(0, Qt.UserRole, ("tex", t.texture_type))
+            it.setFlags(it.flags() | Qt.ItemIsEditable)   # type 可双击改名
             self.tree_tex.addTopLevelItem(it)
+            # 路径列: 常驻输入框(改完失焦/回车即写回)
+            le = QLineEdit(t.texture_path)
+            le.setPlaceholderText("(留空 = Null.tex 占位)")
+            le.editingFinished.connect(
+                lambda ty=t.texture_type, w=le: self._commit_tex_path(ty, w.text()))
+            self.tree_tex.setItemWidget(it, 1, le)
         fit_columns(self.tree_tex, [0], pad=28, min_w=200, max_w=340)
+        self.tree_tex.setColumnWidth(1, 320)
 
     def refresh_params(self):
         self.tree_param.clear()
@@ -706,10 +719,10 @@ class Mdf2Panel(QWidget):
         d = item.data(0, Qt.UserRole) if item else None
         if not d or d[0] != "tex":
             return None
-        _tag, ty, old = d
-        return [("改路径", lambda: self._set_path(ty, old)),
-                ("复制 type/路径",
-                 lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
+        ty = d[1]
+        return [("重命名", lambda: self.tree_tex.editItem(item, 0)),
+                ("删除贴图槽", lambda: self.delete_tex(ty)),
+                ("复制 type/路径", lambda: self._copy_tex(ty))]
 
     def _menu_param(self, item):
         acts = [("新增参数", self.add_param)]
@@ -810,19 +823,47 @@ class Mdf2Panel(QWidget):
         relayout_offsets(m)
         self.refresh_detail()
 
-    def _set_path(self, ty, old):
-        mn = self.cur_mat()
-        if not mn:
+    def _tex_name(self, item):
+        d = item.data(0, Qt.UserRole) if item else None
+        return d[1] if d and d[0] == "tex" else ""
+
+    def _commit_tex_rename(self, key, text):
+        """贴图槽 type 内联改名提交: key=("tex", 旧 type)。"""
+        if not key or key[0] != "tex" or not text or text == key[1]:
             return
-        p, ok = QInputDialog.getText(self, "改路径", f"{ty} 的贴图路径:", text=old)
-        if not ok:
+        m = self._cur_material()
+        if m is None:
+            return
+        if m.get_texture(text) is not None:
+            QMessageBox.warning(self, "提示", f"已存在同名贴图槽 {text!r}")
             return
         try:
-            self.obj.set_texture(mn, ty, p or None)
+            m.rename_texture(key[1], text)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self.refresh_detail()
+        self.refresh_tex()
+
+    def _commit_tex_path(self, ty, path):
+        m = self._cur_material()
+        if m is None:
+            return
+        tb = m.get_texture(ty)
+        if tb is not None:
+            tb.texture_path = path
+
+    def delete_tex(self, ty):
+        m = self._cur_material()
+        if m is None:
+            return
+        if m.delete_texture(ty):
+            self.refresh_tex()
+
+    def _copy_tex(self, ty):
+        m = self._cur_material()
+        tb = m.get_texture(ty) if m else None
+        path = tb.texture_path if tb else ""
+        _copy_to_clipboard(f"{ty} | {path}")
 
 
 class MainWindow(QMainWindow):

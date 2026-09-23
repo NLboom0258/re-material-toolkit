@@ -190,6 +190,14 @@ class Material:
         self.textures.append(tb)
         return tb
 
+    def rename_texture(self, old, new):
+        """把贴图槽的 type 名由 old 改为 new(绑定键变化), 返回 TextureBinding。"""
+        tb = self.get_texture(old)
+        if tb is None:
+            raise ValueError(f"texture {old!r} not found")
+        tb.texture_type = new
+        return tb
+
     def delete_texture(self, texture_type):
         """按 type 名删除贴图槽, 返回是否删除。"""
         for i, tb in enumerate(self.textures):
