@@ -10,12 +10,14 @@
   python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] [--no-rdef] -o <out.mmtr>
   python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
+  python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
   - sync 同步层见 lib/sync.py(mdf2 参数集合跟随 mmtr);
   - 纹理槽(资源绑定)见 lib/binding.py: 自动对该 blob 的**所有**绑定组操作
     (同一 shader 有多组"池+描述符", 必须全做); 绑定键=header 池名。
+  - 完整解析模型见 lib/mmtr_model.py(头部/程序表/1083 变体记录/绑定组/参数表)。
   - hash = murmur3(名字, 0xFFFFFFFF),见 lib/hashes.py。
 """
 import os, sys
@@ -26,6 +28,7 @@ from lib.mdf2 import Mdf2      # noqa: E402
 from lib.mmtr import Mmtr      # noqa: E402
 from lib.sync import sync_mdf2  # noqa: E402
 from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E402
+from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
 
 
 def main():
@@ -95,6 +98,24 @@ def main():
         tb = mf.set_texture(mat_name, tex_type, path, default_path=nullp)
         n = mf.save(out)
         print(f"OK: {mat_name} texture {tex_type!r} -> {tb.texture_path!r} -> {out} ({n} bytes)")
+    elif cmd == "model-info":
+        path = a[0]
+        m = MmtrModel.load(path)
+        m.dump()
+        print("  referenced blobs (blob_idx: n_records):")
+        for bi, off, n in m.referenced_blobs():
+            print(f"    blob[{bi}] 0x{off:x}: {n}")
+        if "--blob" in a:
+            bi = int(a[a.index("--blob") + 1])
+            print(f"  groups of blob[{bi}]:")
+            for gi, g in enumerate(m.groups(bi)):
+                print(f"    g{gi} desc@0x{g.desc:x} pool@0x{g.pool:x} "
+                      f"n_srv={len(g.srvs)} stage={stage_label(g.stage_mask)}")
+                for s in g.srvs:
+                    print(f"        [{s['idx']}] t{s['slot']:<3} type=0x{s['type']:02x} {s['name']}")
+        if "--variants" in a:
+            for r in m.iter_records():
+                print(f"    {r.name:40s} blob=0x{r.blob_off:x} sz={r.blob_size}")
     else:
         print(__doc__)
 
