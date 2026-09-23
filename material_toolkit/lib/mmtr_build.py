@@ -44,6 +44,11 @@ ROLE_FIELDS = {"PS": (0x00,), "VS": (0xE0, 0xE8), "CS": (0x08,)}
 # 记录内 "PS 大小" 字段
 REC_OFF_PS_SIZE = 0x9C
 
+# 绑定指针(cbuffer/sampler/纹理 的描述符+池)与计数 字段 —— 跨"布局"重指时需从 donor 同步
+BINDING_FIELDS = (0x38, 0x40, 0x48, 0x50, 0x58, 0x60)
+COUNT_FIELDS = (0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xC4, 0xC8, 0xCC)
+SYNC_FIELDS = BINDING_FIELDS + COUNT_FIELDS
+
 
 def _u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
@@ -174,3 +179,38 @@ class MmtrImage:
             self.set_program(s, role, dst_off, size=size)
             n += 1
         return n
+
+    # ---- 绑定组/计数 装配 ----
+    def sync_binding_from(self, dst_slot, src_slot, role="PS", blob_off=None, size=None):
+        """从 src_slot 复制 绑定指针 + 计数 到 dst_slot(可选同时重指程序/同步大小)。
+
+        用途: 把某槽改成使用"另一个槽所用的程序"时, 其绑定组与计数须跟随该程序
+        (跨"资源布局"替换的关键)。src_slot 通常是"原生使用目标程序"的槽(donor)。
+        """
+        for fo in SYNC_FIELDS:
+            self.set_rec_field(dst_slot, fo, self.rec_field(src_slot, fo))
+        if blob_off is not None:
+            self.set_program(dst_slot, role, blob_off, size=size)
+
+    def repoint_program_with_binding(self, src_off, dst_idx, model, role="PS"):
+        """整族(角色指向 src_off 的槽)重指到 blob[dst_idx], 并从"同组的原生 donor 槽"
+        同步 绑定指针 + 计数 + 大小。返回 (改动槽数, 跳过槽数)。
+
+        组(donor)按 (desc,pool) 匹配 —— 同一技术族各前缀共用同组, 故 donor 通常存在。
+        """
+        dst_off = model.blob_off(dst_idx)
+        dst_size = model.blob_size(dst_idx)
+        donors = {}
+        for s in range(REC_N):
+            if any(self.rec_field(s, fo) == dst_off for fo in ROLE_FIELDS[role]):
+                donors.setdefault((self.rec_field(s, 0x58), self.rec_field(s, 0x60)), s)
+        n = skip = 0
+        for s in self.slots_using(src_off, role):
+            key = (self.rec_field(s, 0x58), self.rec_field(s, 0x60))
+            d = donors.get(key)
+            if d is None:
+                skip += 1
+                continue
+            self.sync_binding_from(s, d, role=role, blob_off=dst_off, size=dst_size)
+            n += 1
+        return n, skip
