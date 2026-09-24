@@ -17,6 +17,7 @@ MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/fl
 截图: python app.py --shot <out.png> [--pane bind|param] <file>   (渲染截图, 调试用)
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -134,12 +135,60 @@ _ASM_OPCODES = {
     "bfrev", "countbits", "firstbit_hi", "firstbit_lo", "firstbit_shi",
 }
 
+# HLSL 混合标记(见翻译器 README); 不在其中的 HLSL*/DXBC* 会标红
+_HLSL_MARKERS = ("HLSLSnippet", "HLSLFunctionImport", "HLSLTexture",
+                 "HLSLSampler", "HLSLMov", "HLSLInit", "HLSL", "DXBCMov")
+_HLSL_KEYWORDS = {
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "break", "continue", "return", "discard", "true", "false",
+    "static", "const", "in", "out", "inout", "struct", "void",
+}
+_HLSL_TYPES = {
+    "float", "float2", "float3", "float4", "float2x2", "float3x3",
+    "float4x4", "half", "half2", "half3", "half4", "double", "int",
+    "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4", "bool",
+    "bool2", "bool3", "bool4", "min16float", "min10float", "min16int",
+    "min16uint", "Texture2D", "Texture2DArray", "TextureCube",
+    "SamplerState", "SamplerComparisonState", "matrix",
+}
+_HLSL_INTRINSICS = {
+    "abs", "acos", "all", "any", "asin", "atan", "atan2", "ceil", "clamp",
+    "clip", "cos", "cosh", "cross", "ddx", "ddy", "degrees", "distance",
+    "dot", "exp", "exp2", "faceforward", "floor", "fmod", "frac", "frexp",
+    "fwidth", "isfinite", "isinf", "isnan", "ldexp", "length", "lerp",
+    "lit", "log", "log2", "log10", "mad", "max", "min", "modf", "mul",
+    "normalize", "pow", "radians", "rcp", "reflect", "refract", "round",
+    "rsqrt", "saturate", "sign", "sin", "sincos", "sinh", "smoothstep",
+    "sqrt", "step", "tan", "tanh", "transpose", "trunc",
+    "Sample", "SampleLevel", "SampleBias", "SampleCmp", "SampleGrad",
+    "tex2D", "tex2Dlod", "tex2Dproj",
+}
+
+
+def _marker_bad(marker, code):
+    """轻量标记语法检查(只查必备/禁止符号, 不是完整语法): 明显乱写 -> True。
+
+    code: 标记之后的代码部分(已去掉行内注释)。
+    例: DXBCMov r1.x = Test1 (应为逗号) -> True。
+    """
+    if marker == "DXBCMov":
+        return ("," not in code) or ("=" in code)
+    if marker == "HLSLMov":
+        return "=" not in code
+    if marker in ("HLSLTexture", "HLSLSampler"):
+        return "=" not in code
+    if marker == "HLSLFunctionImport":
+        return '"' not in code
+    if marker == "HLSL":
+        return code.strip() == ""
+    return False
+
 
 class AsmHighlighter(QSyntaxHighlighter):
-    """DXBC asm 语法高亮(指令/寄存器/声明/注释); 并高亮 HLSL 混合标记。
+    """DXBC asm 语法高亮; 在 HLSL 混合标记的 HLSL 范围内套用 HLSL 高亮;
+    对“像标记但不认识”的内容(及缺 `{` 的 HLSLSnippet)加红色波浪线。
 
-    标记(HLSLMov/DXBCMov/HLSLSnippet/HLSLTexture/... )单独标色, 方便混写识别。
-    高亮规则集中在此类, 以后要换 HLSL 混写的专用高亮直接替换本类实例即可。
+    规则集中在此类, 以后要换混写专用高亮直接替换实例即可。
     """
 
     def __init__(self, document):
@@ -154,11 +203,13 @@ class AsmHighlighter(QSyntaxHighlighter):
                 f.setFontItalic(True)
             return f
 
+        self._f_marker = fmt("#c586c0", bold=True)
+        self._err = QTextCharFormat()
+        self._err.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
+        self._err.setUnderlineColor(QColor("#f14c4c"))
+
         op = "|".join(sorted(_ASM_OPCODES, key=len, reverse=True))
-        self._rules = [
-            (QRegularExpression(
-                r"^\s*(HLSLSnippet|HLSLTexture|HLSLSampler|HLSLFunctionImport"
-                r"|HLSLMov|HLSLInit|HLSL|DXBCMov)\b"), fmt("#c586c0", bold=True)),
+        self._asm_rules = [
             (QRegularExpression(r"\b(ps_5_[01]|vs_5_[01]|cs_5_[01])\b"), fmt("#dcdcaa")),
             (QRegularExpression(r"\bdcl_[A-Za-z0-9_]+"), fmt("#4ec9b0")),
             (QRegularExpression(r"^\s*(%s)\b" % op), fmt("#569cd6", bold=True)),
@@ -167,15 +218,83 @@ class AsmHighlighter(QSyntaxHighlighter):
             (QRegularExpression(r"\bl\([^)]*\)|\b0x[0-9a-fA-F]+\b|-?\d+\.\d+"),
              fmt("#b5cea8")),
             (QRegularExpression(r"//.*$"), fmt("#6a9955", italic=True)),
-            (QRegularExpression(r";.*$"), fmt("#6a9955", italic=True)),
         ]
 
+        def alt(wordset):
+            return "|".join(sorted(wordset, key=len, reverse=True))
+        self._hlsl_rules = [
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_KEYWORDS)), fmt("#569cd6", bold=True)),
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_TYPES)), fmt("#4ec9b0")),
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_INTRINSICS)), fmt("#dcdcaa")),
+            (QRegularExpression(r"-?\d+\.\d+|\b0x[0-9a-fA-F]+\b|\b\d+\b"), fmt("#b5cea8")),
+            (QRegularExpression(r"//.*$"), fmt("#6a9955", italic=True)),
+        ]
+        self._marker_re = re.compile(r"^\s*(" + "|".join(_HLSL_MARKERS) + r")\b")
+        self._unknown_re = re.compile(r"^\s*((?:HLSL|DXBC)[A-Za-z]\w*)")
+
+    def _apply(self, pat, f, text, lo, hi):
+        it = pat.globalMatch(text, lo)
+        while it.hasNext():
+            m = it.next()
+            s = m.capturedStart()
+            if s >= hi:
+                break
+            self.setFormat(s, min(m.capturedLength(), hi - s), f)
+
+    def _apply_hlsl(self, text, lo, hi):
+        for pat, f in self._hlsl_rules:
+            self._apply(pat, f, text, lo, hi)
+
+    def _scan_braces(self, text, start, depth):
+        """从 start 起按花括号配平; 返回 (hlsl_end, new_depth)。"""
+        d = depth
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                d += 1
+            elif c == "}":
+                d -= 1
+                if d <= 0:
+                    return i + 1, 0
+        return len(text), d
+
     def highlightBlock(self, text):
-        for pat, f in self._rules:
-            it = pat.globalMatch(text)
-            while it.hasNext():
-                m = it.next()
-                self.setFormat(m.capturedStart(), m.capturedLength(), f)
+        # 1) asm 规则打底(整行)
+        for pat, f in self._asm_rules:
+            self._apply(pat, f, text, 0, len(text))
+
+        prev = self.previousBlockState()
+        depth = prev if (prev is not None and prev > 0) else 0
+        if depth > 0:
+            # 续行: 整行属 HLSL, 直到收尾 }
+            hl_end, state = self._scan_braces(text, 0, depth)
+            self._apply_hlsl(text, 0, hl_end)
+            self.setCurrentBlockState(state)
+            return
+
+        m = self._marker_re.match(text)
+        if m:
+            marker = m.group(1)
+            self.setFormat(m.start(1), m.end(1) - m.start(1), self._f_marker)
+            code = text[m.end(1):].split("//")[0]
+            state = 0
+            if marker == "HLSLSnippet":
+                if "{" not in code:
+                    self.setFormat(m.start(1), m.end(1) - m.start(1), self._err)
+                hl_end, state = self._scan_braces(text, m.end(1), 0)
+                self._apply_hlsl(text, m.end(1), hl_end)
+            else:
+                self._apply_hlsl(text, m.end(1), len(text))
+                if _marker_bad(marker, code):
+                    self.setFormat(m.start(1),
+                                   m.end(1) + len(code) - m.start(1), self._err)
+            self.setCurrentBlockState(state)
+            return
+
+        um = self._unknown_re.match(text)
+        if um:
+            self.setFormat(um.start(1), um.end(1) - um.start(1), self._err)
+        self.setCurrentBlockState(0)
 
 
 # PARAM_TYPES 由 lib.mdf2 提供(单一来源: [(类型名, 字节大小), ...])
