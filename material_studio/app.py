@@ -6,7 +6,7 @@
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
 - MMTR 页: **多文件标签页**(每文件一页, 可关闭/拖动; 右上「打开 mmtr…」; 无法从0新建, 故空时显示不可关闭的「(未打开)」占位页);
-  每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽) / 「材质参数」(UserMaterial 参数定义, 只读)。
+  每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽, 槽名下拉选池名) / 「名称池」(全局贴图名表, 可全局改名) / 「材质参数」(UserMaterial 参数定义, 只读)。
 - MDF2 页: **多文件标签页**(每文件一页, 可关闭/拖动, 右上「＋」新建空文件, 关掉最后一个自动补空文件);
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
@@ -25,7 +25,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from tools.material_toolkit.lib.binding import (  # noqa: E402
-    add_texture_slot, group_summary, rename_slot,
+    add_texture_slot, group_summary,
+    name_vocabulary, rename_name_global,
 )
 from tools.material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
@@ -332,12 +333,17 @@ class MmtrPanel(QWidget):
         self.tree_blob = QTreeWidget()
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_grp = QTreeWidget()
-        self.tree_grp.setHeaderLabels(["槽 / 组", "类型 / 说明"])
+        self.tree_grp.setHeaderLabels(["项 / 组", "名称(池)", "类型 / 说明"])
+        self.tree_pool = QTreeWidget()
+        self.tree_pool.setHeaderLabels(["贴图名(池)", "引用组数", "引用 blob"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
 
+        self._vocab_names = None    # 名称池词汇表缓存(编辑后失效)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
+        self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
 
@@ -357,11 +363,8 @@ class MmtrPanel(QWidget):
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_detail())
         attach_menu(self.tree_blob, self._menu_blob)
         attach_menu(self.tree_grp, self._menu_grp)
+        attach_menu(self.tree_pool, self._menu_pool)
         attach_menu(self.tree_param, self._menu_param)
-        # 贴图槽名双击内联改名(预选原名)
-        self.tree_grp.setItemDelegate(
-            InlineNameDelegate(self.tree_grp, 0, self._slot_name,
-                               self._commit_slot_rename))
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
@@ -377,6 +380,7 @@ class MmtrPanel(QWidget):
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
         self.refresh_blobs()
+        self.refresh_pool()
         self._emit_title()
 
     def open_mmtr(self):
@@ -426,22 +430,93 @@ class MmtrPanel(QWidget):
         idx = self.cur_blob()
         if idx is None or self.data is None:
             return
+        vocab = self._vocab()
         for k, g in enumerate(group_summary(self.data, idx)):
             names = [s["name"] for s in g["srvs"]]
-            top = QTreeWidgetItem([f"组{k} · {group_mode(names)}",
+            top = QTreeWidgetItem([f"组{k} · {group_mode(names)}", "",
                                    f"desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
                                    f"n_rec={g['n_rec']} srv={g['b8']}"])
             top.setData(0, Qt.UserRole, ("group", k))
             self.tree_grp.addTopLevelItem(top)
             for s in g["srvs"]:
                 tyname = TYPENAME.get(s["type"], f"0x{s['type']:02x}")
-                child = QTreeWidgetItem([f"t{s['slot']}  {s['name']}",
-                                         f"{tyname}  hash=0x{s['hash']:08x}"])
+                child = QTreeWidgetItem([f"[{s['idx']}]", "",
+                                         f"{tyname}  t{s['slot']}  hash=0x{s['hash']:08x}"])
                 child.setData(0, Qt.UserRole, ("slot", k, s["slot"], s["name"]))
-                child.setFlags(child.flags() | Qt.ItemIsEditable)  # 名称可双击改名
                 top.addChild(child)
+                # 槽名 = 常驻下拉框(候选 = 本文件名称池词汇表; 可自由输入新名)
+                cb = QComboBox()
+                cb.setEditable(True)
+                cb.addItems(vocab)
+                cb.setCurrentText(s["name"])
+                cb.textActivated.connect(
+                    lambda txt, kk=k, sl=s["slot"], old=s["name"]:
+                    self._commit_slot_setname(kk, sl, old, txt))
+                cb.lineEdit().editingFinished.connect(
+                    lambda kk=k, sl=s["slot"], old=s["name"], c=cb:
+                    self._commit_slot_setname(kk, sl, old, c.currentText()))
+                self.tree_grp.setItemWidget(child, 1, cb)
             top.setExpanded(True)
-        fit_columns(self.tree_grp, [0], pad=28, min_w=200, max_w=480)
+        fit_columns(self.tree_grp, [0, 2], pad=28, min_w=120, max_w=520)
+        self.tree_grp.setColumnWidth(1, 210)
+
+    def _vocab(self):
+        """名称池词汇表(去重名字, 排序); 缓存, 编辑后失效。"""
+        if self.data is None:
+            return []
+        if self._vocab_names is None:
+            self._vocab_names = sorted(name_vocabulary(self.data))
+        return self._vocab_names
+
+    def refresh_pool(self):
+        """名称池页: 列出该文件用到的所有贴图名 + 引用统计。"""
+        self.tree_pool.clear()
+        if self.data is None:
+            return
+        vocab = name_vocabulary(self.data)
+        for nm in sorted(vocab, key=lambda n: (-vocab[n]["groups"], n)):
+            d = vocab[nm]
+            it = QTreeWidgetItem([nm, str(d["groups"]), str(len(d["blobs"]))])
+            it.setData(0, Qt.UserRole, ("poolname", nm))
+            self.tree_pool.addTopLevelItem(it)
+        fit_columns(self.tree_pool, [0, 1, 2], pad=24, min_w=80, max_w=520)
+
+    def _reload_after_edit(self):
+        """任何“改了 bytes”的操作之后统一: 重解析 + 失效缓存 + 刷新所有视图。"""
+        self.mmtr = Mmtr.from_bytes(self.data)
+        self._um = self.mmtr.cbuffer_members("UserMaterial")
+        self._vocab_names = None
+        self.refresh_blobs()
+        self.refresh_detail()
+        self.refresh_pool()
+
+    def _blob_has_name(self, name):
+        """当前 blob 的任何组里是否还有该名字(用于去掉重复信号)。"""
+        idx = self.cur_blob()
+        if idx is None or self.data is None:
+            return False
+        for g in group_summary(self.data, idx):
+            for s in g["srvs"]:
+                if s["name"] == name:
+                    return True
+        return False
+
+    def _commit_slot_setname(self, group_k, slot, old, new):
+        """下拉框改某槽的池名: 按名改(该 blob 的所有组一起改, 绑定键=名)。"""
+        new = (new or "").strip()
+        if not new or new == old or self.data is None:
+            return
+        if not self._blob_has_name(old):
+            return                    # 已生效(含重复信号)
+        if not self._need_mmtr():
+            return
+        try:
+            self.data = rename_name_global(self.data, old, new,
+                                           blobs=[self.cur_blob()])
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit()
 
     def refresh_params(self):
         self.tree_param.clear()
@@ -471,46 +546,21 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self.mmtr = Mmtr.from_bytes(self.data)
-        self._um = self.mmtr.cbuffer_members("UserMaterial")
-        self.refresh_blobs()
-        self.refresh_detail()
+        self._reload_after_edit()
 
     def rename_cur(self, slot, oldname):
         if not self._need_mmtr():
             return
-        name, ok = QInputDialog.getText(self, "改名槽", f"把 t{slot}({oldname}) 改名为:")
-        if not (ok and name):
+        name, ok = QInputDialog.getText(self, "改名槽", f"把 {oldname} 改名为:")
+        if not (ok and name and name != oldname):
             return
         try:
-            self.data = rename_slot(self.data, self.cur_blob(), slot, name)
+            self.data = rename_name_global(self.data, oldname, name,
+                                           blobs=[self.cur_blob()])
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self.mmtr = Mmtr.from_bytes(self.data)
-        self._um = self.mmtr.cbuffer_members("UserMaterial")
-        self.refresh_blobs()
-        self.refresh_detail()
-
-    def _slot_name(self, item):
-        d = item.data(0, Qt.UserRole) if item else None
-        return d[3] if d and d[0] == "slot" else ""
-
-    def _commit_slot_rename(self, key, text):
-        """内联改名提交: key=("slot", 组 index, slot, 旧名)。"""
-        if not key or key[0] != "slot" or not text or text == key[3]:
-            return
-        if not self._need_mmtr():
-            return
-        try:
-            self.data = rename_slot(self.data, self.cur_blob(), key[2], text)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
-            return
-        self.mmtr = Mmtr.from_bytes(self.data)
-        self._um = self.mmtr.cbuffer_members("UserMaterial")
-        self.refresh_blobs()
-        self.refresh_detail()
+        self._reload_after_edit()
 
     # ---- 右键菜单 ----
     def _menu_blob(self, item):
@@ -534,8 +584,33 @@ class MmtrPanel(QWidget):
             _tag, _k, slot, name = d
             return [("改名槽", lambda: self.rename_cur(slot, name)),
                     ("复制 名字+hash",
-                     lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
+                     lambda: _copy_to_clipboard(f"{item.text(0)} {name} | {item.text(2)}"))]
         return None
+
+    def _menu_pool(self, item):
+        if item is None or self.data is None:
+            return None
+        nm = item.text(0)
+        return [("全局改名…", lambda: self.global_rename(nm)),
+                ("复制名", lambda: _copy_to_clipboard(nm))]
+
+    def global_rename(self, old):
+        """名称池页: 把某贴图名在所有组里全局改名(弹对话框)。"""
+        if not self._need_mmtr():
+            return
+        new, ok = QInputDialog.getText(self, "全局改名", f"把 {old} 在所有组里改名为:")
+        if not (ok and new and new != old):
+            return
+        self._apply_global_rename(old, new)
+
+    def _apply_global_rename(self, old, new):
+        """执行全局改名(无对话框; 便于测试)。"""
+        try:
+            self.data = rename_name_global(self.data, old, new)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit()
 
     def _menu_param(self, item):
         acts = [("新增参数(UserMaterial)", self.add_param)]
@@ -562,10 +637,7 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self.mmtr = Mmtr.from_bytes(self.data)
-        self._um = self.mmtr.cbuffer_members("UserMaterial")
-        self.refresh_blobs()
-        self.refresh_detail()
+        self._reload_after_edit()
 
 
 class Mdf2Panel(QWidget):
@@ -1306,9 +1378,10 @@ def main(argv):
             mp.refresh_detail()
             print("blobs:", mp.tree_blob.topLevelItemCount())
             print("UserMaterial 参数:", mp.tree_param.topLevelItemCount())
+            print("名称池:", mp.tree_pool.topLevelItemCount())
             for i in range(mp.tree_grp.topLevelItemCount()):
                 top = mp.tree_grp.topLevelItem(i)
-                print("  ", top.text(0), "|", top.text(1))
+                print("  ", top.text(0), "|", top.text(2))
         print("selftest OK")
         return 0
 
@@ -1325,7 +1398,11 @@ def main(argv):
             if panel is not None and panel.tree_blob.topLevelItemCount() > 33:
                 panel.tree_blob.setCurrentItem(panel.tree_blob.topLevelItem(33))
         if panel is not None:
-            panel.tabs.setCurrentIndex({"param": 1, "props": 2}.get(pane, 0))
+            if isinstance(panel, Mdf2Panel):
+                idx = {"param": 1, "props": 2}.get(pane, 0)
+            else:
+                idx = {"pool": 1, "param": 2}.get(pane, 0)
+            panel.tabs.setCurrentIndex(idx)
         win.show()
         for _ in range(3):
             app.processEvents()

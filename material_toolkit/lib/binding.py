@@ -318,6 +318,61 @@ def rename_slot(data: bytes, blob_idx: int, slot: int, new_name: str, reuse_name
     return bytes(out)
 
 
+def name_vocabulary(data):
+    """文件内**所有绑定组**用到的 SRV 名字 -> {name: {"groups": 组数, "blobs": set(blob_idx)}}。
+
+    基于已验证的 group_summary 枚举(仅非空 blob 的组); 空槽(blob=0)记录不参与。
+    绑定键=池名 ⇒ 这个名字表就是“该材质用到的所有贴图类型”。
+    """
+    vocab = {}
+    _bs, bl = blob_list(data)
+    for idx in range(len(bl)):
+        for g in group_summary(data, idx):
+            for s in g["srvs"]:
+                d = vocab.setdefault(s["name"], {"groups": 0, "blobs": set()})
+                d["groups"] += 1
+                d["blobs"].add(idx)
+    return vocab
+
+
+def rename_name_global(data, old_name, new_name, reuse_name=True, blobs=None):
+    """把**指定范围内**绑定组里名字==old_name 的池条目改名为 new_name(按名字, 与类型无关)。
+
+    绑定键=池名 ⇒ 按名改名。blobs=None 时全文件; 传 [blob_idx,...] 时只改这些 blob 的组
+    (raw/tex2d 都能改, 不像 rename_slot 只认 texture2d 且 slot 不唯一)。
+    新名若文件内已存在(且 reuse_name)则复用其串; 否则追加到字符串区末尾(带全量重映射, 文件变长)。
+    返回新文件 bytes(未命中任何条目则原样返回)。
+    """
+    data = bytes(data)
+    _bs, bl = blob_list(data)
+    found = data.find(new_name.encode("ascii") + b"\x00", 0, _bs)
+    append = (found < 0) or (not reuse_name)
+
+    # 收集所有需改的池条目偏移(以 (pool, idx) 定位, 去重)
+    edits = set()
+    for idx in (range(len(bl)) if blobs is None else blobs):
+        for g in group_summary(data, idx):
+            for s in g["srvs"]:
+                if s["name"] == old_name:
+                    edits.add(g["pool"] + s["idx"] * 16)
+    if not edits:
+        return data
+
+    hash_ = ascii_hash(new_name)
+    if append:
+        name_bytes = new_name.encode("ascii") + b"\x00"
+        out = bytearray(_splice_and_remap(data, [(_bs, name_bytes)]))
+        new_name_off = _bs
+    else:
+        out = bytearray(data)
+        new_name_off = found
+
+    for eo in edits:
+        struct.pack_into("<Q", out, eo, new_name_off)
+        struct.pack_into("<I", out, eo + 8, hash_)
+    return bytes(out)
+
+
 if __name__ == "__main__":
     import sys
     d = open(sys.argv[1], "rb").read()

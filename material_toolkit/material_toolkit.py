@@ -9,6 +9,8 @@
   python material_toolkit.py tex-list   <in.mmtr> <blob_idx>
   python material_toolkit.py tex-add    <in.mmtr> <blob_idx> <name> [--slot N] [--no-rdef] -o <out.mmtr>
   python material_toolkit.py tex-rename <in.mmtr> <blob_idx> <slot> <new_name> -o <out.mmtr>
+  python material_toolkit.py pool-list   <in.mmtr>
+  python material_toolkit.py pool-rename <in.mmtr> <old_name> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
@@ -35,7 +37,8 @@ sys.path.insert(0, HERE)
 from lib.mdf2 import Mdf2      # noqa: E402
 from lib.mmtr import Mmtr      # noqa: E402
 from lib.sync import sync_mdf2  # noqa: E402
-from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E402
+from lib.binding import (add_texture_slot, rename_slot, group_summary,  # noqa: E402
+                         name_vocabulary, rename_name_global)
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
 from lib.mmtr_build import MmtrTemplate, content_count  # noqa: E402
 from lib.mmtr_info import blob_info  # noqa: E402
@@ -161,6 +164,21 @@ def main():
         open(out, "wb").write(sk)
         print(f"OK: 版本骨架 {len(sk)} 字节 -> {out} "
               f"(内容字段 {content_count()} 字节已清零)")
+    elif cmd == "pool-list":
+        data = open(a[0], "rb").read()
+        vocab = name_vocabulary(data)
+        print(f"{len(vocab)} 个贴图名(池):")
+        for nm in sorted(vocab, key=lambda n: (-vocab[n]["groups"], n)):
+            d = vocab[nm]
+            print(f"  {nm:44s} groups={d['groups']:3d} blobs={len(d['blobs'])}")
+    elif cmd == "pool-rename":
+        src, old, new = a[0], a[1], a[2]
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
+        data = open(src, "rb").read()
+        nd = rename_name_global(data, old, new)
+        open(out, "wb").write(nd)
+        print(f"OK: 全局改名 {old!r} -> {new!r} -> {out} ({len(data)} -> {len(nd)} bytes)")
+        _selfcheck_mmtr(nd)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)
