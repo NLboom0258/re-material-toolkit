@@ -42,8 +42,10 @@ from tools.material_toolkit.lib.mmtr_blobs import (  # noqa: E402
 )
 from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 
-from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QFont  # noqa: E402
+from PySide6.QtCore import Qt, QTimer, Signal, QRegularExpression  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
+)
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
     QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
@@ -113,6 +115,67 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+# asm 高亮用到的 DXBC SM5 指令集(仅作为关键字着色, 不求完备)
+_ASM_OPCODES = {
+    "mov", "movc", "mova", "mad", "add", "mul", "div", "dp2", "dp3",
+    "dp4", "min", "max", "lt", "le", "gt", "ge", "eq", "ne", "and",
+    "or", "xor", "not", "sample", "sample_l", "sample_b", "sample_c",
+    "sample_c_l", "sample_d", "sample_cmp", "ld", "ld_ms", "resinfo",
+    "discard", "clip", "ftoi", "itof", "ftou", "utof", "f16tof32",
+    "f32tof16", "sincos", "cos", "sin", "exp", "log", "sqrt", "rsq",
+    "rcp", "frc", "round_ne", "round_ni", "round_pi", "round_z", "ishl",
+    "ishr", "ushr", "imad", "umad", "umul", "udiv", "ine", "ige", "ilt",
+    "ieq", "ineg", "iadd", "inot", "switch", "case", "default",
+    "endswitch", "loop", "endloop", "break", "breakc", "continue",
+    "continuec", "if_nz", "if_z", "else", "endif", "ret", "retc", "call",
+    "callc", "nop", "sync", "emit", "cut", "gather4", "swapc", "bfi",
+    "bfrev", "countbits", "firstbit_hi", "firstbit_lo", "firstbit_shi",
+}
+
+
+class AsmHighlighter(QSyntaxHighlighter):
+    """DXBC asm 语法高亮(指令/寄存器/声明/注释); 并高亮 HLSL 混合标记。
+
+    标记(HLSLMov/DXBCMov/HLSLSnippet/HLSLTexture/... )单独标色, 方便混写识别。
+    高亮规则集中在此类, 以后要换 HLSL 混写的专用高亮直接替换本类实例即可。
+    """
+
+    def __init__(self, document):
+        super().__init__(document)
+
+        def fmt(color, bold=False, italic=False):
+            f = QTextCharFormat()
+            f.setForeground(QColor(color))
+            if bold:
+                f.setFontWeight(QFont.Bold)
+            if italic:
+                f.setFontItalic(True)
+            return f
+
+        op = "|".join(sorted(_ASM_OPCODES, key=len, reverse=True))
+        self._rules = [
+            (QRegularExpression(
+                r"^\s*(HLSLSnippet|HLSLTexture|HLSLSampler|HLSLFunctionImport"
+                r"|HLSLMov|HLSLInit|HLSL|DXBCMov)\b"), fmt("#c586c0", bold=True)),
+            (QRegularExpression(r"\b(ps_5_[01]|vs_5_[01]|cs_5_[01])\b"), fmt("#dcdcaa")),
+            (QRegularExpression(r"\bdcl_[A-Za-z0-9_]+"), fmt("#4ec9b0")),
+            (QRegularExpression(r"^\s*(%s)\b" % op), fmt("#569cd6", bold=True)),
+            (QRegularExpression(r"\b(r|v|o|t|s|cb|icb|u)[0-9]+"), fmt("#9cdcfe")),
+            (QRegularExpression(r"\.[xyzwrgba]{1,4}\b"), fmt("#9cdcfe")),
+            (QRegularExpression(r"\bl\([^)]*\)|\b0x[0-9a-fA-F]+\b|-?\d+\.\d+"),
+             fmt("#b5cea8")),
+            (QRegularExpression(r"//.*$"), fmt("#6a9955", italic=True)),
+            (QRegularExpression(r";.*$"), fmt("#6a9955", italic=True)),
+        ]
+
+    def highlightBlock(self, text):
+        for pat, f in self._rules:
+            it = pat.globalMatch(text)
+            while it.hasNext():
+                m = it.next()
+                self.setFormat(m.capturedStart(), m.capturedLength(), f)
 
 
 # PARAM_TYPES 由 lib.mdf2 提供(单一来源: [(类型名, 字节大小), ...])
@@ -363,6 +426,7 @@ class MmtrPanel(QWidget):
         mono = QFont("Consolas")
         mono.setStyleHint(QFont.Monospace)
         self.ed_asm.setFont(mono)
+        self._asm_hl = AsmHighlighter(self.ed_asm.document())
         self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
         self.chk_trans = QCheckBox("用混合翻译器预处理")
         if find_translator() is None:
