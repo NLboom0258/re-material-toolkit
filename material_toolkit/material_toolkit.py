@@ -14,6 +14,7 @@
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
+  python material_toolkit.py variant-map <in.mmtr> [--tech NAME] [--slots]
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
@@ -49,6 +50,7 @@ from lib.sync import sync_mdf2  # noqa: E402
 from lib.binding import (add_texture_slot, rename_slot, group_summary,  # noqa: E402
                          name_vocabulary, rename_name_global)
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
+from lib.mmtr_material import MaterialModel  # noqa: E402
 from lib.mmtr_build import MmtrTemplate, content_count, new_from_template  # noqa: E402
 from lib.mmtr_info import blob_info  # noqa: E402
 from lib import mmtr_blobs as B  # noqa: E402
@@ -156,6 +158,10 @@ def main():
         if "--variants" in a:
             for r in m.iter_records():
                 print(f"    {r.name:40s} blob=0x{r.blob_off:x} sz={r.blob_size}")
+    elif cmd == "variant-map":
+        mm = MaterialModel.load(a[0])
+        tech = a[a.index("--tech") + 1] if "--tech" in a else None
+        mm.dump(tech, show_slots="--slots" in a)
     elif cmd == "model-verify":
         m = MmtrModel.load(a[0])
         issues = m.validate()

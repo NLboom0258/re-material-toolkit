@@ -56,10 +56,11 @@ REC_OFF_CNT_SMP_HI = 0xB0   # sampler << 16
 REC_OFF_CNT_SRV = 0xB8      # SRV 数(tex+raw+struct)
 REC_OFF_CNT_SMP_CB = 0xC4   # (sampler<<24)|(cbuffer<<16)
 REC_OFF_CNT_SRV2 = 0xCC     # 亦为 SRV 数(与 +0xb8 同)
-# 记录捆绑的**多个 shader 程序指针**(实测: +0x00=PS, +0xe0/+0xe8=VS, +0x08=CS(部分))
+# 记录捆绑的**多个 shader 程序指针**(实测: +0x00=PS, rec-0x20=VS(真), +0x08=CS(部分))
 REC_OFF_CS_BLOB = 0x08      # CS 程序(仅部分记录, 如预变换/蒙皮)
-REC_OFF_VS_BLOB = 0xE0      # VS 程序
-REC_OFF_VS_BLOB2 = 0xE8     # 第二个 VS 指针(通常与 +0xe0 相同)
+REC_OFF_VS_BLOB = -0x20     # 真 VS 指针在 rec-0x20(逆向 DMC5 exe 确证, 全样本 100%)
+REC_OFF_VS_LINK = 0xE0      # 实测 == 下一记录的真 VS(跨记录链接, 非本记录字段)
+REC_OFF_VS_BLOB2 = 0xE8     # 同上: 该地址即"下一条记录"的 rec-0x20 ⇒ 跨记录, 勿当本记录 VS
 # 其它指针(u64, 高 32 位通常为 0)
 REC_OFF_AUX_PTRS = (0x10, 0x18, 0x20, 0x28)  # 4 个辅助表指针(→头部小表; 语义 TBD)
 REC_OFF_VM_PTR = 0x30                        # 共用 VM/程序指针(如 0x48780)
@@ -129,8 +130,8 @@ class VariantRecord:
         self.name_ptr = u32(off + REC_OFF_NAME_PTR)
         self.name = _str(data, self.name_ptr, 64) if 0x1000 <= self.name_ptr < len(data) else ""
         self.cs_blob = u32(off + REC_OFF_CS_BLOB)    # 部分记录(CS)
-        self.vs_blob = u32(off + REC_OFF_VS_BLOB)    # VS
-        self.vs_blob2 = u32(off + REC_OFF_VS_BLOB2)  # 第二个 VS 指针
+        self.vs_blob = u32(off + REC_OFF_VS_BLOB)    # 真 VS(rec-0x20)
+        self.vs_blob2 = u32(off + REC_OFF_VS_BLOB2)  # ⚠ 跨记录(== 下一条记录的真 VS), 非本记录字段
         self.aux_ptrs = tuple(u32(off + fo) for fo in REC_OFF_AUX_PTRS)
         self.vm_ptr = u32(off + REC_OFF_VM_PTR)
         self.count_total = u32(off + REC_OFF_CNT_TOTAL)
@@ -308,7 +309,7 @@ class MmtrModel:
     def referenced_blobs(self):
         """变体数组 **主程序字段(+0x00, 即 PS)** 引用的 blob: [(blob_idx, off, n_records), ...]。
 
-        注: 一条记录还捆绑 VS(+0xe0/+0xe8) 与部分 CS(+0x08); 全部字段的并集 = 全部 blob
+        注: 一条记录还捆绑 真VS(rec-0x20) 与部分 CS(+0x08); 全部字段的并集 = 全部 blob
         (见 all_referenced_blobs / blob_role)。
         """
         from collections import Counter
@@ -329,7 +330,7 @@ class MmtrModel:
         idx_of = {o: i for i, (o, _s) in enumerate(self.blobs)}
         used = set()
         for r in self.parse_records():
-            for off in (r.blob_off, r.vs_blob, r.vs_blob2, r.cs_blob):
+            for off in (r.blob_off, r.vs_blob, r.cs_blob):
                 if off in idx_of:
                     used.add(idx_of[off])
         return sorted(used)
@@ -341,7 +342,7 @@ class MmtrModel:
         for r in self.parse_records():
             if r.blob_off == off and "PS" not in roles:
                 roles.append("PS")
-            if (r.vs_blob == off or r.vs_blob2 == off) and "VS" not in roles:
+            if r.vs_blob == off and "VS" not in roles:
                 roles.append("VS")
             if r.cs_blob == off and "CS" not in roles:
                 roles.append("CS")
@@ -351,7 +352,7 @@ class MmtrModel:
         """所有引用该 blob(任一程序字段)的变体记录。"""
         off = self.blob_off(idx)
         return [r for r in self.parse_records()
-                if off in (r.blob_off, r.vs_blob, r.vs_blob2, r.cs_blob)]
+                if off in (r.blob_off, r.vs_blob, r.cs_blob)]
 
     def record_for(self, idx):
         """该 blob 的第一条(非空)变体记录。"""
@@ -407,7 +408,7 @@ class MmtrModel:
     def summary(self):
         recs = self.parse_records()
         ps = {r.blob_off for r in recs if r.blob_off}
-        vs = {o for r in recs for o in (r.vs_blob, r.vs_blob2) if o}
+        vs = {r.vs_blob for r in recs if r.vs_blob}
         cs = {r.cs_blob for r in recs if r.cs_blob}
         return {
             "version": f"0x{self.version:08x}",
@@ -479,7 +480,7 @@ class MmtrModel:
                 elif r.blob_size != size_of[r.blob_off]:
                     issues.append(f"rec[{i}] {r.name!r}: +0x9c=0x{r.blob_size:x} != PS 实际大小 "
                                   f"0x{size_of[r.blob_off]:x}(误改大小地雷?)")
-            for nm, o in (("VS", r.vs_blob), ("VS2", r.vs_blob2), ("CS", r.cs_blob)):
+            for nm, o in (("VS", r.vs_blob), ("CS", r.cs_blob)):
                 if o and o not in size_of:
                     issues.append(f"rec[{i}] {r.name!r}: {nm} blob 0x{o:x} 非有效 blob")
             if r.name_ptr and not (0x1000 <= r.name_ptr < self.blob_start):
