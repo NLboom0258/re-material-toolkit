@@ -249,6 +249,29 @@ class TailModel:
               f"strings={len(self.strings)}")
 
 
+def build_desc(programs, head=bytes(4)):
+    """从“程序列表”合成描述符区(供从 0 构建用)。
+
+    programs: [{"cb": [code, ...], "smp": [code, ...], "tex": [code, ...]}, ...]
+      其中 code = (type<<24) | (stage<<16) | slot。
+    布局(我们自定的自洽排列, 不模仿原文件的 dedup/对齐): 
+      [head(4B)] + 逐程序顺序拼接 [cb n_cb][smp n_smp][tex n_srv] 的 8B 条目(每条=[a=0][code])。
+    返回 (bytes, placement): placement[i] = {"cb":off, "smp":off, "tex":off} (相对区起点)。
+    记录只需把 +0x38/+0x48/+0x58 设成对应 off(加上区起点绝对偏移)、
+    +0xac/+0xb0/+0xcc 设成对应计数即可。
+    """
+    out = bytearray(head)
+    placement = []
+    for p in programs:
+        pos = {}
+        for kind in ("cb", "smp", "tex"):
+            pos[kind] = len(out)
+            for code in p.get(kind, ()):
+                out += struct.pack("<II", 0, code & 0xFFFFFFFF)
+        placement.append(pos)
+    return bytes(out), placement
+
+
 if __name__ == "__main__":
     import sys
     d = open(sys.argv[1], "rb").read()
