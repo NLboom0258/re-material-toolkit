@@ -36,13 +36,19 @@ from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
 )
+from tools.material_toolkit.lib.mmtr_blobs import (  # noqa: E402
+    extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
+    find_translator, run_translator,
+)
+from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 
 from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtGui import QColor  # noqa: E402
+from PySide6.QtGui import QColor, QFont  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
     QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTabBar, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
@@ -351,11 +357,42 @@ class MmtrPanel(QWidget):
 
         self._vocab_cache = None    # 名称池词汇表缓存(编辑后失效)
 
+        # Blob(shader) 编辑页: 反汇编 / 编辑 asm / 汇编放回 / 导入导出
+        self.ed_asm = QPlainTextEdit()
+        self.ed_asm.setLineWrapMode(QPlainTextEdit.NoWrap)
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.Monospace)
+        self.ed_asm.setFont(mono)
+        self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
+        self.chk_trans = QCheckBox("用混合翻译器预处理")
+        if find_translator() is None:
+            self.chk_trans.setEnabled(False)
+            self.chk_trans.setToolTip(
+                "未找到 hlsl_blend_dxbc_translator.exe(可设环境变量 HLSL_BLEND_TRANSLATOR_EXE)")
+        else:
+            self.chk_trans.setToolTip(
+                "把 HLSL+DXBC 混合写法翻回纯 asm 后再汇编(纯 asm 不受影响)")
+        tob = QHBoxLayout()
+        self.btn_dis = QPushButton("反汇编")
+        self.btn_apply = QPushButton("应用(汇编+放回)")
+        self.btn_asmo = QPushButton("导出 asm")
+        self.btn_asmi = QPushButton("导入 asm")
+        for b in (self.btn_dis, self.btn_apply, self.btn_asmo, self.btn_asmi):
+            tob.addWidget(b)
+        tob.addWidget(self.chk_trans)
+        tob.addStretch(1)
+        self.tab_blob = QWidget()
+        tv = QVBoxLayout(self.tab_blob)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.addLayout(tob)
+        tv.addWidget(self.ed_asm, 1)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
         self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
+        self.tabs.addTab(self.tab_blob, "Blob(shader)")
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.tree_blob)
@@ -370,6 +407,10 @@ class MmtrPanel(QWidget):
         self.btn_open.clicked.connect(self.open_mmtr)
         self.btn_add.clicked.connect(lambda: self.add_slot(None))
         self.btn_exp.clicked.connect(self.export_mmtr)
+        self.btn_dis.clicked.connect(self.disasm_cur_blob)
+        self.btn_apply.clicked.connect(self.apply_cur_blob)
+        self.btn_asmo.clicked.connect(self.export_asm)
+        self.btn_asmi.clicked.connect(self.import_asm)
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_detail())
         attach_menu(self.tree_blob, self._menu_blob)
         attach_menu(self.tree_grp, self._menu_grp)
@@ -648,6 +689,82 @@ class MmtrPanel(QWidget):
             QMessageBox.critical(self, "失败", str(e))
             return
         self._reload_after_edit()
+
+    # ---- Blob(shader) 编辑 ----
+    def disasm_cur_blob(self):
+        if not self._need_mmtr():
+            return
+        idx = self.cur_blob()
+        if idx is None:
+            QMessageBox.warning(self, "提示", "请先在左侧选择一个 blob")
+            return
+        try:
+            asm = disassemble_dxbc(extract_blob(self.data, idx))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "反汇编失败", str(e))
+            return
+        self.ed_asm.setPlainText(asm)
+        self._edit_blob = idx
+        QMessageBox.information(self, "反汇编",
+                                f"blob[{idx}] 已反汇编({len(asm)} 字符), 编辑后点「应用」。")
+
+    def apply_cur_blob(self):
+        if not self._need_mmtr():
+            return
+        idx = self.cur_blob()
+        if idx is None:
+            return
+        if self._edit_blob not in (None, idx):
+            if QMessageBox.question(
+                    self, "提示",
+                    f"当前 asm 是对 blob[{self._edit_blob}] 反汇编的, 选中的却是 blob[{idx}]。\n"
+                    f"继续会以 blob[{idx}] 为基准汇编放回。继续?") != QMessageBox.Yes:
+                return
+        text = self.ed_asm.toPlainText()
+        if not text.strip():
+            QMessageBox.warning(self, "提示", "asm 为空")
+            return
+        ref = extract_blob(self.data, idx)
+        try:
+            if self.chk_trans.isChecked() and find_translator():
+                text = run_translator(text)
+            blob = assemble_asm(text, ref_dxbc=ref)
+            v = verify_dxbc(blob)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "汇编失败", str(e))
+            return
+        if not (v["disasm_ok"] and v["strip_ok"] and v["reflect_ok"]):
+            if QMessageBox.question(
+                    self, "D3D 校验未过",
+                    f"disasm={v['disasm_ok']} strip={v['strip_ok']} "
+                    f"reflect={v['reflect_ok']}。\n仍要放回吗?") != QMessageBox.Yes:
+                return
+        try:
+            self.data = replace_blob(self.data, idx, blob)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "放回失败", str(e))
+            return
+        self._edit_blob = None
+        self._reload_after_edit(full=True)
+        QMessageBox.information(self, "应用", f"blob[{idx}] 已放回({len(blob)} 字节)")
+
+    def export_asm(self):
+        if not self.ed_asm.toPlainText().strip():
+            QMessageBox.warning(self, "提示", "没有 asm 可导出")
+            return
+        p, _ = QFileDialog.getSaveFileName(
+            self, "导出 asm", f"blob_{self.cur_blob()}.asm.txt",
+            "asm (*.asm *.asm.txt *.txt);;所有文件 (*)")
+        if p:
+            open(p, "w", encoding="utf-8").write(self.ed_asm.toPlainText())
+            QMessageBox.information(self, "导出", f"已写出:\n{p}")
+
+    def import_asm(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "导入 asm", "", "asm (*.asm *.asm.txt *.txt);;所有文件 (*)")
+        if p:
+            self.ed_asm.setPlainText(open(p, encoding="utf-8", errors="replace").read())
+            self._edit_blob = self.cur_blob()
 
 
 class Mdf2Panel(QWidget):
@@ -1411,7 +1528,7 @@ def main(argv):
             if isinstance(panel, Mdf2Panel):
                 idx = {"param": 1, "props": 2}.get(pane, 0)
             else:
-                idx = {"pool": 1, "param": 2}.get(pane, 0)
+                idx = {"pool": 1, "param": 2, "blob": 3}.get(pane, 0)
             panel.tabs.setCurrentIndex(idx)
         win.show()
         for _ in range(3):

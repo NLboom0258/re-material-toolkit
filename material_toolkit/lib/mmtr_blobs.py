@@ -272,6 +272,56 @@ def assemble_asm(asm_text, ref_dxbc=None, workdir=None):
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 可选: HLSL 混合翻译器预处理
+# hlsl_blend_dxbc_translator: 把“DXBC asm + HLSL 标记”混合文本翻回纯 asm(非标记行透传)。
+# 纯 asm 是它的子集 ⇒ 无需“切换逻辑”: 有 exe 就把编辑文本过一遍再汇编, 没有则直接用原 asm。
+_TRANSLATOR_CANDS = (
+    os.path.normpath(os.path.join(_ROOT, "..", "..", "Cpp",
+                                  "hlsl_blend_dxbc_translator", "x64", "Release",
+                                  "hlsl_blend_dxbc_translator.exe")),
+)
+
+
+def find_translator():
+    """定位 hlsl_blend_dxbc_translator.exe; 缺失返回 None(纯 asm 仍可用)。
+
+    查找: 环境变量 HLSL_BLEND_TRANSLATOR_EXE -> 约定相对路径(<工作区>/../Cpp/...)。
+    """
+    env = os.environ.get("HLSL_BLEND_TRANSLATOR_EXE")
+    for c in ([env] if env else []) + list(_TRANSLATOR_CANDS):
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def run_translator(asm_text, exe=None, workdir=None):
+    """把混合 asm 文本过一遍翻译器 -> 纯 asm 文本。exe 缺失则报错。"""
+    exe = exe or find_translator()
+    if not exe:
+        raise FileNotFoundError("未找到 hlsl_blend_dxbc_translator.exe")
+    own = workdir is None
+    if own:
+        workdir = tempfile.mkdtemp(prefix="mmtr_translator_")
+    try:
+        data_dir = os.path.dirname(os.path.dirname(os.path.dirname(exe)))  # <proj>/data
+        data_dir = os.path.join(data_dir, "data")
+        inp = os.path.join(workdir, "in.asm")
+        outp = os.path.join(workdir, "out.asm")
+        with open(inp, "w", encoding="utf-8") as f:
+            f.write(asm_text)
+        args = [exe, "-input", inp, "-output", outp]
+        if os.path.isdir(data_dir):
+            args += ["-data", data_dir]
+        p = subprocess.run(args, capture_output=True, text=True, timeout=600)
+        if not os.path.exists(outp):
+            raise RuntimeError(f"翻译器失败:\n{p.stdout}\n{p.stderr}")
+        with open(outp, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    finally:
+        if own:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- BlobSource 抽象
 class BlobSource(object):
     """描述"一个 blob 从哪来", resolve() -> 规范化后的 DXBC bytes。
