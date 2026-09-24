@@ -6,7 +6,7 @@
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
 - MMTR 页: **多文件标签页**(每文件一页, 可关闭/拖动; 右上「打开 mmtr…」; 无法从0新建, 故空时显示不可关闭的「(未打开)」占位页);
-  每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽, 槽名下拉选池名) / 「名称池」(全局贴图名表, 可全局改名) / 「材质参数」(UserMaterial 参数定义, 只读)。
+  每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽, 槽名下拉选池名) / 「名称池」(全局贴图名表, 可全局改名) / 「材质参数」(UserMaterial 参数定义, 只读) / 「变体(材质)」(按 pass 分组的技术 × 标志变体 -> 程序集, 只读)。
 - MDF2 页: **多文件标签页**(每文件一页, 可关闭/拖动, 右上「＋」新建空文件, 关掉最后一个自动补空文件);
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
@@ -46,6 +46,7 @@ from tools.material_toolkit.lib.mmtr_assemble import (  # noqa: E402
     assemble as assemble_mmtr, ProgramInstall,
 )
 from tools.material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
+from tools.material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
 from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 
@@ -702,6 +703,8 @@ class MmtrPanel(QWidget):
         self.tree_pool.setHeaderLabels(["贴图名(池)", "引用组数", "引用 blob"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
+        self.tree_variant = QTreeWidget()
+        self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·CS)", "维度 / 说明"])
 
         self._vocab_cache = None    # 名称池词汇表缓存(编辑后失效)
 
@@ -773,6 +776,7 @@ class MmtrPanel(QWidget):
         self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
+        self.tabs.addTab(self.tree_variant, "变体(材质)")
         self.tabs.addTab(self.tab_blob, "Blob(shader)")
 
         split = QSplitter(Qt.Horizontal)
@@ -825,6 +829,7 @@ class MmtrPanel(QWidget):
         self._edit_blob = None
         self.refresh_blobs()
         self.refresh_pool()
+        self.refresh_variant()
         self._emit_title()
 
     def open_mmtr(self):
@@ -860,6 +865,58 @@ class MmtrPanel(QWidget):
         if n:
             row = keep if isinstance(keep, int) and 0 <= keep < n else 0
             self.tree_blob.setCurrentItem(self.tree_blob.topLevelItem(row))
+
+    def refresh_variant(self):
+        """变体(材质)页: 按 pass 分组的技术 × 标志变体 -> 程序集(只读, 来自 MaterialModel)。"""
+        tree = self.tree_variant
+        tree.clear()
+        if self.data is None:
+            return
+        mm = MaterialModel(self.data)
+        s = mm.summary()
+        info = QTreeWidgetItem(
+            ["材质: 技术=%d  记录=%d(空槽=%d)  blob=%d"
+             % (s["technologies"], s["records"], s["empty_records"], s["blobs"]),
+             "变体记录=%d" % s["variant_records"],
+             "前缀: ''=无 / A=AlphaTest / TS=TwoSide / ATS=两者 (+Direct)"])
+        info.setToolTip(2, "前缀由 mdf2 flags 决定: bit1(BaseAlphaTestEnable)->A, "
+                           "bit0(BaseTwoSideEnable)->TS")
+        tree.addTopLevelItem(info)
+        for p, techs in mm.by_pass().items():
+            pitem = QTreeWidgetItem(["pass: %s" % p, "%d 技术" % len(techs), ""])
+            tree.addTopLevelItem(pitem)
+            for tech in techs:
+                d = parse_technology(tech)
+                sets = mm.program_sets(tech)
+                titem = QTreeWidgetItem(
+                    [tech, "程序集=%d  真VS=%s" % (len(sets), mm.shared_vs(tech)),
+                     self._dim_label(d)])
+                pitem.addChild(titem)
+                for g in sets:
+                    ps, vs, cs = g["programs"]
+                    citem = QTreeWidgetItem(
+                        ["<- %s" % ",".join(g["prefixes"]),
+                         "PS=%d  VS=%d  CS=%d" % (ps, vs, cs),
+                         "slots=%s" % ",".join(str(x) for x in g["slots"])])
+                    titem.addChild(citem)
+        tree.expandToDepth(1)
+        fit_columns(tree, [0, 1, 2], pad=24, min_w=90, max_w=680)
+
+    @staticmethod
+    def _dim_label(d):
+        """parse_technology 结果 -> 可读维度串(用于变体页第 3 列)。"""
+        parts = []
+        if d["input"]:
+            parts.append("input=%s" % d["input"])
+        for k, lab in (("instancing", "Instancing"), ("clip", "Clip"),
+                       ("lw", "LW"), ("with_norm", "WithNorm"), ("cs", "CS")):
+            if d[k]:
+                parts.append(lab)
+        if d["variant_tag"]:
+            parts.append("tag=%s" % d["variant_tag"])
+        if d["unknown"]:
+            parts.append("?? %s" % "".join(d["unknown"]))
+        return " ".join(parts)
 
     def cur_blob(self):
         it = self.tree_blob.currentItem()
@@ -2248,6 +2305,8 @@ def main(argv):
             print("blobs:", mp.tree_blob.topLevelItemCount())
             print("UserMaterial 参数:", mp.tree_param.topLevelItemCount())
             print("名称池:", mp.tree_pool.topLevelItemCount())
+            print("变体页 pass 组:", [mp.tree_variant.topLevelItem(i).text(0)
+                                     for i in range(mp.tree_variant.topLevelItemCount())])
             for i in range(mp.tree_grp.topLevelItemCount()):
                 top = mp.tree_grp.topLevelItem(i)
                 print("  ", top.text(0), "|", top.text(2))
@@ -2270,7 +2329,7 @@ def main(argv):
             if isinstance(panel, Mdf2Panel):
                 idx = {"param": 1, "props": 2}.get(pane, 0)
             else:
-                idx = {"pool": 1, "param": 2, "blob": 3}.get(pane, 0)
+                idx = {"pool": 1, "param": 2, "variant": 3, "blob": 4}.get(pane, 0)
             panel.tabs.setCurrentIndex(idx)
         win.show()
         for _ in range(3):
