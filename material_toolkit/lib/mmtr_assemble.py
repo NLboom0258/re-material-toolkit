@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""mmtr 装配器: 从模板 + 程序安装规格 -> 新 mmtr(路线 B 的可用形态)。
+
+因 B2(头部内容字段全推导)受阻, "从0构建 mmtr"采用 **模板 + 移植 + 装配**:
+以模板的 [0,0x46350) 骨架为底(L0~L3 结构照抄), 把(可能是全新的)DXBC 程序装入
+blob 区, 并重指对应的变体槽(record)程序指针; 其余内容照旧, 装配出新 mmtr。
+
+规格 = 一组 `ProgramInstall`。核心动作:
+  - 解析 `ProgramInstall.source`(`BlobSource`: transport/dxbc/asm) -> 规范化 DXBC;
+  - **追加到 blob 区末尾**(不移动既有 blob ⇒ 既有绝对偏移全部保持有效);
+  - 把"角色指向 `src_blob` 的槽"(或显式 `slots`)程序指针指到新 blob;
+  - PS 角色同步 `+0x9c`(该槽 PS 大小);
+  - 可选(`sync=True`)从"**同组**原生 donor 槽"(按 `(desc,pool)` 匹配)同步绑定指针+计数。
+
+限制(v1): 假设新程序与源程序**资源布局同构**(典型: 同一 shader 改指令后装回)。
+同布局时 `sync=False` 即可(槽的绑定/计数本就对应该程序); 跨布局需要"目标程序的 donor",
+而新 blob 无原生 donor ⇒ 不在 v1 范围。
+"""
+try:
+    from .mmtr_build import MmtrImage, REC_N, ROLE_FIELDS
+    from .mmtr_blobs import BlobSource, list_blobs
+except ImportError:  # 允许脚本直接 import
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mmtr_build import MmtrImage, REC_N, ROLE_FIELDS
+    from mmtr_blobs import BlobSource, list_blobs
+
+ROLES = ("PS", "VS", "CS")
+
+
+class ProgramInstall(object):
+    """一条"把某个程序装进 mmtr"的规格。
+
+    role      "PS"/"VS"/"CS"
+    source    BlobSource(transport/dxbc/asm) —— 要装入的程序
+    src_blob  被替换的程序在模板里的 blob 下标(用于定位"哪些槽"+同步绑定/计数)
+    slots     显式目标槽下标(与 src_blob 二选一; 给定时忽略 src_blob 的自动定位)
+    sync      True: 从"同组(desc,pool)原生 donor"同步绑定指针+计数(默认 False)
+    """
+
+    def __init__(self, role, source, src_blob=None, slots=None, sync=False):
+        if role not in ROLES:
+            raise ValueError(f"role 必须是 {ROLES}")
+        if src_blob is None and slots is None:
+            raise ValueError("需给出 src_blob 或 slots 以定位目标槽")
+        if not isinstance(source, BlobSource):
+            raise TypeError("source 必须是 BlobSource")
+        self.role = role
+        self.source = source
+        self.src_blob = src_blob
+        self.slots = list(slots) if slots is not None else None
+        self.sync = sync
+
+
+def blob_offsets(template):
+    """模板里各 blob 的绝对偏移(按顺序)。"""
+    return [off for off, _sz in list_blobs(template)]
+
+
+def _target_slots(image, inst, src_off):
+    if inst.slots is not None:
+        return list(inst.slots)
+    return image.slots_using(src_off, inst.role)
+
+
+def _donor_map(image, role, src_off):
+    """(desc,pool) -> 首个"该角色指向 src_off"的槽(donor); 仅 sync=True 时用。"""
+    if src_off is None:
+        return {}
+    fields = ROLE_FIELDS[role]
+    out = {}
+    for s in range(REC_N):
+        if any(image.rec_field(s, fo) == src_off for fo in fields):
+            key = (image.rec_field(s, 0x58), image.rec_field(s, 0x60))
+            out.setdefault(key, s)
+    return out
+
+
+def assemble(template, installs):
+    """按规格装配新 mmtr。
+
+    template: 模板 mmtr 的 bytes; installs: [ProgramInstall, ...]。
+    返回新 mmtr 的 bytes(追加了新 blob; 骨架与未被重指的槽保持不变)。
+    """
+    image = MmtrImage.from_bytes(template)
+    bs = image.blob_start
+    offs = blob_offsets(template)
+    for inst in installs:
+        dxbc = inst.source.resolve()
+        src_off = offs[inst.src_blob] if inst.src_blob is not None else None
+        slots = _target_slots(image, inst, src_off)
+        donors = _donor_map(image, inst.role, src_off) if inst.sync else {}
+        new_off = bs + len(image.blobs)          # 追加点(既有 blob 偏移不变)
+        image.blobs += bytes(dxbc)
+        size = len(dxbc) if inst.role == "PS" else None
+        for s in slots:
+            key = (image.rec_field(s, 0x58), image.rec_field(s, 0x60))
+            d = donors.get(key)
+            if d is not None:
+                image.sync_binding_from(s, d, role=inst.role,
+                                        blob_off=new_off, size=size)
+            else:
+                image.set_program(s, inst.role, new_off, size=size)
+    return image.to_bytes()

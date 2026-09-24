@@ -16,6 +16,7 @@
   python material_toolkit.py model-verify <in.mmtr>
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
+  python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
   python material_toolkit.py blob-disasm  <dxbc> -o <out.asm.txt>
@@ -30,7 +31,13 @@
   - 完整解析模型见 lib/mmtr_model.py(头部/程序表/1083 变体记录/绑定组/参数表)。
   - hash = murmur3(名字, 0xFFFFFFFF),见 lib/hashes.py。
   - blob 来源统一入口见 lib/mmtr_blobs.py(枚举/规范化/校验/asm), 见其 docstring。
+  - mmtr 装配器见 lib/mmtr_assemble.py: 模板 + 程序安装规格 -> 新 mmtr。spec.json:
+    {"installs":[{"role":"PS","src_blob":33,"source":{"kind":"asm","path":"x.asm"}},
+                   {"role":"PS","src_blob":34,"source":{"kind":"dxbc","path":"y.dxbc"}},
+                   {"role":"PS","src_blob":35,"source":{"kind":"blob","mmtr":"other.mmtr","idx":10}}]}
+    (source.kind=asm 时, ref 默认取自 src_blob; 可选 sync=true 从同组 donor 同步绑定)
 """
+import json
 import os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +51,7 @@ from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
 from lib.mmtr_build import MmtrTemplate, content_count, new_from_template  # noqa: E402
 from lib.mmtr_info import blob_info  # noqa: E402
 from lib import mmtr_blobs as B  # noqa: E402
+from lib import mmtr_assemble as aset  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -228,6 +236,36 @@ def main():
         print(f"  D3DDisassemble: {'OK' if v['disasm_ok'] else 'FAIL'}")
         print(f"  D3DStripShader : {'OK' if v['strip_ok'] else 'FAIL'}")
         print(f"  D3DReflect     : {'OK' if v['reflect_ok'] else 'FAIL'}")
+    elif cmd == "mmtr-assemble":
+        src = a[0]
+        spec_path = a[a.index("--spec") + 1] if "--spec" in a else a[1]
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr"
+        template = open(src, "rb").read()
+        spec = json.load(open(spec_path, encoding="utf-8"))
+        installs = []
+        for it in spec.get("installs", []):
+            s = it["source"]
+            kind = s["kind"]
+            if kind == "asm":
+                ref = (B.extract_blob(template, it["src_blob"])
+                       if it.get("src_blob") is not None else None)
+                source = B.BlobSource.from_asm(
+                    open(s["path"], encoding="utf-8").read(), ref_dxbc=ref)
+            elif kind == "dxbc":
+                source = B.BlobSource.from_dxbc(open(s["path"], "rb").read())
+            elif kind == "blob":
+                mm = open(s["mmtr"], "rb").read() if s.get("mmtr") else template
+                source = B.BlobSource.transport(mm, int(s["idx"]))
+            else:
+                raise ValueError(f"未知 source kind: {kind!r}")
+            installs.append(aset.ProgramInstall(
+                it["role"], source, src_blob=it.get("src_blob"),
+                slots=it.get("slots"), sync=it.get("sync", False)))
+        out_data = aset.assemble(template, installs)
+        open(out, "wb").write(out_data)
+        print(f"OK: assemble {src} + {len(installs)} installs -> {out} "
+              f"({len(template)} -> {len(out_data)} bytes)")
+        _selfcheck_mmtr(out_data)
     else:
         print(__doc__)
 
