@@ -14,7 +14,7 @@
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
-  python material_toolkit.py variant-map <in.mmtr> [--tech NAME] [--slots]
+  python material_toolkit.py variant-map <in.mmtr> [--tech NAME] [--slots] [--by-pass]
   python material_toolkit.py variant-diff <in.mmtr> [--tech NAME] [--instr]
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
@@ -163,7 +163,7 @@ def main():
     elif cmd == "variant-map":
         mm = MaterialModel.load(a[0])
         tech = a[a.index("--tech") + 1] if "--tech" in a else None
-        mm.dump(tech, show_slots="--slots" in a)
+        mm.dump(tech, show_slots="--slots" in a, by_pass="--by-pass" in a)
     elif cmd == "variant-diff":
         vd = VariantDiffer(open(a[0], "rb").read())
         tech = a[a.index("--tech") + 1] if "--tech" in a else "DeferredStatic"

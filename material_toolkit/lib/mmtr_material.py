@@ -21,6 +21,63 @@ except ImportError:  # 允许脚本直接 import
 # 引擎已知的标志前缀(顺序 = 语义扩张: 无 -> alpha -> 两面 -> 两者)
 KNOWN_PREFIXES = ("", "A", "ADirect", "TS", "ATS", "ATSDirect")
 
+# 技术名“管线维度”(2026-09-25 实测): [Pass] + [Input] + 修饰符{Instancing/WithNorm/Clip/LW} + 数码标记 + [CS]
+TECH_PASSES = ("PreTransform", "DepthWrite", "Deferred", "ZPrePass", "Shadow", "Forward", "Pick")
+TECH_INPUTS = ("PreTransform", "Static", "Skinning")   # 顶点输入模式
+TECH_MODIFIERS = ("Instancing", "WithNorm", "Clip", "LW")
+_TECH_TOKENS = tuple(sorted(set(TECH_INPUTS) | set(TECH_MODIFIERS), key=len, reverse=True))
+
+
+def parse_technology(name):
+    """技术名 -> 管线维度 dict。
+
+    {name, pass, input, instancing, clip, lw, with_norm, cs, variant_tag, unknown}
+    `unknown` = 无法识别的片段(正常应为空; 非空=出现新关键字, 提示需补词典)。
+    例: 'ATSDeferredStaticInstancing2Clip' 的 tech 部分 'DeferredStaticInstancing2Clip'
+        -> pass=Deferred, input=Static, instancing=True, variant_tag='2', clip=True
+    """
+    out = {"name": name, "pass": None, "input": None, "instancing": False,
+           "clip": False, "lw": False, "with_norm": False, "cs": False,
+           "variant_tag": "", "unknown": []}
+    rest = name
+    for p in TECH_PASSES:
+        if rest.startswith(p):
+            out["pass"] = p
+            rest = rest[len(p):]
+            break
+    while rest:
+        hit = None
+        if rest[0].isdigit():
+            j = 0
+            while j < len(rest) and rest[j].isdigit():
+                j += 1
+            out["variant_tag"] += rest[:j]
+            hit = rest[:j]
+        elif rest.startswith("CS"):
+            out["cs"] = True
+            hit = "CS"
+        else:
+            for tok in _TECH_TOKENS:
+                if rest.startswith(tok):
+                    hit = tok
+                    if tok in TECH_INPUTS:
+                        out["input"] = tok
+                    elif tok == "Instancing":
+                        out["instancing"] = True
+                    elif tok == "Clip":
+                        out["clip"] = True
+                    elif tok == "LW":
+                        out["lw"] = True
+                    elif tok == "WithNorm":
+                        out["with_norm"] = True
+                    break
+        if hit is None:
+            out["unknown"].append(rest[0])
+            rest = rest[1:]
+        else:
+            rest = rest[len(hit):]
+    return out
+
 
 class MaterialModel(object):
     """mmtr 的"材质"视图: 技术 -> 变体(前缀) -> (PS,VS,CS) 程序。只读。"""
@@ -85,6 +142,37 @@ class MaterialModel(object):
     def shared_ps(self, tech):
         return sorted({v["ps"] for v in self.technologies().get(tech, []) if v["ps"] >= 0})
 
+    # ---- 管线维度(技术名结构化; 2026-09-25) ----
+    def tech_dims(self):
+        """{技术名: parse_technology(...)}(跳过空技术名)。"""
+        return {t: parse_technology(t) for t in self.technologies() if t}
+
+    def by_pass(self):
+        """{pass: [技术名...]}(按 pass 名排序; pass=None 归到 '(none)')。"""
+        out = {}
+        for t, d in self.tech_dims().items():
+            out.setdefault(d["pass"] or "(none)", []).append(t)
+        return {k: sorted(out[k]) for k in sorted(out)}
+
+    def select(self, pass_=None, input_=None, clip=None, instancing=None):
+        """按管线维度筛选变体(返回 variant dict 列表)。None = 不限制。
+
+        供 L3“批量应用”定位目标(如 pass_='Shadow', input_='Static')。
+        """
+        out = []
+        for v in self.variants():
+            d = parse_technology(v["tech"])
+            if pass_ is not None and d["pass"] != pass_:
+                continue
+            if input_ is not None and d["input"] != input_:
+                continue
+            if clip is not None and d["clip"] != clip:
+                continue
+            if instancing is not None and d["instancing"] != instancing:
+                continue
+            out.append(v)
+        return out
+
     # ---- 汇总 ----
     def summary(self):
         vs = self.variants()
@@ -107,7 +195,7 @@ class MaterialModel(object):
             },
         }
 
-    def dump(self, only=None, show_slots=False):
+    def dump(self, only=None, show_slots=False, by_pass=False):
         s = self.summary()
         print("材质本体: ver=%s blobs=%d 记录=%d(PS空/仅VS=%d) 有程序=%d 技术=%d"
               % (s["version"], s["blobs"], s["records"], s["empty_records"],
@@ -116,6 +204,11 @@ class MaterialModel(object):
         print("  每技术程序集数: min=%d max=%d median=%d"
               % (s["program_sets_per_tech"]["min"], s["program_sets_per_tech"]["max"],
                  s["program_sets_per_tech"]["median"]))
+        if by_pass:
+            print("  按 pass 分组:")
+            for p, techs in self.by_pass().items():
+                print("    [%s] %d 个技术: %s" % (p, len(techs), ", ".join(techs)))
+            return
         for tech in self.technologies():
             if only and only not in tech:
                 continue
@@ -132,7 +225,7 @@ def main():
     import sys
     m = MaterialModel.load(sys.argv[1])
     only = sys.argv[2] if len(sys.argv) > 2 else None
-    m.dump(only, show_slots="--slots" in sys.argv)
+    m.dump(only, show_slots="--slots" in sys.argv, by_pass="--by-pass" in sys.argv)
 
 
 if __name__ == "__main__":
