@@ -735,6 +735,7 @@ class MmtrPanel(QWidget):
         else:
             self.chk_trans.setToolTip(
                 "把 HLSL+DXBC 混合写法翻回纯 asm 后再汇编(纯 asm 不受影响)")
+        self.chk_trans.toggled.connect(lambda *_: self._on_asm_changed())  # 翻译开关影响检查结果
         self.chk_ccheck = QCheckBox("实时汇编检查")
         try:
             find_assembler()
