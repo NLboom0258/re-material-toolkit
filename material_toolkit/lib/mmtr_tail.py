@@ -8,7 +8,8 @@ analysis/mmtr_from_scratch_design.md §2 / SKILL):
   [PoolStart, CbStart)  名称池(16B/条): [name_off u64][hash u32][0 u32]  (PoolStart 通常=0x46350)
   [CbStart, PStart)     cbuffer 表(32B/条): [name_off u64][hash u32][0 u32][size u32][count u32][members_off u64]
   [PStart, PEnd)        参数表(16B/条): [name_off u32][0 u32][hash u32][(size<<16)|offset]
-  [PEnd, StrStart)      描述符区(8B/条): 每程序 = cb段|smp段|tex段 拼接(段内布局待细化)
+  [PEnd, StrStart)      描述符区: [可选 4B 头(区len%8)][N×8B 条目]; 条目=[a u32][code u32],
+                        code=(type<<24)|(stage<<16)|slot; 每程序 = cb n_cb | smp n_smp | tex n_srv 连续条目段
   [StrStart, blob_start) 字符串池(ASCII, NUL 结尾)
 
 说明:
@@ -83,9 +84,11 @@ class TailModel:
         self.boundaries = {}     # name -> off
         self.sections = {}       # name -> bytes
         self.pool_entries = []       # [(off, name_off, hash, name)]
-        self.cbuffer_entries = []    # [dict(off,name,size,count,members_off)]
+        self.cbuffer_entries = []    # [dict(off,name_off,hash,name,size,count,members_off)]
         self.param_entries = []      # [(off, name_off, hash, size, offset, name)]
         self.strings = []            # [(off, value)]
+        self.desc_head = b""         # 描述符区 4B 头
+        self.desc_entries = []       # [(a u32, code u32)]
 
     @classmethod
     def decode(cls, data: bytes) -> "TailModel":
@@ -183,7 +186,8 @@ class TailModel:
         for p in range(cb_start, p_start, 32):
             if _is_cbuffer(data, p, bs):
                 self.cbuffer_entries.append({
-                    "off": p, "name": _ascii(data, _u64(data, p)),
+                    "off": p, "name_off": _u64(data, p), "hash": _u32(data, p + 8),
+                    "name": _ascii(data, _u64(data, p)),
                     "size": _u32(data, p + 16), "count": _u32(data, p + 20),
                     "members_off": _u64(data, p + 24)})
         for p in range(p_start, p_end, 16):
@@ -196,6 +200,36 @@ class TailModel:
             s = _ascii(data, q)
             self.strings.append((q, s))
             q += len(s) + 1
+        # 描述符区: [可选 4B 头][N×8B 条目 [a,code]]; 头长 = 区 len % 8 (0 或 4)
+        d = self.sections["desc"]
+        head_len = len(d) % 8
+        self.desc_head = d[:head_len]
+        for i in range((len(d) - head_len) // 8):
+            self.desc_entries.append(struct.unpack_from("<II", d, head_len + 8 * i))
+
+    # ---- 由解析条目无损重建各段(用于证明模型可构造) ----
+    def rebuild_pool(self):
+        return b"".join(struct.pack("<QII", no, h, 0) for _, no, h, _ in self.pool_entries)
+
+    def rebuild_cbuffer(self):
+        return b"".join(struct.pack("<QIIIIQ", e["name_off"], e["hash"], 0,
+                                    e["size"], e["count"], e["members_off"])
+                        for e in self.cbuffer_entries)
+
+    def rebuild_param(self):
+        return b"".join(struct.pack("<IIII", no, 0, h, (sz << 16) | off)
+                        for _, no, h, sz, off, _ in self.param_entries)
+
+    def rebuild_desc(self):
+        return self.desc_head + b"".join(struct.pack("<II", a, c)
+                                         for a, c in self.desc_entries)
+
+    def lossless(self):
+        """各段“由解析条目重建”是否与原始字节一致(证明结构化解析无损)。"""
+        return (self.rebuild_pool() == self.sections["pool"] and
+                self.rebuild_cbuffer() == self.sections["cbuffer"] and
+                self.rebuild_param() == self.sections["param"] and
+                self.rebuild_desc() == self.sections["desc"])
 
     def encode(self) -> bytes:
         """尾段字节 = 各段拼接(保序)。"""
@@ -211,7 +245,8 @@ class TailModel:
         print(f"    sizes: " + " ".join(
             f"{k}=0x{len(v):x}" for k, v in self.sections.items()))
         print(f"    pools={len(self.pool_entries)} cbuffers={len(self.cbuffer_entries)} "
-              f"params={len(self.param_entries)} strings={len(self.strings)}")
+              f"params={len(self.param_entries)} desc={len(self.desc_entries)} "
+              f"strings={len(self.strings)}")
 
 
 if __name__ == "__main__":
