@@ -10,6 +10,8 @@ blob 区, 并重指对应的变体槽(record)程序指针; 其余内容照旧, �
   - **追加到 blob 区末尾**(不移动既有 blob ⇒ 既有绝对偏移全部保持有效);
   - 把"角色指向 `src_blob` 的槽"(或显式 `slots`)程序指针指到新 blob;
   - PS 同步 `+0x9c`、VS 同步 `+0x88/+0x8c`(该槽程序字节码大小);
+  - 可选(`recount=True`)按该槽 PS/VS 的 RDEF **重算计数/打包字段**
+    (`+0xa4/+0xa8/+0xac/+0xb4/+0xb8/+0xc4`..., 见 `mmtr_build.recount_slot`);
   - 可选(`sync=True`)从"**同组**原生 donor 槽"(按 `(desc,pool)` 匹配)同步绑定指针+计数。
 
 两种安装方式(`ProgramInstall.in_place`):
@@ -45,11 +47,12 @@ class ProgramInstall(object):
     src_blob  被替换的程序在模板里的 blob 下标(用于定位"哪些槽"+同步绑定/计数)
     slots     显式目标槽下标(与 src_blob 二选一; 给定时忽略 src_blob 的自动定位)
     sync      True: 从"同组(desc,pool)原生 donor"同步绑定指针+计数(默认 False)
+    recount   True: 装配后按该槽 PS/VS 的 RDEF 重算计数/打包字段(默认 False)
     in_place  True: 就地改写 src_blob 本身(blob 数不变/无死 blob); 默认 False(追加+重指)
     """
 
     def __init__(self, role, source, src_blob=None, slots=None, sync=False,
-                 in_place=False):
+                 recount=False, in_place=False):
         if role not in ROLES:
             raise ValueError(f"role 必须是 {ROLES}")
         if in_place:
@@ -64,6 +67,7 @@ class ProgramInstall(object):
         self.src_blob = src_blob
         self.slots = list(slots) if slots is not None else None
         self.sync = sync
+        self.recount = recount
         self.in_place = in_place
 
 
@@ -91,6 +95,18 @@ def _donor_map(image, role, src_off):
     return out
 
 
+def _recount_slots_using(data, off):
+    """把"任一角色程序指针 == off"的槽按 RDEF 重算计数/打包字段, 返回新 bytes。"""
+    image = MmtrImage.from_bytes(data)
+    flds = [fo for f in ROLE_FIELDS.values() for fo in f]
+    changed = False
+    for s in range(REC_N):
+        if any(image.rec_field(s, fo) == off for fo in flds):
+            if image.recount_slot(s) is not None:
+                changed = True
+    return image.to_bytes() if changed else data
+
+
 def assemble(template, installs):
     """按规格装配新 mmtr。
 
@@ -103,6 +119,8 @@ def assemble(template, installs):
         dxbc = inst.source.resolve()
         if inst.in_place:
             data = replace_blob(data, inst.src_blob, bytes(dxbc))
+            if inst.recount:
+                data = _recount_slots_using(data, blob_offsets(data)[inst.src_blob])
             continue
         image = MmtrImage.from_bytes(data)
         bs = image.blob_start
@@ -118,8 +136,10 @@ def assemble(template, installs):
             d = donors.get(key)
             if d is not None:
                 image.sync_binding_from(s, d, role=inst.role,
-                                        blob_off=new_off, size=size)
+                                        blob_off=new_off, size=size,
+                                        recount=inst.recount)
             else:
-                image.set_program(s, inst.role, new_off, size=size)
+                image.set_program(s, inst.role, new_off, size=size,
+                                  recount=inst.recount)
         data = image.to_bytes()
     return data

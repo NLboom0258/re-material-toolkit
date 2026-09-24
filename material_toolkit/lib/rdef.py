@@ -38,6 +38,50 @@ def blob_list(data):
     return bs, out
 
 
+def _cstr(b, o, n=64):
+    if not (0 <= o < len(b)):
+        return ""
+    e = b.find(b"\x00", o)
+    if e < 0 or e - o > n:
+        e = min(o + n, len(b))
+    return b[o:e].decode("latin1", "replace")
+
+
+def rdef_resources(blob):
+    """解析 DXBC 的 RDEF, 返回 (cb, smp, srv) 三个**名字集合**; 无 RDEF/非法返回 None。
+
+    cb/smp/srv 按 bound resource 的 **type** 分桶: 0=cbuffer, 3=sampler, 其余=SRV/其它。
+    ⚠ 这是 mmtr 记录计数/打包字段(+0xa8/+0xac/+0xb4/+0xb8/...)的口径(见
+      analysis/mmtr_record_fields.md): 须用"bound resource 按 type 分桶", **不是** RDEF 头 n_cb。
+    """
+    try:
+        if len(blob) < 32 or blob[:4] != b"DXBC":
+            return None
+        n = _u32(blob, 28)
+        if n > 16:
+            return None
+        rdef_ci = None
+        for i in range(n):
+            co = _u32(blob, 32 + i * 4)
+            if blob[co:co + 4] == b"RDEF":
+                rdef_ci = co
+                break
+        if rdef_ci is None:
+            return None
+        cs = _u32(blob, rdef_ci + 4)
+        r = blob[rdef_ci + 8:rdef_ci + 8 + cs]
+        _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+        cb, smp, srv = set(), set(), set()
+        for k in range(n_br):
+            p = br_off + k * 32
+            t = _u32(r, p + 4)
+            nm = _cstr(r, _u32(r, p))
+            (cb if t == 0 else smp if t == 3 else srv).add(nm)
+        return cb, smp, srv
+    except Exception:
+        return None
+
+
 def add_bound_resource(blob: bytes, name: str, slot: int, type_=TYPE_TEXTURE,
                        dim=DIM_TEXTURE2D, ret=RET_FLOAT4, flags=FLAGS_TEX,
                        nsamp=NSAMP):

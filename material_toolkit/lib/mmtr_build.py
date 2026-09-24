@@ -20,11 +20,13 @@ import struct
 
 try:
     from .hashes import ascii_hash
+    from .rdef import rdef_resources
 except ImportError:  # 允许脚本直接 import
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from hashes import ascii_hash
+    from rdef import rdef_resources
 
 SKELETON_HI = 0x46350
 
@@ -106,6 +108,25 @@ def content_positions():
 def content_count():
     return 4 * len(HEAD_CONTENT_U32) + 4 * len(GAP_CONTENT_U32) \
         + PT_N * 4 * len(PT_CONTENT_FIELDS) + REC_N * 4 * len(REC_CONTENT_FIELDS)
+
+
+def record_counts(ps_res, vs_res):
+    """由 (PS, VS) 的 RDEF 资源桶计算记录的计数/打包字段(2026-09-24 逆向确证, 全样本 100%)。
+
+    ps_res/vs_res: `rdef.rdef_resources()` 的返回值 (cb,smp,srv) 集合 或 None。
+    口径: 按 RDEF **bound-resource 的 type** 分桶(0=cb/3=smp/其余=SRV), 名字**并集**(VS∪PS)。
+    详见 analysis/mmtr_record_fields.md。返回各字段应填值(键见实现)。
+    """
+    pcb, psmp, psrv = ps_res or (set(), set(), set())
+    vcb, vsmp, vsrv = vs_res or (set(), set(), set())
+    n_cb_ps = len(pcb)
+    n_smp = len(psmp | vsmp)
+    b4, b8 = len(vsrv), len(psrv)
+    a8 = len(vcb)
+    c6 = len(vcb | pcb)
+    return {"a8": a8, "ac_low": n_cb_ps, "b0": n_smp << 16, "b4": b4, "b8": b8,
+            "a4": a8 + n_cb_ps + n_smp + b4 + b8, "cc": len(vsrv | psrv),
+            "c6": c6, "c7": n_smp, "c4": (n_smp << 24) | (c6 << 16)}
 
 
 class MmtrTemplate:
@@ -197,9 +218,9 @@ class MmtrImage:
     def set_rec_field(self, slot, fo, v):
         struct.pack_into("<I", self.buf, REC_LO + slot * REC_SIZE + fo, v)
 
-    def set_program(self, slot, role, blob_off, size=None):
+    def set_program(self, slot, role, blob_off, size=None, recount=False):
         """把某槽的某角色程序指针指向 blob_off; size 给定则同步该角色的大小字段
-        (PS-> +0x9c; VS-> +0x88 与 +0x8c)。"""
+        (PS-> +0x9c; VS-> +0x88 与 +0x8c)。recount=True 时另按 RDEF 重算计数/打包字段。"""
         for fo in ROLE_FIELDS[role]:
             self.set_rec_field(slot, fo, blob_off)
         if size is not None:
@@ -208,6 +229,8 @@ class MmtrImage:
             elif role == "VS":
                 for fo in REC_OFF_VS_SIZE:
                     self.set_rec_field(slot, fo, size)
+        if recount:
+            self.recount_slot(slot)
 
     def blob_sizes(self):
         """{blob 偏移: 大小}(扫描 blob 区)。"""
@@ -221,6 +244,43 @@ class MmtrImage:
             off += sz
             i += sz
         return out
+
+    def blob_at(self, off):
+        """取 blob 区里绝对偏移 off 处的 blob bytes; 非 blob 起点返回 None。"""
+        if off < self.blob_start:
+            return None
+        i = off - self.blob_start
+        b = self.blobs
+        if i + 28 > len(b) or b[i:i + 4] != b"DXBC":
+            return None
+        return bytes(b[i:i + _u32(b, i + 24)])
+
+    def recount_slot(self, slot, tables=True):
+        """按该槽 PS/VS 的 RDEF 重算并写入"计数/打包字段"(2026-09-24 逆向确证)。
+
+        写 `+0xa8`/`+0xac`(仅低16)/`+0xb0`/`+0xb4`/`+0xb8`/`+0xa4`/`+0xc4`(含 `+0xc6`/`+0xc7`)。
+        tables=True 时另写"表条数字节" `+0xcc`(仅当表3 布局与新程序一致时正确)。
+        返回计算结果 dict; 两程序都取不到(无 RDEF)时返回 None(不写)。
+        注: 这是"从0合成/跨布局"的写入口; 同布局装配时结果应与原件一致, 可用于自检。
+        """
+        ps = self.rec_field(slot, 0x00)
+        vs = self.rec_field(slot, -0x20)
+        pres = rdef_resources(self.blob_at(ps)) if ps else None
+        vres = rdef_resources(self.blob_at(vs)) if vs else None
+        if pres is None and vres is None:
+            return None
+        c = record_counts(pres, vres)
+        self.set_rec_field(slot, 0xA8, c["a8"])
+        cur = self.rec_field(slot, 0xAC)
+        self.set_rec_field(slot, 0xAC, (cur & 0xFFFF0000) | (c["ac_low"] & 0xFFFF))
+        self.set_rec_field(slot, 0xB0, c["b0"])
+        self.set_rec_field(slot, 0xB4, c["b4"])
+        self.set_rec_field(slot, 0xB8, c["b8"])
+        self.set_rec_field(slot, 0xA4, c["a4"])
+        self.set_rec_field(slot, 0xC4, c["c4"])
+        if tables:
+            self.buf[REC_LO + slot * REC_SIZE + 0xCC] = c["cc"] & 0xFF
+        return c
 
     # ---- 程序指针批量编辑 ----
     def slots_using(self, blob_off, role="PS"):
@@ -240,7 +300,8 @@ class MmtrImage:
         return n
 
     # ---- 绑定组/计数 装配 ----
-    def sync_binding_from(self, dst_slot, src_slot, role="PS", blob_off=None, size=None):
+    def sync_binding_from(self, dst_slot, src_slot, role="PS", blob_off=None, size=None,
+                          recount=False):
         """从 src_slot 复制 绑定指针 + 计数 到 dst_slot(可选同时重指程序/同步大小)。
 
         用途: 把某槽改成使用"另一个槽所用的程序"时, 其绑定组与计数须跟随该程序
@@ -249,7 +310,9 @@ class MmtrImage:
         for fo in SYNC_FIELDS:
             self.set_rec_field(dst_slot, fo, self.rec_field(src_slot, fo))
         if blob_off is not None:
-            self.set_program(dst_slot, role, blob_off, size=size)
+            self.set_program(dst_slot, role, blob_off, size=size, recount=recount)
+        elif recount:
+            self.recount_slot(dst_slot)
 
     def repoint_program_with_binding(self, src_off, dst_idx, model, role="PS"):
         """整族(角色指向 src_off 的槽)重指到 blob[dst_idx], 并从"同组的原生 donor 槽"
