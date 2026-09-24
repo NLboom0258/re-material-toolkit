@@ -708,6 +708,7 @@ class MmtrPanel(QWidget):
         self.ed_asm.setFont(mono)
         self._asm_hl = AsmHighlighter(self.ed_asm.document())
         self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
+        self._asm_cache = {}        # 每 blob 一份 asm(切换 blob 时保存/恢复)
         # 诊断: 静态(即时) + 汇编(防抖, 后台线程)
         self._last_diags = []
         self._compile_errors = []   # [(行号1基, msg)]
@@ -814,6 +815,7 @@ class MmtrPanel(QWidget):
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
         self._vocab_cache = None
+        self._asm_cache = {}
         self.ed_asm.clear()
         self._edit_blob = None
         self.refresh_blobs()
@@ -858,7 +860,20 @@ class MmtrPanel(QWidget):
         it = self.tree_blob.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
+    def _sync_editor_to_blob(self, idx):
+        """切到某个 blob 时, 编辑区显示该 blob 自己那份 asm(没反汇编过则清空)。
+
+        每个 blob 各存一份 asm(含未应用的编辑): 切走时保存, 切回时恢复。
+        """
+        if idx == self._edit_blob:
+            return
+        if self._edit_blob is not None:
+            self._asm_cache[self._edit_blob] = self.ed_asm.toPlainText()
+        self._edit_blob = idx
+        self.ed_asm.setPlainText(self._asm_cache.get(idx, "") if idx is not None else "")
+
     def refresh_detail(self):
+        self._sync_editor_to_blob(self.cur_blob())
         self.refresh_groups()
         self.refresh_params()
 
@@ -1089,8 +1104,9 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "反汇编失败", str(e))
             return
-        self.ed_asm.setPlainText(asm)
         self._edit_blob = idx
+        self.ed_asm.setPlainText(asm)
+        self._asm_cache[idx] = asm
         QMessageBox.information(self, "反汇编",
                                 f"blob[{idx}] 已反汇编({len(asm)} 字符), 编辑后点「应用」。")
 
@@ -1140,7 +1156,8 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "放回失败", str(e))
             return
-        self._edit_blob = None
+        self._asm_cache[idx] = self.ed_asm.toPlainText()   # 保留该 blob 的 asm(已应用版本)
+        self._edit_blob = idx
         self._reload_after_edit(full=True)
         QMessageBox.information(self, "应用", f"blob[{idx}] 已放回({len(blob)} 字节)")
 
@@ -1159,8 +1176,11 @@ class MmtrPanel(QWidget):
         p, _ = QFileDialog.getOpenFileName(
             self, "导入 asm", "", "asm (*.asm *.asm.txt *.txt);;所有文件 (*)")
         if p:
+            idx = self.cur_blob()
+            self._edit_blob = idx
             self.ed_asm.setPlainText(open(p, encoding="utf-8", errors="replace").read())
-            self._edit_blob = self.cur_blob()
+            if idx is not None:
+                self._asm_cache[idx] = self.ed_asm.toPlainText()
 
     # ---- Blob(shader) 诊断(静态 + 汇编) ----
     def _ccheck_enabled(self):
