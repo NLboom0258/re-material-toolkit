@@ -48,9 +48,11 @@ REC_CONTENT_FIELDS = (0x000, 0x008, 0x018, 0x030, 0x038, 0x040, 0x048, 0x050,
 POST_LO, POST_HI = 0x46240, 0x46350
 
 # 程序角色 -> 记录内字段偏移(见 mmtr_model.REC_OFF_*)
-ROLE_FIELDS = {"PS": (0x00,), "VS": (0xE0, 0xE8), "CS": (0x08,)}
-# 记录内 "PS 大小" 字段
+# ⚠ VS 指针在 rec-0x20(逆向 DMC5 exe 确证, 全样本 100%; 旧 (0xE0,0xE8) 是误判)
+ROLE_FIELDS = {"PS": (0x00,), "VS": (-0x20,), "CS": (0x08,)}
+# 记录内 "程序字节码大小" 字段(引擎精确校验; 详见 analysis/mmtr_record_fields.md)
 REC_OFF_PS_SIZE = 0x9C
+REC_OFF_VS_SIZE = (0x88, 0x8C)   # +0x88(inputLayout)/+0x8c(createVertexShader) 共用同一 VS 大小
 
 # 绑定指针(cbuffer/sampler/纹理 的描述符+池)与计数 字段 —— 跨"布局"重指时需从 donor 同步
 BINDING_FIELDS = (0x38, 0x40, 0x48, 0x50, 0x58, 0x60)
@@ -196,11 +198,16 @@ class MmtrImage:
         struct.pack_into("<I", self.buf, REC_LO + slot * REC_SIZE + fo, v)
 
     def set_program(self, slot, role, blob_off, size=None):
-        """把某槽的某角色程序指针指向 blob_off; size 给定则同步该槽 PS 大小(+0x9c)。"""
+        """把某槽的某角色程序指针指向 blob_off; size 给定则同步该角色的大小字段
+        (PS-> +0x9c; VS-> +0x88 与 +0x8c)。"""
         for fo in ROLE_FIELDS[role]:
             self.set_rec_field(slot, fo, blob_off)
-        if size is not None and role == "PS":
-            self.set_rec_field(slot, REC_OFF_PS_SIZE, size)
+        if size is not None:
+            if role == "PS":
+                self.set_rec_field(slot, REC_OFF_PS_SIZE, size)
+            elif role == "VS":
+                for fo in REC_OFF_VS_SIZE:
+                    self.set_rec_field(slot, fo, size)
 
     def blob_sizes(self):
         """{blob 偏移: 大小}(扫描 blob 区)。"""

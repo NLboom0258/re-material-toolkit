@@ -9,7 +9,7 @@ blob 区, 并重指对应的变体槽(record)程序指针; 其余内容照旧, �
   - 解析 `ProgramInstall.source`(`BlobSource`: transport/dxbc/asm) -> 规范化 DXBC;
   - **追加到 blob 区末尾**(不移动既有 blob ⇒ 既有绝对偏移全部保持有效);
   - 把"角色指向 `src_blob` 的槽"(或显式 `slots`)程序指针指到新 blob;
-  - PS 角色同步 `+0x9c`(该槽 PS 大小);
+  - PS 同步 `+0x9c`、VS 同步 `+0x88/+0x8c`(该槽程序字节码大小);
   - 可选(`sync=True`)从"**同组**原生 donor 槽"(按 `(desc,pool)` 匹配)同步绑定指针+计数。
 
 两种安装方式(`ProgramInstall.in_place`):
@@ -112,7 +112,7 @@ def assemble(template, installs):
         donors = _donor_map(image, inst.role, src_off) if inst.sync else {}
         new_off = bs + len(image.blobs)          # 追加点(既有 blob 偏移不变)
         image.blobs += bytes(dxbc)
-        size = len(dxbc) if inst.role == "PS" else None
+        size = len(dxbc) if inst.role in ("PS", "VS") else None
         for s in slots:
             key = (image.rec_field(s, 0x58), image.rec_field(s, 0x60))
             d = donors.get(key)

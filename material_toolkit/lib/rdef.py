@@ -124,10 +124,11 @@ def add_bound_resource(blob: bytes, name: str, slot: int, type_=TYPE_TEXTURE,
 def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
     """把第 blob_idx 个 blob 换为 new_blob(长度可变), 重映射头部引用。
 
-    ⚠ 大小字段必须"按记录"更新, 不能按"值"全局替换:
-      变体记录 264B: +0x00=blob 起点, +0x9c=该 blob 大小。
-      若有两条记录引用的 blob 恰好大小相同, 按值替换会误伤另一条(实测进游戏 createPixelShader 崩)。
-      故: 仅当某处 u32 == 某 blob 起点、且其 +0x9c 恰等于该 blob 原大小时, 才更新 +0x9c。
+    ⚠ 大小字段必须"按记录"更新, 不能按"值"全局替换(否则同尺寸 blob 互污, 实测 createPixelShader 崩)。
+    记录的 "程序指针 + 字节码大小" 字段(逆向确证, 见 analysis/mmtr_record_fields.md):
+      - PS: 指针 @ rec+0x00, 大小 @ rec+0x9c
+      - VS: 指针 @ rec-0x20, 大小 @ rec+0x88 与 rec+0x8c(引擎对 VS 大小精确校验)
+    故: 仅当某处 u32 == 某 blob 起点、且对应的大小字段恰等于该 blob 原大小时, 才更新之。
     """
     bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
@@ -148,15 +149,24 @@ def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
         cursor += sz
 
     # 先按"原始头"检测所有写入位置, 再统一落盘(避免读改写互相干扰)
+    # 大小字段按记录更新, 且区分 PS/VS:
+    #   p 为 PS 指针(rec+0x00) ⇒ 大小在 p+0x9C
+    #   p 为 VS 指针(rec-0x20) ⇒ 长度在 p+0xAC(=rec+0x8c), 另有 +0x88 p+0xA8(=rec+0x88)
     writes = []
     for p in range(0, len(orig_head) - 3, 4):
         w = _u32(orig_head, p)
         if w in old_to_new:
             writes.append((p, old_to_new[w]))                 # blob 起点引用
-            if w in changed and p + 0x9C + 4 <= len(orig_head):
+            if w in changed:
                 old_size, new_size = changed[w]
-                if _u32(orig_head, p + 0x9C) == old_size:     # 确认是"该 blob 的大小字段"
+                if p + 0x9C + 4 <= len(orig_head) and \
+                        _u32(orig_head, p + 0x9C) == old_size:      # PS 大小
                     writes.append((p + 0x9C, new_size))
+                if p + 0xAC + 4 <= len(orig_head) and \
+                        _u32(orig_head, p + 0xAC) == old_size:      # VS 长度(+0x8c)
+                    writes.append((p + 0xAC, new_size))
+                    if _u32(orig_head, p + 0xA8) == old_size:       # +0x88(同值)
+                        writes.append((p + 0xA8, new_size))
     for pos, val in writes:
         struct.pack_into("<I", head, pos, val)
 
