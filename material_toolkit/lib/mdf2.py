@@ -51,15 +51,15 @@ def param_type_float_count(type_name: str) -> int:
     return PARAM_TYPE_BYTES[type_name] // 4
 
 
-# 材质着色类型(ShadingType; 参考 MDF-Manager / RE-Mesh-Editor)
+# 材质着色类型(MaterialShadingType; 权威 = 逆向 DMC5 exe 的 via.render.MaterialShadingType)。
+# ⚠ DMC5 实际只有 11 项(下表); 社区工具(MDF-Manager/RE-Mesh-Editor)列的是"跨游戏并集":
+#   在 PrimitiveMesh(6) 之后多插了 PrimitiveSolidMesh/SpeedTree/GUI/GUIMeshTransparent/
+#   RenderTarget/PostProcess/Primitive*Material/SpineMaterial/ReflectiveTransparent 等
+#   => 对 DMC5 值 >=7 会标错名(DMC5: 7=Water / 8=GUIMesh / 9=ExpensiveTransparent / 10=Forward)。
 SHADING_TYPES = [
     ("Standard", 0), ("Decal", 1), ("DecalWithMetallic", 2), ("DecalNRMR", 3),
     ("Transparent", 4), ("Distortion", 5), ("PrimitiveMesh", 6),
-    ("PrimitiveSolidMesh", 7), ("Water", 8), ("SpeedTree", 9), ("GUI", 10),
-    ("GUIMesh", 11), ("GUIMeshTransparent", 12), ("ExpensiveTransparent", 13),
-    ("Forward", 14), ("RenderTarget", 15), ("PostProcess", 16),
-    ("PrimitiveMaterial", 17), ("PrimitiveSolidMaterial", 18),
-    ("SpineMaterial", 19), ("ReflectiveTransparent", 20),
+    ("Water", 7), ("GUIMesh", 8), ("ExpensiveTransparent", 9), ("Forward", 10),
 ]
 SHADING_TYPE_VALUES = dict(SHADING_TYPES)
 
