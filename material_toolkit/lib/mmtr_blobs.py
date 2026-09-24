@@ -266,7 +266,11 @@ def assemble_asm(asm_text, ref_dxbc=None, workdir=None):
         if not os.path.exists(cbo):
             raise RuntimeError(f"汇编失败(未生成 DXBC):\n{log}")
         with open(cbo, "rb") as f:
-            return f.read()
+            dxbc = f.read()
+        # 3Dmigoto asm2cbo 的指纹**不可全信**: 实测某些长度算出错误指纹
+        # (如 len=6838, leftOver=34 单行 padding 分支) -> D3D 三项校验全拒。
+        # 一律用已验证的 dxil_hash 重算(与 mmtr_rebuild 同做法)。
+        return finalize(dxbc)
     finally:
         if own:
             shutil.rmtree(workdir, ignore_errors=True)
