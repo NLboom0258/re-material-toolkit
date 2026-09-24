@@ -12,6 +12,12 @@ blob 区, 并重指对应的变体槽(record)程序指针; 其余内容照旧, �
   - PS 角色同步 `+0x9c`(该槽 PS 大小);
   - 可选(`sync=True`)从"**同组**原生 donor 槽"(按 `(desc,pool)` 匹配)同步绑定指针+计数。
 
+两种安装方式(`ProgramInstall.in_place`):
+  - **append**(默认): 追加重指 —— 非破坏性, 可一次装多个不同程序; 副作用: 原 blob 变成未引用的死 blob、
+    blob 序号增位。
+  - **in_place=True**: 用 `rdef.replace_blob` **就地改写 `src_blob` 本身**(blob 数不变、无死 blob、无需重指);
+    更符合“改某个 shader 就替换它”。需给 `src_blob`。
+
 限制(v1): 假设新程序与源程序**资源布局同构**(典型: 同一 shader 改指令后装回)。
 同布局时 `sync=False` 即可(槽的绑定/计数本就对应该程序); 跨布局需要"目标程序的 donor",
 而新 blob 无原生 donor ⇒ 不在 v1 范围。
@@ -19,12 +25,14 @@ blob 区, 并重指对应的变体槽(record)程序指针; 其余内容照旧, �
 try:
     from .mmtr_build import MmtrImage, REC_N, ROLE_FIELDS
     from .mmtr_blobs import BlobSource, list_blobs
+    from .rdef import replace_blob
 except ImportError:  # 允许脚本直接 import
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from mmtr_build import MmtrImage, REC_N, ROLE_FIELDS
     from mmtr_blobs import BlobSource, list_blobs
+    from rdef import replace_blob
 
 ROLES = ("PS", "VS", "CS")
 
@@ -37,12 +45,17 @@ class ProgramInstall(object):
     src_blob  被替换的程序在模板里的 blob 下标(用于定位"哪些槽"+同步绑定/计数)
     slots     显式目标槽下标(与 src_blob 二选一; 给定时忽略 src_blob 的自动定位)
     sync      True: 从"同组(desc,pool)原生 donor"同步绑定指针+计数(默认 False)
+    in_place  True: 就地改写 src_blob 本身(blob 数不变/无死 blob); 默认 False(追加+重指)
     """
 
-    def __init__(self, role, source, src_blob=None, slots=None, sync=False):
+    def __init__(self, role, source, src_blob=None, slots=None, sync=False,
+                 in_place=False):
         if role not in ROLES:
             raise ValueError(f"role 必须是 {ROLES}")
-        if src_blob is None and slots is None:
+        if in_place:
+            if src_blob is None:
+                raise ValueError("in_place 需给出 src_blob")
+        elif src_blob is None and slots is None:
             raise ValueError("需给出 src_blob 或 slots 以定位目标槽")
         if not isinstance(source, BlobSource):
             raise TypeError("source 必须是 BlobSource")
@@ -51,6 +64,7 @@ class ProgramInstall(object):
         self.src_blob = src_blob
         self.slots = list(slots) if slots is not None else None
         self.sync = sync
+        self.in_place = in_place
 
 
 def blob_offsets(template):
@@ -81,13 +95,18 @@ def assemble(template, installs):
     """按规格装配新 mmtr。
 
     template: 模板 mmtr 的 bytes; installs: [ProgramInstall, ...]。
-    返回新 mmtr 的 bytes(追加了新 blob; 骨架与未被重指的槽保持不变)。
+    返回新 mmtr 的 bytes。append 安装追加新 blob 并重指对应槽;
+    in_place 安装就地改写 src_blob(可混合; 按列表顺序依次应用)。
     """
-    image = MmtrImage.from_bytes(template)
-    bs = image.blob_start
-    offs = blob_offsets(template)
+    data = template
     for inst in installs:
         dxbc = inst.source.resolve()
+        if inst.in_place:
+            data = replace_blob(data, inst.src_blob, bytes(dxbc))
+            continue
+        image = MmtrImage.from_bytes(data)
+        bs = image.blob_start
+        offs = blob_offsets(data)
         src_off = offs[inst.src_blob] if inst.src_blob is not None else None
         slots = _target_slots(image, inst, src_off)
         donors = _donor_map(image, inst.role, src_off) if inst.sync else {}
@@ -102,4 +121,5 @@ def assemble(template, installs):
                                         blob_off=new_off, size=size)
             else:
                 image.set_program(s, inst.role, new_off, size=size)
-    return image.to_bytes()
+        data = image.to_bytes()
+    return data

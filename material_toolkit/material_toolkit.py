@@ -36,6 +36,7 @@
                    {"role":"PS","src_blob":34,"source":{"kind":"dxbc","path":"y.dxbc"}},
                    {"role":"PS","src_blob":35,"source":{"kind":"blob","mmtr":"other.mmtr","idx":10}}]}
     (source.kind=asm 时, ref 默认取自 src_blob; 可选 sync=true 从同组 donor 同步绑定)
+    (可选 in_place=true: 就地改写 src_blob 本身(blob 数不变/无死 blob); 默认追加+重指)
 """
 import json
 import os, sys
@@ -260,7 +261,8 @@ def main():
                 raise ValueError(f"未知 source kind: {kind!r}")
             installs.append(aset.ProgramInstall(
                 it["role"], source, src_blob=it.get("src_blob"),
-                slots=it.get("slots"), sync=it.get("sync", False)))
+                slots=it.get("slots"), sync=it.get("sync", False),
+                in_place=it.get("in_place", False)))
         out_data = aset.assemble(template, installs)
         open(out, "wb").write(out_data)
         print(f"OK: assemble {src} + {len(installs)} installs -> {out} "
