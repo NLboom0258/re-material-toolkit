@@ -15,6 +15,7 @@
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
+  python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
   python material_toolkit.py blob-disasm  <dxbc> -o <out.asm.txt>
@@ -40,7 +41,7 @@ from lib.sync import sync_mdf2  # noqa: E402
 from lib.binding import (add_texture_slot, rename_slot, group_summary,  # noqa: E402
                          name_vocabulary, rename_name_global)
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
-from lib.mmtr_build import MmtrTemplate, content_count  # noqa: E402
+from lib.mmtr_build import MmtrTemplate, content_count, new_from_template  # noqa: E402
 from lib.mmtr_info import blob_info  # noqa: E402
 from lib import mmtr_blobs as B  # noqa: E402
 
@@ -179,6 +180,13 @@ def main():
         open(out, "wb").write(nd)
         print(f"OK: 全局改名 {old!r} -> {new!r} -> {out} ({len(data)} -> {len(nd)} bytes)")
         _selfcheck_mmtr(nd)
+    elif cmd == "mmtr-new":
+        out = a[a.index("-o") + 1] if "-o" in a else "new.mmtr.1808168797"
+        data = new_from_template(open(a[0], "rb").read())
+        open(out, "wb").write(data)
+        print(f"OK: 从模板新建 {a[0]} -> {out} ({len(data)} bytes) "
+              f"(当前=克隆; 将来=骨架+规格装配)")
+        _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)

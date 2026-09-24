@@ -130,6 +130,18 @@ def extract_skeleton(data):
     return MmtrTemplate(data).skeleton
 
 
+def new_from_template(template: bytes) -> bytes:
+    """从模板构造新 mmtr 的 bytes(统一入口)。
+
+    现状: 返回 template 的逐字节副本(克隆) —— 即“基于该模板的新文件”。
+    说明: 因 B2(记录内容字段全推导)受阻, “完全凭空合成头部内容”暂不可行 ⇒ 采用
+          “模板 + 移植 + 编辑”。本函数是“从模板构建”的**统一入口**: 将来把可重构的部分
+          (骨架 / 尾段 L4 / 已建模的记录字段)改为按规格生成、未摸清的字段照抄模板,
+          调用方(GUI/CLI)无需改动。
+    """
+    return bytes(template)
+
+
 def compose(template, tail_model, blobs: bytes) -> bytes:
     """B1 容器重装: 骨架(head) + 结构化 L4(tail_model.encode) + blob 区 -> 完整 mmtr bytes。
 

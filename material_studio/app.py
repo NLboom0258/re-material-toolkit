@@ -42,6 +42,7 @@ from tools.material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     find_translator, run_translator,
 )
 from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
+from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 
 from PySide6.QtCore import Qt, QTimer, Signal, QRegularExpression  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
@@ -516,6 +517,7 @@ class MmtrPanel(QWidget):
         super().__init__()
         self.data = None            # 当前 mmtr bytes
         self.path = None
+        self._title = None          # 合成标题(克隆/新建); 空则用文件名
         self.mmtr = None            # Mmtr 对象(用于参数栏)
         self._um = []               # UserMaterial 成员缓存
         self._container = container
@@ -602,17 +604,28 @@ class MmtrPanel(QWidget):
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
-        """标签页标题: 已打开文件用文件名; 未加载用(未打开)。"""
+        """标签页标题: 优先合成标题(克隆新建); 否则文件名; 未加载用(未打开)。"""
+        if self._title:
+            return self._title
         return os.path.basename(self.path) if self.path else "(未打开)"
 
     def _emit_title(self):
         self.title_changed.emit(self.doc_title())
 
     def load_path(self, path):
-        self.data = open(path, "rb").read()
+        """打开文件: 读文件并载入。"""
+        self.load_data(open(path, "rb").read(), path=path)
+
+    def load_data(self, data, path=None, title=None):
+        """从 bytes 载入(打开文件或克隆新建); path=None 表示未保存的新文件。"""
+        self.data = bytes(data)
         self.path = path
+        self._title = title
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
+        self._vocab_cache = None
+        self.ed_asm.clear()
+        self._edit_blob = None
         self.refresh_blobs()
         self.refresh_pool()
         self._emit_title()
@@ -1472,10 +1485,12 @@ class Mdf2Panel(QWidget):
 class MmtrTabs(QTabWidget):
     """MMTR 多文件容器: 每个打开的 mmtr 一个标签页。
 
-    - 标签可关闭 / 可拖动重排; 右上角「打开 mmtr…」;
-    - mmtr 无法从 0 新建(与 mdf2 不同), 故没有「＋新建」, 也不在启动时预建空文件;
+    - 标签可关闭 / 可拖动重排; 右上角「新建 mmtr…」(从模板克隆) 与「打开 mmtr…」;
+    - mmtr 无法真正从 0 新建(与 mdf2 不同), 故“新建”= 选一个现有 mmtr 当模板克隆;
     - 无文件时显示一个不可关闭的「(未打开)」占位页, 避免"无内容且无处可点"。
     """
+
+    DEFAULT_TITLE = "NewMMTR.mmtr.1808168797"
 
     def __init__(self):
         super().__init__()
@@ -1483,10 +1498,19 @@ class MmtrTabs(QTabWidget):
         self.setMovable(True)
         self.setDocumentMode(True)
         self.tabCloseRequested.connect(self._on_close)
-        corner = QPushButton("打开 mmtr…")
-        corner.setToolTip("打开一个 mmtr 文件(新标签页)")
-        corner.clicked.connect(self.open_dialog)
-        self.setCornerWidget(corner, Qt.TopRightCorner)
+        box = QWidget()
+        hb = QHBoxLayout(box)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(4)
+        btn_new = QPushButton("新建 mmtr…")
+        btn_new.setToolTip("从模板克隆新建 mmtr(选一个现有 mmtr 作为模板)")
+        btn_new.clicked.connect(self.new_dialog)
+        btn_open = QPushButton("打开 mmtr…")
+        btn_open.setToolTip("打开一个 mmtr 文件(新标签页)")
+        btn_open.clicked.connect(self.open_dialog)
+        hb.addWidget(btn_new)
+        hb.addWidget(btn_open)
+        self.setCornerWidget(box, Qt.TopRightCorner)
         self._placeholder = None
         self._ensure_placeholder()
 
@@ -1495,6 +1519,26 @@ class MmtrTabs(QTabWidget):
         self._drop_placeholder()
         panel = MmtrPanel(container=self)
         panel.load_path(path)
+        return self._add_panel(panel)
+
+    def new_dialog(self):
+        """选一个现有 mmtr 当模板, 克隆为新文件。"""
+        p, _ = QFileDialog.getOpenFileName(
+            self, "选择模板 mmtr(克隆为新建文件)", "", "mmtr (*.mmtr.*);;所有文件 (*)")
+        if not p:
+            return
+        try:
+            data = new_from_template(open(p, "rb").read())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self.new_from_data(data)
+
+    def new_from_data(self, data, title=None):
+        """以给定 bytes 新建标签页(未保存; 标题用合成名)。"""
+        self._drop_placeholder()
+        panel = MmtrPanel(container=self)
+        panel.load_data(data, path=None, title=title or self.DEFAULT_TITLE)
         return self._add_panel(panel)
 
     def open_dialog(self):
@@ -1532,7 +1576,8 @@ class MmtrTabs(QTabWidget):
         w = QWidget()
         v = QVBoxLayout(w)
         v.addStretch(1)
-        lab = QLabel("尚未打开 mmtr。\n点击右上角「打开 mmtr…」，或把 .mmtr 文件拖进窗口。")
+        lab = QLabel("尚未打开 mmtr。\n点击右上角「打开 mmtr…」或「新建 mmtr…」"
+                     "(从模板克隆)，或把 .mmtr 文件拖进窗口。")
         lab.setAlignment(Qt.AlignCenter)
         lab.setStyleSheet("color:#888;")
         v.addWidget(lab)
