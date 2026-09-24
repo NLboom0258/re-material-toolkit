@@ -19,6 +19,7 @@ MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/fl
 import os
 import re
 import sys
+from collections import namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # 仓库根(tools 的上级)
@@ -39,12 +40,14 @@ from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
 )
 from tools.material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
-    find_translator, run_translator,
+    find_translator, run_translator, check_asm, find_assembler,
 )
 from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 
-from PySide6.QtCore import Qt, QTimer, Signal, QRegularExpression  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    Qt, QTimer, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
+)
 from PySide6.QtGui import (  # noqa: E402
     QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
 )
@@ -119,21 +122,30 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
-# asm 高亮用到的 DXBC SM5 指令集(仅作为关键字着色, 不求完备)
+# asm 高亮/静态检查用到的 DXBC SM5 指令集(基名; 带 _sat/_indexable(...) 等由识别器归一)
 _ASM_OPCODES = {
     "mov", "movc", "mova", "mad", "add", "mul", "div", "dp2", "dp3",
     "dp4", "min", "max", "lt", "le", "gt", "ge", "eq", "ne", "and",
     "or", "xor", "not", "sample", "sample_l", "sample_b", "sample_c",
-    "sample_c_l", "sample_d", "sample_cmp", "ld", "ld_ms", "resinfo",
-    "discard", "clip", "ftoi", "itof", "ftou", "utof", "f16tof32",
-    "f32tof16", "sincos", "cos", "sin", "exp", "log", "sqrt", "rsq",
-    "rcp", "frc", "round_ne", "round_ni", "round_pi", "round_z", "ishl",
-    "ishr", "ushr", "imad", "umad", "umul", "udiv", "ine", "ige", "ilt",
-    "ieq", "ineg", "iadd", "inot", "switch", "case", "default",
-    "endswitch", "loop", "endloop", "break", "breakc", "continue",
-    "continuec", "if_nz", "if_z", "else", "endif", "ret", "retc", "call",
-    "callc", "nop", "sync", "emit", "cut", "gather4", "swapc", "bfi",
-    "bfrev", "countbits", "firstbit_hi", "firstbit_lo", "firstbit_shi",
+    "sample_c_l", "sample_c_lz", "sample_cmp", "sample_d", "sampleinfo",
+    "ld", "ld_ms", "ld_raw", "ld_structured", "ld_uav_typed", "store_raw",
+    "store_structured", "store_uav_typed", "resinfo", "discard", "clip",
+    "ftoi", "itof", "ftou", "utof", "f16tof32", "f32tof16", "sincos",
+    "cos", "sin", "exp", "log", "sqrt", "rsq", "rcp", "frc", "round_ne",
+    "round_ni", "round_pi", "round_z", "ishl", "ishr", "ushr", "imad",
+    "umad", "umul", "udiv", "umod", "imod", "ine", "ige", "ilt", "ieq",
+    "ineg", "iadd", "inot", "ult", "uge", "ugt", "ule", "ueq", "une",
+    "ubfe", "ibfe", "switch", "case", "default", "endswitch", "loop",
+    "endloop", "break", "breakc", "continue", "continuec", "if_nz", "if_z",
+    "else", "endif", "ret", "retc", "call", "callc", "nop", "sync", "emit",
+    "cut", "gather4", "gather4_c", "gather4_po", "swapc", "bfi", "bfrev",
+    "countbits", "firstbit_hi", "firstbit_lo", "firstbit_shi",
+    "eval_centroid", "eval_sample_index", "deriv_rtx", "deriv_rty", "ddy", "ddx",
+    "imm_atomic_alloc", "imm_atomic_consume", "imm_atomic_iadd",
+    "imm_atomic_imax", "imm_atomic_imin", "imm_atomic_and", "imm_atomic_or",
+    "imm_atomic_xor", "imm_atomic_exch", "imm_atomic_cmp_exch",
+    "atomic_iadd", "atomic_imax", "atomic_imin", "atomic_and", "atomic_or",
+    "atomic_xor", "atomic_exch", "atomic_cmp_exch",
 }
 
 # HLSL 混合标记(见翻译器 README); 不在其中的 HLSL*/DXBC* 会标红
@@ -185,15 +197,117 @@ def _marker_bad(marker, code):
     return False
 
 
-class AsmHighlighter(QSyntaxHighlighter):
-    """DXBC asm 语法高亮; 在 HLSL 混合标记的 HLSL 范围内套用 HLSL 高亮;
-    对“像标记但不认识”的内容(及缺 `{` 的 HLSLSnippet)加红色波浪线。
+def _marker_msg(marker, code):
+    """给命中的标记行生成一句人话说明。"""
+    if marker == "DXBCMov":
+        return "DXBCMov 应用逗号分隔 (如 DXBCMov r0, r1.x), 不应有 ="
+    if marker in ("HLSLMov", "HLSLTexture", "HLSLSampler"):
+        return f"{marker} 缺少 ="
+    if marker == "HLSLFunctionImport":
+        return "HLSLFunctionImport 缺少引号"
+    if marker == "HLSL":
+        return "HLSL 后缺少语句"
+    return f"{marker} 疑似语法错误"
 
-    规则集中在此类, 以后要换混写专用高亮直接替换实例即可。
+
+# 指令识别: 允许 _indexable(...)/_sat/_nz/_z/_lz 等后缀 + dcl_ 前缀 + profile 行
+_ASM_SUFFIXES = ("_indexable", "_sat", "_nz", "_c_lz", "_lz", "_z")
+_PROFILE_RE = re.compile(r"^(ps|vs|cs|gs|hs|ds)_\d")
+
+
+def _asm_op_ok(tok):
+    """某行首个 token 是否为合法 asm 指令(含后缀/前缀) —— 静态检查防误报。"""
+    base = tok.split("(", 1)[0]
+    if base in _ASM_OPCODES or base.startswith("dcl_") or _PROFILE_RE.match(base):
+        return True
+    for suf in _ASM_SUFFIXES:
+        if base.endswith(suf) and base[:-len(suf)] in _ASM_OPCODES:
+            return True
+    return False
+
+
+# 诊断项: 行号(0基) / 起始列 / 结束列 / 说明
+Diag = namedtuple("Diag", "line start end msg")
+
+_MARKER_LINE_RE = re.compile(r"^(\s*)(" + "|".join(_HLSL_MARKERS) + r")\b")
+_UNKNOWN_LINE_RE = re.compile(r"^(\s*)((?:HLSL|DXBC)[A-Za-z]\w*)")
+_ASM_TOK_RE = re.compile(r"^(\s*)([A-Za-z][A-Za-z0-9_]*(?:\([^)]*\))*)")
+
+
+def analyze_asm(text):
+    """静态(启发式)扫描整篇 asm/HLSL 混合文本 -> [Diag, ...]。不依赖汇编器(快)。
+
+    覆盖: 未知标记 / HLSLSnippet 缺 `{` / HLSLSnippet 未闭合 / 标记行轻量语法
+    (`_marker_bad`) / 裸 asm 的未知指令(疑似乱写)。
+    设计上只做"明显乱写"级启发式, 不做完整语法(合法性仍以汇编器为准)。
+    """
+    diags = []
+    depth = 0
+    open_line = -1
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if depth > 0:                      # HLSLSnippet 内部: 仅跟踪花括号配平
+            for ch in line:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+            if depth <= 0:
+                depth = 0
+            continue
+        if not stripped or stripped.startswith("//") or stripped.startswith(";"):
+            continue
+        m = _MARKER_LINE_RE.match(line)
+        if m:
+            ind, marker = len(m.group(1)), m.group(2)
+            code = line[m.end(2):].split("//")[0]
+            if marker == "HLSLSnippet":
+                if "{" not in code:
+                    diags.append(Diag(i, ind, m.end(2),
+                                      "HLSLSnippet 缺少 { (应写 HLSLSnippet {)"))
+                    depth = 1          # 仍按 HLSL 块处理, 避免后续行被误判为 asm
+                    open_line = i
+                else:
+                    d = code.count("{") - code.count("}")
+                    if d > 0:
+                        depth = d
+                        open_line = i
+            elif _marker_bad(marker, code):
+                diags.append(Diag(i, ind, len(line), _marker_msg(marker, code)))
+            continue
+        um = _UNKNOWN_LINE_RE.match(line)
+        if um:
+            diags.append(Diag(i, len(um.group(1)), um.end(2), "未知标记"))
+            continue
+        if stripped[0] in "{}":            # dcl_immediateConstantBuffer 的 { ... }
+            continue
+        tm = _ASM_TOK_RE.match(line)
+        if tm:
+            tok = tm.group(2)
+            if line[tm.end(2):].lstrip().startswith(":"):   # 标签行
+                continue
+            if not _asm_op_ok(tok):
+                diags.append(Diag(i, len(tm.group(1)), tm.end(2),
+                                  f"未知指令 '{tok.split('(')[0]}'"))
+    if depth > 0 and open_line >= 0:
+        diags.append(Diag(open_line, 0, len(lines[open_line]),
+                          "HLSLSnippet 未闭合 (缺少 })"))
+    return diags
+
+
+class AsmHighlighter(QSyntaxHighlighter):
+    """DXBC asm 语法高亮; 在 HLSL 混合标记范围内套用 HLSL 高亮;
+    并在诊断(diags)命中处**叠加红色波浪线** —— 高亮与红线**共存**(不互相覆盖)。
+
+    做法: 先按规则把每字符的“基础格式”写进 cells(后者覆盖前者), 再把诊断下划线
+    合并进去(保留原前景色), 最后合并相邻同格式一次性 setFormat。
+    规则集中在此类, 以后要换混写专用高亮直接替换规则即可。
     """
 
     def __init__(self, document):
         super().__init__(document)
+        self._diags = {}          # blockNumber -> [(start, end, msg)]
 
         def fmt(color, bold=False, italic=False):
             f = QTextCharFormat()
@@ -205,9 +319,7 @@ class AsmHighlighter(QSyntaxHighlighter):
             return f
 
         self._f_marker = fmt("#c586c0", bold=True)
-        self._err = QTextCharFormat()
-        self._err.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
-        self._err.setUnderlineColor(QColor("#f14c4c"))
+        self._err_color = QColor("#f14c4c")
 
         op = "|".join(sorted(_ASM_OPCODES, key=len, reverse=True))
         self._asm_rules = [
@@ -231,20 +343,30 @@ class AsmHighlighter(QSyntaxHighlighter):
             (QRegularExpression(r"//.*$"), fmt("#6a9955", italic=True)),
         ]
         self._marker_re = re.compile(r"^\s*(" + "|".join(_HLSL_MARKERS) + r")\b")
-        self._unknown_re = re.compile(r"^\s*((?:HLSL|DXBC)[A-Za-z]\w*)")
 
-    def _apply(self, pat, f, text, lo, hi):
+    def set_diagnostics(self, diags):
+        """设置全文档诊断(analyze_asm 结果)并重绘。diags: [Diag, ...]。"""
+        self._diags = {}
+        for d in diags:
+            self._diags.setdefault(d.line, []).append((d.start, d.end, d.msg))
+        self.rehighlight()
+
+    # -- 把某正则的匹配写进 per-char 格式数组(后者覆盖前者) --
+    def _collect(self, pat, f, text, lo, hi, cells):
         it = pat.globalMatch(text, lo)
         while it.hasNext():
             m = it.next()
             s = m.capturedStart()
             if s >= hi:
                 break
-            self.setFormat(s, min(m.capturedLength(), hi - s), f)
+            e = min(s + m.capturedLength(), hi)
+            fv = f
+            for j in range(s, e):
+                cells[j] = fv
 
-    def _apply_hlsl(self, text, lo, hi):
+    def _collect_hlsl(self, text, lo, hi, cells):
         for pat, f in self._hlsl_rules:
-            self._apply(pat, f, text, lo, hi)
+            self._collect(pat, f, text, lo, hi, cells)
 
     def _scan_braces(self, text, start, depth):
         """从 start 起按花括号配平; 返回 (hlsl_end, new_depth)。"""
@@ -260,42 +382,79 @@ class AsmHighlighter(QSyntaxHighlighter):
         return len(text), d
 
     def highlightBlock(self, text):
+        n = len(text)
+        cells = [None] * n
         # 1) asm 规则打底(整行)
         for pat, f in self._asm_rules:
-            self._apply(pat, f, text, 0, len(text))
+            self._collect(pat, f, text, 0, n, cells)
 
         prev = self.previousBlockState()
         depth = prev if (prev is not None and prev > 0) else 0
         if depth > 0:
-            # 续行: 整行属 HLSL, 直到收尾 }
             hl_end, state = self._scan_braces(text, 0, depth)
-            self._apply_hlsl(text, 0, hl_end)
+            self._collect_hlsl(text, 0, hl_end, cells)
             self.setCurrentBlockState(state)
-            return
-
-        m = self._marker_re.match(text)
-        if m:
-            marker = m.group(1)
-            self.setFormat(m.start(1), m.end(1) - m.start(1), self._f_marker)
-            code = text[m.end(1):].split("//")[0]
-            state = 0
-            if marker == "HLSLSnippet":
-                if "{" not in code:
-                    self.setFormat(m.start(1), m.end(1) - m.start(1), self._err)
-                hl_end, state = self._scan_braces(text, m.end(1), 0)
-                self._apply_hlsl(text, m.end(1), hl_end)
+        else:
+            m = self._marker_re.match(text)
+            if m:
+                for j in range(m.start(1), m.end(1)):
+                    cells[j] = self._f_marker
+                state = 0
+                if m.group(1) == "HLSLSnippet":
+                    hl_end, state = self._scan_braces(text, m.end(1), 0)
+                    self._collect_hlsl(text, m.end(1), hl_end, cells)
+                else:
+                    self._collect_hlsl(text, m.end(1), n, cells)
+                self.setCurrentBlockState(state)
             else:
-                self._apply_hlsl(text, m.end(1), len(text))
-                if _marker_bad(marker, code):
-                    self.setFormat(m.start(1),
-                                   m.end(1) + len(code) - m.start(1), self._err)
-            self.setCurrentBlockState(state)
-            return
+                self.setCurrentBlockState(0)
 
-        um = self._unknown_re.match(text)
-        if um:
-            self.setFormat(um.start(1), um.end(1) - um.start(1), self._err)
-        self.setCurrentBlockState(0)
+        # 2) 诊断: 叠加红色波浪线(保留原高亮) —— 高亮与红线共存
+        for (s, e, _msg) in self._diags.get(self.currentBlock().blockNumber(), ()):
+            for j in range(max(0, s), min(n, e)):
+                base = (QTextCharFormat(cells[j]) if cells[j] is not None
+                        else QTextCharFormat())
+                base.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
+                base.setUnderlineColor(self._err_color)
+                cells[j] = base
+
+        # 3) 合并相邻同格式, 一次性 setFormat
+        j = 0
+        while j < n:
+            f = cells[j]
+            k = j + 1
+            while k < n and cells[k] == f:
+                k += 1
+            if f is not None:
+                self.setFormat(j, k - j, f)
+            j = k
+
+
+class _AsmCheckSignals(QObject):
+    """后台汇编检查结果信号(gen, ok, errors[(line1b,msg)], log)。"""
+    finished = Signal(int, bool, list, str)
+
+
+class _AsmCheckTask(QRunnable):
+    """后台“编译即检查”: (可选翻译) -> 试汇编, 回传行级错误。"""
+
+    def __init__(self, gen, text, translate, ref, signals):
+        super().__init__()
+        self._gen = gen
+        self._text = text
+        self._translate = translate
+        self._ref = ref
+        self._sig = signals
+
+    def run(self):
+        try:
+            t = self._text
+            if self._translate and find_translator():
+                t = run_translator(t)
+            r = check_asm(t, ref_dxbc=self._ref)
+            self._sig.finished.emit(self._gen, r["ok"], r["errors"], r["log"])
+        except Exception as e:  # noqa: BLE001
+            self._sig.finished.emit(self._gen, False, [], str(e))
 
 
 # PARAM_TYPES 由 lib.mdf2 提供(单一来源: [(类型名, 字节大小), ...])
@@ -549,6 +708,25 @@ class MmtrPanel(QWidget):
         self.ed_asm.setFont(mono)
         self._asm_hl = AsmHighlighter(self.ed_asm.document())
         self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
+        # 诊断: 静态(即时) + 汇编(防抖, 后台线程)
+        self._last_diags = []
+        self._compile_errors = []   # [(行号1基, msg)]
+        self._compile_ok = None     # None=未检, True/False
+        self._compile_log = ""
+        self._chk_gen = 0
+        self._diag_busy = False     # 抑制 rehighlight() 回触发的 textChanged
+        self._chk_sig = _AsmCheckSignals()
+        self._chk_sig.finished.connect(self._on_compile_checked)
+        self._chk_pool = QThreadPool(self)
+        self._asm_timer = QTimer(self)
+        self._asm_timer.setSingleShot(True)
+        self._asm_timer.setInterval(180)
+        self._asm_timer.timeout.connect(self._reanalyze_asm)
+        self._ccheck_timer = QTimer(self)
+        self._ccheck_timer.setSingleShot(True)
+        self._ccheck_timer.setInterval(700)
+        self._ccheck_timer.timeout.connect(self._start_compile_check)
+        self.ed_asm.textChanged.connect(self._on_asm_changed)
         self.chk_trans = QCheckBox("用混合翻译器预处理")
         if find_translator() is None:
             self.chk_trans.setEnabled(False)
@@ -557,6 +735,15 @@ class MmtrPanel(QWidget):
         else:
             self.chk_trans.setToolTip(
                 "把 HLSL+DXBC 混合写法翻回纯 asm 后再汇编(纯 asm 不受影响)")
+        self.chk_ccheck = QCheckBox("实时汇编检查")
+        try:
+            find_assembler()
+            self.chk_ccheck.setChecked(True)
+        except FileNotFoundError:
+            self.chk_ccheck.setEnabled(False)
+            self.chk_ccheck.setToolTip("未找到 D3D_Shaders.exe(汇编器), 无法实时汇编检查")
+        self.chk_ccheck.toggled.connect(lambda *_: self._on_asm_changed())
+        self.lbl_asm = QLabel("")
         tob = QHBoxLayout()
         self.btn_dis = QPushButton("反汇编")
         self.btn_apply = QPushButton("应用(汇编+放回)")
@@ -565,7 +752,9 @@ class MmtrPanel(QWidget):
         for b in (self.btn_dis, self.btn_apply, self.btn_asmo, self.btn_asmi):
             tob.addWidget(b)
         tob.addWidget(self.chk_trans)
+        tob.addWidget(self.chk_ccheck)
         tob.addStretch(1)
+        tob.addWidget(self.lbl_asm)
         self.tab_blob = QWidget()
         tv = QVBoxLayout(self.tab_blob)
         tv.setContentsMargins(0, 0, 0, 0)
@@ -920,6 +1109,16 @@ class MmtrPanel(QWidget):
         if not text.strip():
             QMessageBox.warning(self, "提示", "asm 为空")
             return
+        diags = analyze_asm(text)
+        if diags:
+            lst = "\n".join(f"  第 {d.line + 1} 行: {d.msg}" for d in diags[:10])
+            more = "" if len(diags) <= 10 else f"\n  … 共 {len(diags)} 处"
+            if QMessageBox.warning(
+                    self, "检测到疑似语法错误",
+                    f"静态检查发现 {len(diags)} 处疑似错误:\n{lst}{more}\n\n"
+                    "仍要应用吗?", QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                return
         ref = extract_blob(self.data, idx)
         try:
             if self.chk_trans.isChecked() and find_translator():
@@ -961,6 +1160,96 @@ class MmtrPanel(QWidget):
         if p:
             self.ed_asm.setPlainText(open(p, encoding="utf-8", errors="replace").read())
             self._edit_blob = self.cur_blob()
+
+    # ---- Blob(shader) 诊断(静态 + 汇编) ----
+    def _ccheck_enabled(self):
+        return self.chk_ccheck.isEnabled() and self.chk_ccheck.isChecked()
+
+    def _on_asm_changed(self):
+        """文本变化: 立即排队静态检查(180ms) + 作废在途汇编结果 + 重排汇编检查。"""
+        if self._diag_busy:               # rehighlight() 会回触发 textChanged, 需忽略
+            return
+        self._asm_timer.start()
+        self._chk_gen += 1
+        self._compile_errors = []
+        self._compile_ok = None
+        self._compile_log = ""
+        if self._ccheck_enabled():
+            self._ccheck_timer.start()
+        else:
+            self._ccheck_timer.stop()
+            self._refresh_diags()
+
+    def _reanalyze_asm(self):
+        self._refresh_diags()
+
+    def _refresh_diags(self):
+        """合并静态诊断 + 汇编诊断 -> 高亮器标注 + 状态栏。"""
+        text = self.ed_asm.toPlainText()
+        static = analyze_asm(text)
+        lines = text.splitlines()
+        for (ln, msg) in self._compile_errors:
+            i = ln - 1
+            if 0 <= i < len(lines):
+                raw = lines[i]
+                s = len(raw) - len(raw.lstrip())
+                static.append(Diag(i, s, len(raw), "汇编: " + msg))
+        self._last_diags = static
+        self._diag_busy = True            # rehighlight() 会回触发 textChanged
+        try:
+            self._asm_hl.set_diagnostics(static)
+        finally:
+            self._diag_busy = False
+        self._update_asm_status()
+
+    def _update_asm_status(self):
+        if not self.ed_asm.toPlainText().strip():
+            self.lbl_asm.setText("")
+            self.lbl_asm.setToolTip("")
+            return
+        n_s = sum(1 for d in self._last_diags if not d.msg.startswith("汇编:"))
+        n_c = len(self._compile_errors)
+        parts = ["静态: " + ("OK" if n_s == 0 else f"{n_s} 处")]
+        if self._compile_ok is None:
+            parts.append("汇编: …")
+        elif self._compile_ok:
+            parts.append("汇编: OK")
+        else:
+            parts.append("汇编: " + (f"{n_c} 处" if n_c else "失败"))
+        bad = n_s + n_c
+        self.lbl_asm.setText(("[✓] " if bad == 0 and self._compile_ok else "[⚠] ")
+                             + " | ".join(parts))
+        tip = "\n".join(f"第 {d.line + 1} 行: {d.msg}" for d in self._last_diags[:20])
+        if self._compile_log and not self._compile_ok:
+            tip += "\n\n--- 汇编日志 ---\n" + self._compile_log[-1500:]
+        self.lbl_asm.setToolTip(tip)
+
+    def _start_compile_check(self):
+        if not self._ccheck_enabled():
+            return
+        text = self.ed_asm.toPlainText()
+        if not text.strip():
+            self._compile_ok = None
+            self._refresh_diags()
+            return
+        idx = self._edit_blob if self._edit_blob is not None else self.cur_blob()
+        ref = None
+        if idx is not None and self.data is not None:
+            try:
+                ref = extract_blob(self.data, idx)
+            except Exception:  # noqa: BLE001
+                ref = None
+        task = _AsmCheckTask(self._chk_gen, text,
+                             self.chk_trans.isChecked(), ref, self._chk_sig)
+        self._chk_pool.start(task)
+
+    def _on_compile_checked(self, gen, ok, errors, log):
+        if gen != self._chk_gen:      # 文本已变, 丢弃过期结果
+            return
+        self._compile_ok = ok
+        self._compile_errors = errors
+        self._compile_log = log
+        self._refresh_diags()
 
 
 class Mdf2Panel(QWidget):

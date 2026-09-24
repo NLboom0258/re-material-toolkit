@@ -21,6 +21,7 @@ DXBC 帧布局(36 字节头 + chunk 偏移):
   指纹 = 微软 DxilHash retail 变体(基于 MD5), 见 lib/dxilhash.py; D3D 强校验。
 """
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -274,6 +275,35 @@ def assemble_asm(asm_text, ref_dxbc=None, workdir=None):
     finally:
         if own:
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+# 3Dmigoto asm2cbo 的报错形如:
+#   ... : Assembly parse error on line 6, Unrecognised instruction:
+#   "xyzzy r0, r1"
+_ASM_ERR_RE = re.compile(r"on line (\d+),\s*([^\n:]*)")
+
+
+def parse_asm_errors(log):
+    """从 3Dmigoto 汇编日志里抽取 [(行号(1-based), 说明), ...](行号缺失则不含)。"""
+    out = []
+    for m in _ASM_ERR_RE.finditer(log or ""):
+        out.append((int(m.group(1)), m.group(2).strip()))
+    return out
+
+
+def check_asm(asm_text, ref_dxbc=None):
+    """试汇编以做"编译即检查"。不抛异常, 返回 dict:
+
+      ok     bool           能否汇编出合法 DXBC
+      errors [(line, msg)]  汇编器报错(行号 1-based; 供编辑器行级标注)
+      log    str            原始日志(失败时便于排查)
+    """
+    try:
+        assemble_asm(asm_text, ref_dxbc=ref_dxbc)
+        return {"ok": True, "errors": [], "log": ""}
+    except Exception as e:  # noqa: BLE001
+        log = str(e)
+        return {"ok": False, "errors": parse_asm_errors(log), "log": log}
 
 
 # ---------------------------------------------------------------- 可选: HLSL 混合翻译器预处理
