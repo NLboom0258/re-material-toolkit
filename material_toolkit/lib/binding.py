@@ -318,20 +318,45 @@ def rename_slot(data: bytes, blob_idx: int, slot: int, new_name: str, reuse_name
     return bytes(out)
 
 
-def name_vocabulary(data):
-    """文件内**所有绑定组**用到的 SRV 名字 -> {name: {"groups": 组数, "blobs": set(blob_idx)}}。
+def _all_groups(data, blobs=None):
+    """单遍枚举所有“有效绑定组”: yield (blob_idx, desc, pool, first_rec_off)。
 
-    基于已验证的 group_summary 枚举(仅非空 blob 的组); 空槽(blob=0)记录不参与。
-    绑定键=池名 ⇒ 这个名字表就是“该材质用到的所有贴图类型”。
+    仅取“程序指针指向真实 blob 且 +0x9c 与 blob 大小一致”的记录(与 discover_groups 同口径);
+    按 (blob_idx, desc, pool) 去重(取首见记录, 与 group_summary 的 recs[0] 一致)。
+    blobs=None 全部; 传下标集合则只看这些 blob。
+    O(header) 单遍, 比“逐 blob 调 discover_groups”快得多(后者是 GUI 卡顿的根源之一)。
+    """
+    bs, bl = blob_list(data)
+    size_of = dict(bl)
+    at = {o: i for i, (o, _s) in enumerate(bl)}
+    want = None if blobs is None else set(blobs)
+    seen = set()
+    for p in range(0, bs - 3, 4):
+        v = _u32(data, p)
+        idx = at.get(v)
+        if idx is None or (want is not None and idx not in want):
+            continue
+        if _u32(data, p + 0x9C) != size_of[v]:
+            continue
+        key = (idx, _u32(data, p + 0x58), _u32(data, p + 0x60))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield idx, key[1], key[2], p
+
+
+def name_vocabulary(data):
+    """文件内所有绑定组用到的 SRV 名字 -> {name: {"groups": 组数, "blobs": set(blob_idx)}}。
+
+    绑定键=池名 ⇒ 这个名字表就是“该材质用到的所有贴图类型”。单遍枚举(见 _all_groups)。
     """
     vocab = {}
-    _bs, bl = blob_list(data)
-    for idx in range(len(bl)):
-        for g in group_summary(data, idx):
-            for s in g["srvs"]:
-                d = vocab.setdefault(s["name"], {"groups": 0, "blobs": set()})
-                d["groups"] += 1
-                d["blobs"].add(idx)
+    for idx, _desc, pool, rec0 in _all_groups(data):
+        n = _u32(data, rec0 + 0xCC)
+        for nm, _h in _pool_entries(data, pool, n):
+            d = vocab.setdefault(nm, {"groups": 0, "blobs": set()})
+            d["groups"] += 1
+            d["blobs"].add(idx)
     return vocab
 
 
@@ -344,17 +369,17 @@ def rename_name_global(data, old_name, new_name, reuse_name=True, blobs=None):
     返回新文件 bytes(未命中任何条目则原样返回)。
     """
     data = bytes(data)
-    _bs, bl = blob_list(data)
+    _bs, _bl = blob_list(data)
     found = data.find(new_name.encode("ascii") + b"\x00", 0, _bs)
     append = (found < 0) or (not reuse_name)
 
-    # 收集所有需改的池条目偏移(以 (pool, idx) 定位, 去重)
+    # 收集所有需改的池条目偏移(以 (pool, idx) 定位, 去重); 单遍枚举
     edits = set()
-    for idx in (range(len(bl)) if blobs is None else blobs):
-        for g in group_summary(data, idx):
-            for s in g["srvs"]:
-                if s["name"] == old_name:
-                    edits.add(g["pool"] + s["idx"] * 16)
+    for _idx, _desc, pool, rec0 in _all_groups(data, blobs):
+        n = _u32(data, rec0 + 0xCC)
+        for i, (nm, _h) in enumerate(_pool_entries(data, pool, n)):
+            if nm == old_name:
+                edits.add(pool + i * 16)
     if not edits:
         return data
 

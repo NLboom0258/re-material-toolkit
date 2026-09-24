@@ -99,6 +99,16 @@ def _copy_to_clipboard(text):
     QApplication.clipboard().setText(text)
 
 
+class NoWheelComboBox(QComboBox):
+    """不响应滚轮的下拉框(防鼠标悬停误改); 点击/键盘选择照常。
+
+    所有 GUI 下拉框都用它(避免悬停下误编辑)。
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 # PARAM_TYPES 由 lib.mdf2 提供(单一来源: [(类型名, 字节大小), ...])
 
 
@@ -339,7 +349,7 @@ class MmtrPanel(QWidget):
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
 
-        self._vocab_names = None    # 名称池词汇表缓存(编辑后失效)
+        self._vocab_cache = None    # 名称池词汇表缓存(编辑后失效)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
@@ -445,7 +455,7 @@ class MmtrPanel(QWidget):
                 child.setData(0, Qt.UserRole, ("slot", k, s["slot"], s["name"]))
                 top.addChild(child)
                 # 槽名 = 常驻下拉框(候选 = 本文件名称池词汇表; 可自由输入新名)
-                cb = QComboBox()
+                cb = NoWheelComboBox()
                 cb.setEditable(True)
                 cb.addItems(vocab)
                 cb.setCurrentText(s["name"])
@@ -460,20 +470,22 @@ class MmtrPanel(QWidget):
         fit_columns(self.tree_grp, [0, 2], pad=28, min_w=120, max_w=520)
         self.tree_grp.setColumnWidth(1, 210)
 
-    def _vocab(self):
-        """名称池词汇表(去重名字, 排序); 缓存, 编辑后失效。"""
+    def _vocab_map(self):
+        """名称池(去重名字 -> 引用统计)缓存; 编辑后失效。"""
         if self.data is None:
-            return []
-        if self._vocab_names is None:
-            self._vocab_names = sorted(name_vocabulary(self.data))
-        return self._vocab_names
+            return {}
+        if self._vocab_cache is None:
+            self._vocab_cache = name_vocabulary(self.data)
+        return self._vocab_cache
+
+    def _vocab(self):
+        """名称池词汇表(去重名字, 排序)。"""
+        return sorted(self._vocab_map())
 
     def refresh_pool(self):
         """名称池页: 列出该文件用到的所有贴图名 + 引用统计。"""
         self.tree_pool.clear()
-        if self.data is None:
-            return
-        vocab = name_vocabulary(self.data)
+        vocab = self._vocab_map()
         for nm in sorted(vocab, key=lambda n: (-vocab[n]["groups"], n)):
             d = vocab[nm]
             it = QTreeWidgetItem([nm, str(d["groups"]), str(len(d["blobs"]))])
@@ -481,42 +493,39 @@ class MmtrPanel(QWidget):
             self.tree_pool.addTopLevelItem(it)
         fit_columns(self.tree_pool, [0, 1, 2], pad=24, min_w=80, max_w=520)
 
-    def _reload_after_edit(self):
-        """任何“改了 bytes”的操作之后统一: 重解析 + 失效缓存 + 刷新所有视图。"""
+    def _reload_after_edit(self, full=False):
+        """改 bytes 后统一刷新。full=True 才重建 blob 列表(仅 blob 计数/结构变化时需要)。"""
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
-        self._vocab_names = None
-        self.refresh_blobs()
+        self._vocab_cache = None
+        if full:
+            self.refresh_blobs()
         self.refresh_detail()
         self.refresh_pool()
 
-    def _blob_has_name(self, name):
-        """当前 blob 的任何组里是否还有该名字(用于去掉重复信号)。"""
-        idx = self.cur_blob()
-        if idx is None or self.data is None:
-            return False
-        for g in group_summary(self.data, idx):
-            for s in g["srvs"]:
-                if s["name"] == name:
-                    return True
-        return False
+    def _reload_after_rename(self):
+        """改名(不动参数/blob 结构)后的轻量刷新: 只刷绑定页与名称池(免整表重解析卡顿)。"""
+        self._vocab_cache = None
+        self.refresh_groups()
+        self.refresh_pool()
 
     def _commit_slot_setname(self, group_k, slot, old, new):
         """下拉框改某槽的池名: 按名改(该 blob 的所有组一起改, 绑定键=名)。"""
         new = (new or "").strip()
         if not new or new == old or self.data is None:
             return
-        if not self._blob_has_name(old):
-            return                    # 已生效(含重复信号)
         if not self._need_mmtr():
             return
         try:
-            self.data = rename_name_global(self.data, old, new,
-                                           blobs=[self.cur_blob()])
+            out = rename_name_global(self.data, old, new,
+                                     blobs=[self.cur_blob()])
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self._reload_after_edit()
+        if out == self.data:
+            return                    # 无命中(含重复信号) -> 不动
+        self.data = out
+        self._reload_after_rename()
 
     def refresh_params(self):
         self.tree_param.clear()
@@ -546,7 +555,7 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self._reload_after_edit()
+        self._reload_after_edit(full=True)
 
     def rename_cur(self, slot, oldname):
         if not self._need_mmtr():
@@ -560,7 +569,7 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self._reload_after_edit()
+        self._reload_after_rename()
 
     # ---- 右键菜单 ----
     def _menu_blob(self, item):
@@ -610,7 +619,7 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        self._reload_after_edit()
+        self._reload_after_rename()
 
     def _menu_param(self, item):
         acts = [("新增参数(UserMaterial)", self.add_param)]
@@ -630,10 +639,11 @@ class MmtrPanel(QWidget):
         if ty is None:
             return
         size = type_size(ty)
-        entries = self.mmtr._scan_cbuffer_entries("UserMaterial")
+        m = Mmtr.from_bytes(self.data)     # 用最新字节(改名后 self.mmtr 可能落后)
+        entries = m._scan_cbuffer_entries("UserMaterial")
         offset = entries[0][3] if entries else 0   # 追加到现有成员之后
         try:
-            self.data = self.mmtr.add_cbuffer_param("UserMaterial", name, size, offset)
+            self.data = m.add_cbuffer_param("UserMaterial", name, size, offset)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
@@ -687,7 +697,7 @@ class Mdf2Panel(QWidget):
         mv = QVBoxLayout(self.tab_matprops)
         rowt = QHBoxLayout()
         rowt.addWidget(QLabel("着色类型 (shaderType)"))
-        self.cmb_shading = QComboBox()
+        self.cmb_shading = NoWheelComboBox()
         self.cmb_shading.addItems([n for n, _ in SHADING_TYPES])
         rowt.addWidget(self.cmb_shading)
         rowt.addStretch(1)
@@ -856,7 +866,7 @@ class Mdf2Panel(QWidget):
             it.setFlags(it.flags() | Qt.ItemIsEditable)   # 参数名可双击内联改名
             self.tree_param.addTopLevelItem(it)
             # 类型列: 常驻下拉(改类型 = 改值个数)
-            cb = QComboBox()
+            cb = NoWheelComboBox()
             cb.addItems(names)
             cb.setMinimumWidth(type_w)
             if pr.type in names:
