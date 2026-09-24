@@ -224,18 +224,22 @@ class TailModel:
         return self.desc_head + b"".join(struct.pack("<II", a, c)
                                          for a, c in self.desc_entries)
 
+    def rebuild_string(self):
+        return b"".join(s.encode("latin1") + b"\x00" for _, s in self.strings)
+
     def lossless(self):
         """各段“由解析条目重建”是否与原始字节一致(证明结构化解析无损)。"""
         return (self.rebuild_pool() == self.sections["pool"] and
                 self.rebuild_cbuffer() == self.sections["cbuffer"] and
                 self.rebuild_param() == self.sections["param"] and
-                self.rebuild_desc() == self.sections["desc"])
+                self.rebuild_desc() == self.sections["desc"] and
+                self.rebuild_string() == self.sections["string"])
 
     def encode(self) -> bytes:
-        """尾段字节 = 各段拼接(保序)。"""
-        return (self.sections["prefix"] + self.sections["pool"] +
-                self.sections["cbuffer"] + self.sections["param"] +
-                self.sections["desc"] + self.sections["string"])
+        """尾段字节 = 各段拼接; pool/cbuffer/param/desc/string 均由解析条目重建。"""
+        return (self.sections["prefix"] + self.rebuild_pool() +
+                self.rebuild_cbuffer() + self.rebuild_param() +
+                self.rebuild_desc() + self.rebuild_string())
 
     def dump(self):
         b = self.boundaries

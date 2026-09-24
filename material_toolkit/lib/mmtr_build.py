@@ -130,6 +130,19 @@ def extract_skeleton(data):
     return MmtrTemplate(data).skeleton
 
 
+def compose(template, tail_model, blobs: bytes) -> bytes:
+    """B1 容器重装: 骨架(head) + 结构化 L4(tail_model.encode) + blob 区 -> 完整 mmtr bytes。
+
+    template: MmtrTemplate(提供 head [0,0x46350)); tail_model: mmtr_tail.TailModel;
+    blobs: blob 区原始字节。返回完整文件(头部 blob_start 已写)。
+    注: head 的**内容字段**仍来自 template(真正“从0”需 B2 按规格重建); 复现原文件时 template=原文件。
+    """
+    head = bytearray(template.raw)
+    tail = tail_model.encode()
+    struct.pack_into("<I", head, 0x08, SKELETON_HI + len(tail))
+    return bytes(head) + tail + bytes(blobs)
+
+
 class MmtrImage:
     """最小装配器: 以某模板的 [0,0x46350) 为底, 携带尾段与 blob 区。
 
