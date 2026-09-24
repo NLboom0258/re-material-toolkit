@@ -13,6 +13,11 @@
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
+  python material_toolkit.py blob-list    <in.mmtr>
+  python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
+  python material_toolkit.py blob-disasm  <dxbc> -o <out.asm.txt>
+  python material_toolkit.py blob-asm     <asm.txt> [--ref <dxbc>] -o <out.dxbc>
+  python material_toolkit.py blob-verify  <dxbc>
 
 说明:
   - mdf2 结构/读写见 lib/mdf2.py; mmtr 头部/参数表见 lib/mmtr.py;
@@ -21,6 +26,7 @@
     (同一 shader 有多组"池+描述符", 必须全做); 绑定键=header 池名。
   - 完整解析模型见 lib/mmtr_model.py(头部/程序表/1083 变体记录/绑定组/参数表)。
   - hash = murmur3(名字, 0xFFFFFFFF),见 lib/hashes.py。
+  - blob 来源统一入口见 lib/mmtr_blobs.py(枚举/规范化/校验/asm), 见其 docstring。
 """
 import os, sys
 
@@ -32,6 +38,8 @@ from lib.sync import sync_mdf2  # noqa: E402
 from lib.binding import add_texture_slot, rename_slot, group_summary  # noqa: E402
 from lib.mmtr_model import MmtrModel, stage_label  # noqa: E402
 from lib.mmtr_build import MmtrTemplate, content_count  # noqa: E402
+from lib.mmtr_info import blob_info  # noqa: E402
+from lib import mmtr_blobs as B  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -153,6 +161,47 @@ def main():
         open(out, "wb").write(sk)
         print(f"OK: 版本骨架 {len(sk)} 字节 -> {out} "
               f"(内容字段 {content_count()} 字节已清零)")
+    elif cmd == "blob-list":
+        data = open(a[0], "rb").read()
+        m = MmtrModel(data)
+        for i in range(m.blob_count()):
+            info = blob_info(data, i)
+            print(f"blob[{i:2d}] @0x{m.blob_off(i):06x} size={m.blob_size(i):6d} "
+                  f"role={m.blob_role(i):3s} stage={info['stage']:3s} "
+                  f"n_cb={info['n_cb']} n_br={info['n_br']}")
+    elif cmd == "blob-extract":
+        src, idx = a[0], int(a[1])
+        out = a[a.index("-o") + 1] if "-o" in a else f"blob_{idx}.dxbc"
+        data = open(src, "rb").read()
+        blob = B.extract_blob(data, idx)
+        open(out, "wb").write(blob)
+        print(f"OK: blob[{idx}] {len(blob)}B -> {out} fingerprint={blob[4:12].hex()}...")
+    elif cmd == "blob-disasm":
+        src = a[0]
+        out = a[a.index("-o") + 1] if "-o" in a else "blob.asm.txt"
+        asm = B.disassemble_dxbc(open(src, "rb").read())
+        open(out, "w", encoding="utf-8").write(asm)
+        print(f"OK: {src} -> {out} ({len(asm)} chars)")
+    elif cmd == "blob-asm":
+        src = a[0]
+        ref = a[a.index("--ref") + 1] if "--ref" in a else None
+        out = a[a.index("-o") + 1] if "-o" in a else "out.dxbc"
+        asm = open(src, encoding="utf-8").read()
+        ref_dxbc = open(ref, "rb").read() if ref else None
+        dxbc = B.assemble_asm(asm, ref_dxbc=ref_dxbc)
+        open(out, "wb").write(dxbc)
+        v = B.verify_dxbc(dxbc)
+        print(f"OK: {src} -> {out} ({len(dxbc)}B) stage={v['stage']} "
+              f"disasm={'OK' if v['disasm_ok'] else 'FAIL'} "
+              f"strip={'OK' if v['strip_ok'] else 'FAIL'} "
+              f"reflect={'OK' if v['reflect_ok'] else 'FAIL'}")
+    elif cmd == "blob-verify":
+        dxbc = open(a[0], "rb").read()
+        v = B.verify_dxbc(dxbc)
+        print(f"{a[0]}: {len(dxbc)}B stage={v['stage']} n_cb={v['n_cb']} n_br={v['n_br']}")
+        print(f"  D3DDisassemble: {'OK' if v['disasm_ok'] else 'FAIL'}")
+        print(f"  D3DStripShader : {'OK' if v['strip_ok'] else 'FAIL'}")
+        print(f"  D3DReflect     : {'OK' if v['reflect_ok'] else 'FAIL'}")
     else:
         print(__doc__)
 
