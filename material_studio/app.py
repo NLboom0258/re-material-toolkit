@@ -9,6 +9,9 @@
   每个文件 = 左「Blob 列表」 + 右「贴图绑定」(各绑定组+贴图槽, 槽名下拉选池名) / 「名称池」(全局贴图名表, 可全局改名) / 「材质参数」(UserMaterial 参数定义, 只读) / 「变体(材质)」(按 pass 分组的技术 × 标志变体 -> 程序集, 只读)。
 - MDF2 页: **多文件标签页**(每文件一页, 可关闭/拖动, 右上「＋」新建空文件, 关掉最后一个自动补空文件);
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
+- 材质系统页: **语义级“材质资产”编辑**(与 MMTR/MDF2 的结构/字节级编辑分开; 见 analysis §9)。
+  左=选项(光照模式/着色类型/材质模板/基础 mmtr/材质名) + 操作(载入默认材质/新建/打开·保存 .mmat.json/编译校验/生成 mmtr/导出材质实例);
+  右=「材质源(HLSL)」(用户写 `MaterialMain`) / 「组装结果」(模板+材质拼接的完整 HLSL) / 「语义输出·声明」(表3a / 互斥 / `//! param`·`//! tex` / 校验)。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
 MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/float4 额外带**颜色块**(点击取色)。
 
@@ -49,6 +52,10 @@ from tools.material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from tools.material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
 from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
+from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
+from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
+from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
+from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -2018,6 +2025,344 @@ class AssembleDialog(QDialog):
         return list(self._specs)
 
 
+def _pass_template_names():
+    """可用的 pass 模板名(扫描 pass_templates/, 排除默认材质与 *_instance)。"""
+    import glob
+    d = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates")
+    out = []
+    for p in sorted(glob.glob(os.path.join(d, "*.hlsl"))):
+        n = os.path.basename(p)[:-5]
+        if n.startswith("mat_default_") or n.endswith("_instance"):
+            continue
+        out.append(n)
+    return out
+
+
+class MaterialSystemPanel(QWidget):
+    """材质系统页: 语义级“材质资产”编辑(选项 + 材质函数 HLSL) -> 生成 mmtr。
+
+    与 MMTR 页(结构/字节级)分开: 本页是“作者源 -> 生成”的语义层(见 analysis §9)。
+    资产存为 `*.mmat.json`(lib/material_asset.py), 导出 = mmtr / 材质实例(mdf2)。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+        self._last_mmtr_bytes = None
+        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_env"})
+        self._build_ui()
+        self._apply_asset()
+        self._load_default_material()
+
+    # ---- UI ----
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        left = QVBoxLayout()
+
+        form = QFormLayout()
+        self.cmb_light = NoWheelComboBox()
+        for label, val in (("默认光照", "default"), ("自定义光照", "custom")):
+            self.cmb_light.addItem(label, val)
+        self.cmb_shading = NoWheelComboBox()
+        for label, val in (("延迟", "deferred"), ("前向", "forward")):
+            self.cmb_shading.addItem(label, val)
+        self.cmb_tmpl = NoWheelComboBox()
+        for t in _pass_template_names():
+            self.cmb_tmpl.addItem(t, t)
+        self.ed_mmtr = QLineEdit()
+        btn_mmtr = QPushButton("选择…")
+        btn_mmtr.clicked.connect(self._browse_base_mmtr)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.ed_mmtr)
+        row.addWidget(btn_mmtr)
+        w_mmtr = QWidget()
+        w_mmtr.setLayout(row)
+        self.ed_name = QLineEdit()
+        form.addRow("光照模式", self.cmb_light)
+        form.addRow("着色类型", self.cmb_shading)
+        form.addRow("材质模板(pass)", self.cmb_tmpl)
+        form.addRow("基础 mmtr", w_mmtr)
+        form.addRow("材质名", self.ed_name)
+        left.addLayout(form)
+
+        for c in (self.cmb_light, self.cmb_shading, self.cmb_tmpl):
+            c.currentIndexChanged.connect(self._on_option_changed)
+        self.ed_name.textChanged.connect(self._on_name_changed)
+
+        btns = QHBoxLayout()
+        for text, cb in (("载入默认材质", self._load_default_material),
+                         ("新建", self._new_asset),
+                         ("打开…", self.open_asset),
+                         ("保存…", self.save_asset)):
+            b = QPushButton(text)
+            b.clicked.connect(cb)
+            btns.addWidget(b)
+        left.addLayout(btns)
+
+        btns2 = QHBoxLayout()
+        for text, cb in (("编译校验", self.compile_check),
+                         ("生成 mmtr…", self.generate_mmtr),
+                         ("导出材质实例…", self.export_instance)):
+            b = QPushButton(text)
+            b.clicked.connect(cb)
+            btns2.addWidget(b)
+        left.addLayout(btns2)
+
+        self.lbl_status = QLabel("就绪")
+        self.lbl_status.setWordWrap(True)
+        left.addWidget(self.lbl_status)
+        left.addStretch(1)
+        lw = QWidget()
+        lw.setLayout(left)
+        lw.setFixedWidth(330)
+        root.addWidget(lw)
+
+        self.tabs = QTabWidget()
+        self.ed_src = QPlainTextEdit()
+        self.ed_src.setFont(QFont("Consolas", 10))
+        self.tabs.addTab(self.ed_src, "材质源 (HLSL)")
+        self.ed_full = QPlainTextEdit()
+        self.ed_full.setReadOnly(True)
+        self.ed_full.setFont(QFont("Consolas", 9))
+        self.tabs.addTab(self.ed_full, "组装结果")
+        self.tree_info = QTreeWidget()
+        self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
+        self.tabs.addTab(self.tree_info, "语义输出 / 声明")
+        root.addWidget(self.tabs, 1)
+
+    # ---- 状态同步 ----
+    def _sync_asset(self):
+        self.asset.lighting_mode = self.cmb_light.currentData()
+        self.asset.shading_type = self.cmb_shading.currentData()
+        self.asset.template["pass_template"] = self.cmb_tmpl.currentData()
+        self.asset.template["mmtr"] = self.ed_mmtr.text().strip()
+        self.asset.name = self.ed_name.text().strip() or "NewMaterial"
+        self.asset.shading_source = self.ed_src.toPlainText()
+
+    def _apply_asset(self):
+        self._loading = True
+        try:
+            for cmb, val in ((self.cmb_light, self.asset.lighting_mode),
+                             (self.cmb_shading, self.asset.shading_type),
+                             (self.cmb_tmpl, self.asset.template.get("pass_template"))):
+                i = cmb.findData(val)
+                if i >= 0:
+                    cmb.setCurrentIndex(i)
+            self.ed_mmtr.setText(self.asset.template.get("mmtr", ""))
+            self.ed_name.setText(self.asset.name)
+            if self.ed_src.toPlainText() != self.asset.shading_source:
+                self.ed_src.setPlainText(self.asset.shading_source)
+        finally:
+            self._loading = False
+        self.refresh_info()
+
+    def _on_option_changed(self, *_):
+        if self._loading:
+            return
+        self.refresh_info()
+
+    def _on_name_changed(self, *_):
+        if self._loading:
+            return
+        self.asset.name = self.ed_name.text().strip() or "NewMaterial"
+
+    def refresh_info(self):
+        self._sync_asset()
+        self.tree_info.clear()
+        root = QTreeWidgetItem(["配置", "", ""])
+        root.addChild(QTreeWidgetItem(["光照模式", self.asset.lighting_mode, ""]))
+        root.addChild(QTreeWidgetItem(["着色类型", self.asset.shading_type, ""]))
+        root.addChild(QTreeWidgetItem(["材质模板(pass)",
+                                       self.asset.template.get("pass_template", ""), ""]))
+        for lv, msg in self.asset.validate():
+            it = QTreeWidgetItem(["校验: " + lv, msg, ""])
+            it.setForeground(0, QColor("#c0392b") if lv == "error" else QColor("#b8791a"))
+            root.addChild(it)
+        self.tree_info.addTopLevelItem(root)
+
+        so = QTreeWidgetItem(["语义输出 (表3a)", "", ""])
+        for n, t, tgt in masset.SEMANTIC_OUTPUTS:
+            so.addChild(QTreeWidgetItem([n, t, tgt]))
+        self.tree_info.addTopLevelItem(so)
+
+        mx = QTreeWidgetItem(["互斥(共用 GBuffer 通道)", "", ""])
+        for a, b, ch in masset.MUTEX:
+            mx.addChild(QTreeWidgetItem([a, b, ch]))
+        self.tree_info.addTopLevelItem(mx)
+
+        params, texs = mgen.parse_decls(self.asset.shading_source)
+        dp = QTreeWidgetItem(["声明 //! param", "", "%d 项" % len(params)])
+        for n, t in params:
+            dp.addChild(QTreeWidgetItem([n, t, ""]))
+        self.tree_info.addTopLevelItem(dp)
+        dt = QTreeWidgetItem(["声明 //! tex", "", "%d 项" % len(texs)])
+        for n in texs:
+            dt.addChild(QTreeWidgetItem([n, "", ""]))
+        self.tree_info.addTopLevelItem(dt)
+        self.tree_info.expandAll()
+        fit_columns(self.tree_info, (0, 1, 2))
+        self._set_status()
+
+    def _set_status(self):
+        errs = [m for lv, m in self.asset.validate() if lv == "error"]
+        warns = [m for lv, m in self.asset.validate() if lv == "warn"]
+        if errs:
+            self.lbl_status.setText("[错误] " + "；".join(errs))
+            self.lbl_status.setStyleSheet("color:#c0392b")
+        elif warns:
+            self.lbl_status.setText("[提示] " + "；".join(warns))
+            self.lbl_status.setStyleSheet("color:#b8791a")
+        else:
+            self.lbl_status.setText("配置合法")
+            self.lbl_status.setStyleSheet("color:#1a7f37")
+
+    # ---- 操作 ----
+    def _browse_base_mmtr(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择基础 mmtr", "",
+                                              "mmtr (*.mmtr.*);;All (*)")
+        if path:
+            self.ed_mmtr.setText(path)
+            self.asset.template["mmtr"] = path
+            if not self.ed_name.text().strip():
+                stem = re.sub(r"\.mmtr(\.\d+)?$", "", os.path.basename(path))
+                self.ed_name.setText(stem)
+
+    def _load_default_material(self):
+        tmpl = self.cmb_tmpl.currentData() or "deferred_env"
+        try:
+            src = mpass.default_material(tmpl)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "载入失败", str(e))
+            return
+        self.ed_src.setPlainText(src)
+        self.asset.shading_source = src
+        self.refresh_info()
+
+    def _new_asset(self):
+        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_env"})
+        self._last_mmtr_bytes = None
+        self.ed_src.setPlainText("")
+        self._apply_asset()
+        self._load_default_material()
+
+    def open_asset(self):
+        path, _ = QFileDialog.getOpenFileName(self, "打开材质资产", "",
+                                              "材质资产 (*.mmat.json);;All (*)")
+        if not path:
+            return
+        try:
+            self.asset = masset.MaterialAsset.load(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "打开失败", str(e))
+            return
+        self._last_mmtr_bytes = None
+        self._apply_asset()
+        self.lbl_status.setText("已打开 %s" % os.path.basename(path))
+
+    def save_asset(self):
+        self._sync_asset()
+        path, _ = QFileDialog.getSaveFileName(self, "保存材质资产",
+                                              self.asset.name + ".mmat.json",
+                                              "材质资产 (*.mmat.json);;All (*)")
+        if not path:
+            return
+        try:
+            self.asset.save(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "保存失败", str(e))
+            return
+        self.lbl_status.setText("已保存 %s" % os.path.basename(path))
+
+    def compile_check(self):
+        self._sync_asset()
+        tmpl = self.asset.template.get("pass_template") or "deferred_env"
+        try:
+            self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None, tmpl))
+        except Exception as e:  # noqa: BLE001
+            self.ed_full.setPlainText(";; 组装失败: %s" % e)
+            QMessageBox.critical(self, "组装失败", str(e))
+            return
+        self.tabs.setCurrentIndex(1)
+        dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl)
+        if err:
+            self.lbl_status.setText("[编译失败] 见“组装结果”")
+            self.lbl_status.setStyleSheet("color:#c0392b")
+            QMessageBox.warning(self, "编译失败", err[:4000])
+            return
+        v = verify_dxbc(dxbc)
+        self.lbl_status.setText("编译 OK: %dB stage=%s disasm=%s strip=%s reflect=%s"
+                                % (len(dxbc), v["stage"], v["disasm_ok"],
+                                   v["strip_ok"], v["reflect_ok"]))
+        self.lbl_status.setStyleSheet("color:#1a7f37")
+
+    def _base_mmtr(self):
+        return self.ed_mmtr.text().strip()
+
+    def _generate(self):
+        self._sync_asset()
+        base = self._base_mmtr()
+        if not base or not os.path.isfile(base):
+            QMessageBox.warning(self, "缺少基础 mmtr", "请选择存在的模板 mmtr 文件")
+            return None, None
+        tmpl = self.asset.template.get("pass_template") or "deferred_env"
+        if not self.asset.is_ok():
+            errs = "\n".join(m for lv, m in self.asset.validate() if lv == "error")
+            if QMessageBox.question(self, "配置有误", errs + "\n\n仍要生成吗？") != QMessageBox.Yes:
+                return None, None
+        try:
+            data, rep = mgen.generate(open(base, "rb").read(),
+                                      self.asset.shading_source or None, tmpl)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "生成失败", str(e))
+            return None, None
+        self._last_mmtr_bytes = data
+        return data, rep
+
+    def generate_mmtr(self):
+        data, rep = self._generate()
+        if data is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "生成 mmtr",
+                                              self.asset.name + ".mmtr.1808168797",
+                                              "mmtr (*.mmtr.1808168797);;All (*)")
+        if not path:
+            return
+        open(path, "wb").write(data)
+        self.lbl_status.setText("已生成 %s (%dB) 替换=%s 实例=%s 跳过=%s"
+                                % (os.path.basename(path), len(data), rep["replaced"],
+                                   rep["replaced_instance"], rep["skipped"]))
+        QMessageBox.information(self, "生成成功",
+                                "-> %s\n\n替换=%s\n实例=%s\n跳过=%s"
+                                % (path, rep["replaced"], rep["replaced_instance"],
+                                   rep["skipped"]))
+
+    def export_instance(self):
+        self._sync_asset()
+        data = self._last_mmtr_bytes
+        if data is None:
+            data, rep = self._generate()
+            if data is None:
+                return
+        path, _ = QFileDialog.getSaveFileName(self, "导出材质实例",
+                                              self.asset.name + ".mdf2.10",
+                                              "mdf2 (*.mdf2.10);;All (*)")
+        if not path:
+            return
+        mpath = (self.asset.template.get("mmtr_path")
+                 or "MasterMaterial/Master/%s.mmtr" % self.asset.name)
+        try:
+            m = minst.from_mmtr(data, mpath, self.asset.name, shading_type="Standard")
+            n = m.save(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", str(e))
+            return
+        self.lbl_status.setText("已导出材质实例 %s (%dB) master=%s"
+                                % (os.path.basename(path), n, mpath))
+        QMessageBox.information(self, "导出成功",
+                                "-> %s (%d B)\nmaster=%s" % (path, n, mpath))
+
+
 class MmtrTabs(QTabWidget):
     """MMTR 多文件容器: 每个打开的 mmtr 一个标签页。
 
@@ -2241,8 +2586,10 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         self.mmtr = MmtrTabs()
         self.mdf2 = Mdf2Tabs()
+        self.msys = MaterialSystemPanel()
         tabs.addTab(self.mmtr, "MMTR")
         tabs.addTab(self.mdf2, "MDF2")
+        tabs.addTab(self.msys, "材质系统")
         self.tabs = tabs
         self.setCentralWidget(tabs)
         self.setAcceptDrops(True)
