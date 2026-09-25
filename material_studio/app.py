@@ -473,8 +473,8 @@ class CodeEdit(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._lnarea = _LineNumberArea(self) if numbers else None
         if numbers:
-            self._lnbg = QColor("#e6e6e6")
-            self._lnfg = QColor("#888888")
+            self._lnbg = QColor("#d8d8d8")
+            self._lnfg = QColor("#7a7a7a")
             pal = self._lnarea.palette()
             pal.setColor(QPalette.Window, self._lnbg)
             self._lnarea.setPalette(pal)
