@@ -119,11 +119,14 @@ struct MaterialInput
 {
     float2 uv0;
     float2 uv1;
-    float3 positionWS;     // 世界坐标
-    float3 viewDir;        // 相机 -> 像素(单位向量)
+    float3 positionWS;     // 世界坐标(env 无)
+    float3 viewDir;        // 相机 -> 像素(单位向量; env 无)
     float3 Normal;         // 切线基: 法线
     float3 Tangent;        // 切线基: 切线
     float3 Bitangent;      // 切线基: 副切线
+    float3 camPos;         // 相机世界坐标
+    float3 camDir;         // 相机前向(已归一)
+    float3 camUp;          // 相机上向(已归一)
 };
 
 //__MATERIAL_MAIN__
@@ -147,14 +150,18 @@ PSOut main(PSIn i)
     mi.uv0 = float2(i.v1.w, i.v2.x);
     mi.uv1 = i.v2.yz;
     mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);
-    float3 camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
-                           transposeViewInvMat[2].w);
+    mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
+                       transposeViewInvMat[2].w);
+    mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
+                                 transposeViewInvMat[2].z));
+    mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
+                                 transposeViewInvMat[2].y));
     mi.Normal = normalize(i.v1.xyz).xzy;
     mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     mi.Bitangent = cross(mi.Normal, mi.Tangent);
     mi.Bitangent = (i.v3.z < 0.0) ? -mi.Bitangent : mi.Bitangent;
     mi.Bitangent = normalize(mi.Bitangent);
-    mi.viewDir = normalize(mi.positionWS - camPos);
+    mi.viewDir = normalize(mi.positionWS - mi.camPos);
 
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float2 vel = (i.v4.zw / i.v5.x) - ndc;

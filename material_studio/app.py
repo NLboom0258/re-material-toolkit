@@ -62,8 +62,8 @@ from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QFontMetrics, QPainter, QSyntaxHighlighter, QTextCharFormat,
-    QTextCursor,
+    QColor, QFont, QFontMetrics, QPainter, QPalette, QSyntaxHighlighter,
+    QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
@@ -473,6 +473,12 @@ class CodeEdit(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._lnarea = _LineNumberArea(self) if numbers else None
         if numbers:
+            self._lnbg = QColor("#e6e6e6")
+            self._lnfg = QColor("#888888")
+            pal = self._lnarea.palette()
+            pal.setColor(QPalette.Window, self._lnbg)
+            self._lnarea.setPalette(pal)
+            self._lnarea.setAutoFillBackground(True)
             self.blockCountChanged.connect(lambda *_: self._update_lnarea_width())
             self.updateRequest.connect(self._update_lnarea)
             self._update_lnarea_width()
@@ -502,12 +508,12 @@ class CodeEdit(QPlainTextEdit):
 
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._lnarea)
-        painter.fillRect(event.rect(), QColor("#f0f0f0"))
+        painter.fillRect(event.rect(), self._lnbg)
         block = self.firstVisibleBlock()
         num = block.blockNumber() + 1
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         bottom = top + round(self.blockBoundingRect(block).height())
-        painter.setPen(QColor("#999999"))
+        painter.setPen(self._lnfg)
         h = self.fontMetrics().height()
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
@@ -2331,6 +2337,10 @@ class MaterialSystemPanel(QWidget):
         self.tabs = QTabWidget()
         self.ed_src = CodeEdit(indent=4)
         self._src_hl = HlslHighlighter(self.ed_src.document())
+        self._src_timer = QTimer(self)
+        self._src_timer.setSingleShot(True)
+        self._src_timer.setInterval(250)
+        self._src_timer.timeout.connect(self._clear_src_diags)
         self.ed_src.textChanged.connect(self._on_src_changed)
         self.tabs.addTab(self.ed_src, "材质源 (HLSL)")
         self.ed_full = CodeEdit(indent=4)
@@ -2481,17 +2491,21 @@ class MaterialSystemPanel(QWidget):
         lines += ["//! tex %s" % n for n in self._textures]
         head = ("\n".join(lines) + "\n\n") if lines else ""
         self.ed_src.setPlainText(head + body)
-        self.refresh_inputs()
-        self.refresh_info()
+        self.refresh_info()   # 内含 refresh_inputs
 
     def _reload_decls_from_src(self):
         self._load_decls_from_src()
         self.refresh_inputs()
 
     def _on_src_changed(self):
-        # 源码变动 -> 旧诊断(行号)失效。延迟到事件循环再重绘, 避免在 textChanged
-        # 内同步 rehighlight 造成 highlightBlock 递归。
-        QTimer.singleShot(0, lambda: self._src_hl.set_diagnostics([]))
+        # 源码变动 -> 旧诊断(行号)失效; 防抖后再清(不在 textChanged 内同步 rehighlight,
+        # 也避免每敲一下键就整篇重绘)。
+        self._src_timer.start()
+
+    def _clear_src_diags(self):
+        # 仅在确实有旧诊断时才重绘(无错误时不触发整篇 rehighlight)
+        if self._src_hl._diags:
+            self._src_hl.set_diagnostics([])
 
     def refresh_inputs(self):
         self.tree_inputs.clear()
