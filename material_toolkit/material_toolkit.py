@@ -12,6 +12,7 @@
   python material_toolkit.py pool-list   <in.mmtr>
   python material_toolkit.py pool-rename <in.mmtr> <old_name> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
+  python material_toolkit.py mdf2-new    <master.mmtr> -o <out.mdf2.10> [--name M] [--mmtr-path MasterMaterial/Master/X.mmtr] [--shading-type Standard] [--game-version 10] [--from <src.mdf2> --material M]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
   python material_toolkit.py variant-map <in.mmtr> [--tech NAME] [--slots] [--by-pass]
@@ -42,7 +43,7 @@
     (可选 in_place=true: 就地改写 src_blob 本身(blob 数不变/无死 blob); 默认追加+重指)
 """
 import json
-import os, sys
+import os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -59,6 +60,7 @@ from lib.mmtr_info import blob_info  # noqa: E402
 from lib import mmtr_blobs as B  # noqa: E402
 from lib import mmtr_assemble as aset  # noqa: E402
 from lib import material_gen as mgen  # noqa: E402
+from lib import material_instance as minst  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -143,6 +145,29 @@ def main():
         tb = mf.set_texture(mat_name, tex_type, path, default_path=nullp)
         n = mf.save(out)
         print(f"OK: {mat_name} texture {tex_type!r} -> {tb.texture_path!r} -> {out} ({n} bytes)")
+    elif cmd == "mdf2-new":
+        src = a[0]                       # master mmtr(bytes 来源)
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mdf2.10"
+        stem = re.sub(r"\.mmtr(\.\d+)?$", "", os.path.basename(src))
+        name = a[a.index("--name") + 1] if "--name" in a else stem
+        mpath = (a[a.index("--mmtr-path") + 1] if "--mmtr-path" in a
+                 else "MasterMaterial/Master/%s.mmtr" % stem)
+        stype = a[a.index("--shading-type") + 1] if "--shading-type" in a else "Standard"
+        gv = int(a[a.index("--game-version") + 1]) if "--game-version" in a else 10
+        if "--from" in a:                # 克隆现有 mdf2, 把某材质改指到该 mmtr
+            mat_name = a[a.index("--material") + 1] if "--material" in a else None
+            if not mat_name:
+                print("ERR: --from 需配合 --material <name>")
+                return
+            mf = Mdf2.load(a[a.index("--from") + 1])
+            minst.repoint(mf, mat_name, mpath, open(src, "rb").read())
+            print(f"OK: mdf2-new(--from) repoint {mat_name!r} -> {mpath}")
+        else:
+            mf = minst.from_mmtr(open(src, "rb").read(), mpath, name,
+                                 shading_type=stype, game_version=gv)
+        n = mf.save(out)
+        print(f"OK: mdf2-new {src} -> {out} ({n} bytes) materials={len(mf.materials)}")
+        mf.dump()
     elif cmd == "model-info":
         path = a[0]
         m = MmtrModel.load(path)
