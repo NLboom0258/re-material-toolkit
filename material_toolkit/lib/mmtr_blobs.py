@@ -202,6 +202,46 @@ def verify_dxbc(dxbc):
     return out
 
 
+# ---------------------------------------------------------------- 3b. HLSL 编译(D3DCompile)
+def _blob_bytes(p):
+    """读取 ID3DBlob(p) 内容(经 vtable 的 GetBufferPointer/GetBufferSize)。"""
+    import ctypes
+    vt = ctypes.cast(p, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    get_ptr = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)(vt[3])
+    get_sz = ctypes.WINFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p)(vt[4])
+    return ctypes.string_at(get_ptr(p), get_sz(p))
+
+
+def compile_hlsl(source, entry="main", target="ps_5_0", name="shader.hlsl",
+                 flags1=0, flags2=0):
+    """用 d3dcompiler_47 把 HLSL 源码编译成 DXBC。
+
+    返回 (dxbc_bytes, err_text); err_text 非 None 表示失败(含编译错误文本)。
+    注: 传**单一**源码字符串(不依赖 #include); 输入/输出签名由源码里的结构体决定。
+    """
+    import ctypes
+
+    d3d = _load_d3d()
+    fn = d3d.D3DCompile
+    fn.restype = ctypes.c_long
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p,
+                   ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p,
+                   ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint,
+                   ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
+    src = source.encode("utf-8")
+    buf = ctypes.create_string_buffer(src)
+    code = ctypes.c_void_p()
+    err = ctypes.c_void_p()
+    hr = fn(ctypes.cast(buf, ctypes.c_void_p), len(src),
+            name.encode("ascii", "replace"), None, None,
+            entry.encode("ascii"), target.encode("ascii"),
+            flags1, flags2, ctypes.byref(code), ctypes.byref(err))
+    if hr != 0:
+        msg = _blob_bytes(err.value) if err.value else b""
+        return None, msg.decode("utf-8", "replace")
+    return finalize(_blob_bytes(code.value)), None
+
+
 # ---------------------------------------------------------------- 4. asm 路径(外部 exe)
 def find_assembler():
     """定位 3Dmigoto D3D_Shaders.exe(带 asm2cbo 单步); 缺失则报清晰错误。"""
