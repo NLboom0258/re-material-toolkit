@@ -82,6 +82,55 @@ def rdef_resources(blob):
         return None
 
 
+# RDEF target(profile token) -> stage (逆向 DMC5 exe; 见 mmtr_blobs.TARGET_STAGE)
+TARGET_STAGE = {0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x43530500: "CS",
+                0xFFFE0501: "VS", 0xFFFF0501: "PS", 0x43530501: "CS"}
+
+
+def _rdef_of(blob):
+    """返回 RDEF 区 bytes(不含 'RDEF'+size 头), 无则 None。"""
+    if len(blob) < 32 or blob[:4] != b"DXBC":
+        return None
+    n = _u32(blob, 28)
+    for i in range(n):
+        co = _u32(blob, 32 + i * 4)
+        if blob[co:co + 4] == b"RDEF":
+            return blob[co + 8:co + 8 + _u32(blob, co + 4)]
+    return None
+
+
+def rdef_stage(blob):
+    """从 RDEF 头 target 解析 shader stage('VS'/'PS'/'CS'…) 或 None。"""
+    r = _rdef_of(blob)
+    if r is None or len(r) < 20:
+        return None
+    target = _u32(r, 16)
+    return TARGET_STAGE.get(target)
+
+
+def rdef_cbuffers(blob):
+    """解析 RDEF 的 cbuffer 定义 -> [(name, size, [(member, start, size), ...]), ...]; 无 RDEF 则 None。
+
+    cbuffer 定义 24B/条(name_off/var_count/var_off/size/flags/type); 成员 40B/条(name_off/start/size/…)。
+    ⚠ 仅供“输入边界”枚举/比对(引擎固定 cbuffer 的成员布局跨文件恒定)。
+    """
+    r = _rdef_of(blob)
+    if r is None:
+        return None
+    n_cb, cb_off, _n_br, _br_off, _t = struct.unpack_from("<IIIII", r, 0)
+    out = []
+    for k in range(n_cb):
+        p = cb_off + k * 24
+        name = _cstr(r, _u32(r, p))
+        vc = _u32(r, p + 4)
+        vo = _u32(r, p + 8)
+        size = _u32(r, p + 12)
+        mem = [( _cstr(r, _u32(r, vo + v * 40)), _u32(r, vo + v * 40 + 4),
+                _u32(r, vo + v * 40 + 8)) for v in range(vc)]
+        out.append((name, size, mem))
+    return out
+
+
 def add_bound_resource(blob: bytes, name: str, slot: int, type_=TYPE_TEXTURE,
                        dim=DIM_TEXTURE2D, ret=RET_FLOAT4, flags=FLAGS_TEX,
                        nsamp=NSAMP):
