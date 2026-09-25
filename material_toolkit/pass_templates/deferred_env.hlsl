@@ -6,6 +6,7 @@
 // 依据: env_emissive 原版 Deferred PS(blob33) 反汇编逐条等价改写。
 // ============================================================================
 
+//__IFACE_BEGIN__
 // ---- 引擎固定 cbuffer(表1) ----
 cbuffer SceneInfo : register(b0)
 {
@@ -69,9 +70,10 @@ cbuffer UserMaterial : register(b3)
 ByteAddressBuffer WhitePtSrv                        : register(t0);
 Texture2D<float4> BaseMetalMap                      : register(t1);
 Texture2D<float4> NormalRoughnessMap                : register(t2);
-Texture2D<float4> AlphaTranslucentOcclusionEmissive : register(t3);
+Texture2D<float4> AlphaTranslucentOcclusionEmissiveMap : register(t3);
 SamplerState BilinearWrap                           : register(s0);
 SamplerState AutomaticWrap                          : register(s1);
+//__IFACE_END__
 
 // ---- 输入签名(= 模板 VS 的输出; 寄存器顺序 0..5) ----
 struct PSIn

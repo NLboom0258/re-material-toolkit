@@ -6,6 +6,7 @@
 //                   有世界坐标/视线方向与“限界光(LimLight)”。
 // ============================================================================
 
+//__IFACE_BEGIN__
 cbuffer SceneInfo : register(b0)
 {
     row_major float4x4 viewProjMat;
@@ -78,6 +79,7 @@ Texture2D<float4> BaseMetalMap                   : register(t1);
 Texture2D<float4> NormalRoughnessMap             : register(t2);
 Texture2D<float4> AlphaTranslucentOcclusionSSSMap: register(t3);
 SamplerState AutomaticWrap                       : register(s0);
+//__IFACE_END__
 
 // ---- 输入签名(寄存器 0..5) ----
 struct PSIn

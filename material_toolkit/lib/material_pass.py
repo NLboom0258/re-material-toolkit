@@ -8,6 +8,8 @@ import os
 from . import mmtr_blobs as B
 
 MARKER = "//__MATERIAL_MAIN__"
+IFACE_BEGIN = "//__IFACE_BEGIN__"
+IFACE_END = "//__IFACE_END__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
 
@@ -23,17 +25,26 @@ def default_material(template="deferred_env"):
     return _read("mat_default_%s.hlsl" % suffix)
 
 
-def build_source(material_src=None, template="deferred_env"):
-    """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。"""
+def build_source(material_src=None, template="deferred_env", iface=None):
+    """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
+
+    iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
+    接口声明(否则用模板自带的写死声明, 便于单独编译/测试)。
+    """
     tpl = _read(template + ".hlsl")
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
+    if iface is not None:
+        from . import material_iface as MI
+        i0 = tpl.index(IFACE_BEGIN) + len(IFACE_BEGIN)
+        i1 = tpl.index(IFACE_END)
+        tpl = tpl[:i0] + "\n" + MI.hlsl_of(iface) + tpl[i1:]
     src = material_src if material_src is not None else default_material(template)
     return tpl.replace(MARKER, src)
 
 
 def compile_shading(material_src=None, template="deferred_env",
-                    entry="main", target="ps_5_0"):
+                    entry="main", target="ps_5_0", iface=None):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。"""
-    return B.compile_hlsl(build_source(material_src, template), entry, target,
-                          name="%s.hlsl" % template)
+    return B.compile_hlsl(build_source(material_src, template, iface), entry,
+                          target, name="%s.hlsl" % template)

@@ -92,18 +92,39 @@ def collect_pass_ps(data, pass_name="Deferred"):
     return sorted(idxs)
 
 
+def pick_iface_ps(data, pass_name="Deferred"):
+    """选一个“基础”PS 当接口来源(非 per-instance、有输出、额外输入最少者)。"""
+    best = None
+    for idx in collect_pass_ps(data, pass_name):
+        a = analyze(B.extract_blob(data, idx))
+        if a["per_instance"] or not a["out"]:
+            continue
+        if best is None or len(a["in"]) < best[1]:
+            best = (idx, len(a["in"]))
+    return best[0] if best else None
+
+
 def generate(template, material_src=None, template_name="deferred_env",
-             pass_name="Deferred", target="ps_5_0"):
+             pass_name="Deferred", target="ps_5_0", iface_from_template=True):
     """材质函数 + 模板 mmtr -> (新 mmtr bytes, report dict)。
 
     material_src 为 None 时用该 pass 模板的默认材质函数。
+    接口声明默认由模板 mmtr 的 Deferred PS **自动生成**(而非模板里写死的)。
     """
-    ps, err = MP.compile_shading(material_src, template_name, target=target)
+    out = bytes(template)
+    iface = None
+    if iface_from_template:
+        from . import material_iface as MI
+        bidx = pick_iface_ps(out, pass_name)
+        if bidx is not None:
+            iface = MI.iface_from_dxbc(B.extract_blob(out, bidx))
+
+    ps, err = MP.compile_shading(material_src, template_name, target=target,
+                                 iface=iface)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
     ours = analyze(ps)
 
-    out = bytes(template)
     done, skipped = [], []
     for idx in collect_pass_ps(out, pass_name):
         if not is_replaceable(ours, analyze(B.extract_blob(out, idx))):

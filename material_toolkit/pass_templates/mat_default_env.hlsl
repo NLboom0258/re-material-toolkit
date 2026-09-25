@@ -3,10 +3,10 @@ void MaterialMain(in PSIn i, in float2 uv0, in float2 uv1, out MaterialOutput m)
 {
     float4 base  = BaseMetalMap.Sample(AutomaticWrap, uv0);
     float4 nr    = NormalRoughnessMap.Sample(AutomaticWrap, uv0);
-    float4 atosA = AlphaTranslucentOcclusionEmissive.Sample(BilinearWrap, uv0);
+    float4 atosA = AlphaTranslucentOcclusionEmissiveMap.Sample(BilinearWrap, uv0);
     // VAR_UVSelect_OCC_Emissive != 0 时, 遮挡/自发光遮罩改采样 UV1
     float4 atosB = (VAR_UVSelect_OCC_Emissive != 0.0)
-                 ? AlphaTranslucentOcclusionEmissive.Sample(BilinearWrap, uv1)
+                 ? AlphaTranslucentOcclusionEmissiveMap.Sample(BilinearWrap, uv1)
                  : atosA;
 
     m.BaseColor    = base.rgb * VAR_BaseColor.rgb;
