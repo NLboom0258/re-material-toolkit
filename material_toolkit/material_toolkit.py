@@ -18,6 +18,7 @@
   python material_toolkit.py variant-diff <in.mmtr> [--tech NAME] [--instr]
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
+  python material_toolkit.py mat-gen    <template.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -57,6 +58,7 @@ from lib.mmtr_build import MmtrTemplate, content_count, new_from_template  # noq
 from lib.mmtr_info import blob_info  # noqa: E402
 from lib import mmtr_blobs as B  # noqa: E402
 from lib import mmtr_assemble as aset  # noqa: E402
+from lib import material_gen as mgen  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -207,6 +209,20 @@ def main():
         open(out, "wb").write(data)
         print(f"OK: 从模板新建 {a[0]} -> {out} ({len(data)} bytes) "
               f"(当前=克隆; 将来=骨架+规格装配)")
+        _selfcheck_mmtr(data)
+    elif cmd == "mat-gen":
+        src = a[0]
+        mat = a[1] if len(a) > 1 and not a[1].startswith("-") else None
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr.1808168797"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_env"
+        pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
+        material_src = open(mat, encoding="utf-8").read() if mat else None
+        data, rep = mgen.generate(open(src, "rb").read(), material_src, tpl, pname)
+        open(out, "wb").write(data)
+        print(f"OK: mat-gen {src} + {mat or '(默认材质)'} -> {out} "
+              f"({len(data)} bytes, PS {rep['ps_size']}B)")
+        print(f"  替换 blobs={rep['replaced']}  跳过(签名不符)={rep['skipped']}  "
+              f"坏={rep['bad']}")
         _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
