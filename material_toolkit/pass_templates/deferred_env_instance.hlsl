@@ -148,9 +148,12 @@ struct MaterialInput
 {
     float2 uv0;            // 主 UV
     float2 uv1;            // 副 UV
-    float3 N;              // 几何法线(已归一)
-    float3 T;              // 切线(已归一)
-    float3 B;              // 副切线(已归一)
+    float3 Normal;         // 几何法线(已归一)
+    float3 Tangent;        // 切线(已归一)
+    float3 Bitangent;      // 副切线(已归一)
+    float3 camPos;         // 相机世界坐标
+    float3 camDir;         // 相机前向(已归一)
+    float3 camUp;          // 相机上向(已归一)
 };
 
 //__MATERIAL_MAIN__
@@ -190,9 +193,15 @@ PSOut main(PSIn i)
     MaterialInput mi;
     mi.uv0 = uv0;
     mi.uv1 = uv1;
-    mi.N = N;
-    mi.T = T;
-    mi.B = B;
+    mi.Normal = N;
+    mi.Tangent = T;
+    mi.Bitangent = B;
+    mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
+                       transposeViewInvMat[2].w);
+    mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
+                                 transposeViewInvMat[2].z));
+    mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
+                                 transposeViewInvMat[2].y));
     MaterialOutput m;
     MaterialMain(mi, m);
 

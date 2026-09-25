@@ -59,10 +59,11 @@ from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
-    Qt, QTimer, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
+    Qt, QTimer, QSize, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QFontMetrics, QSyntaxHighlighter, QTextCharFormat,
+    QColor, QFont, QFontMetrics, QPainter, QSyntaxHighlighter, QTextCharFormat,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
@@ -444,6 +445,127 @@ class AsmHighlighter(QSyntaxHighlighter):
             j = k
 
 
+class _LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self._ed = editor
+
+    def sizeHint(self):
+        return QSize(self._ed.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self._ed.line_number_area_paint_event(event)
+
+
+class CodeEdit(QPlainTextEdit):
+    """代码编辑器: 行号 + Tab 缩进(空格) + 等宽字体。
+
+    indent = Tab 插入空格数(asm=2 / HLSL=4); Shift+Tab 反缩进。
+    """
+
+    def __init__(self, indent=4, numbers=True, parent=None):
+        super().__init__(parent)
+        self._indent = indent
+        self._has_numbers = numbers
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.Monospace)
+        self.setFont(mono)
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self._lnarea = _LineNumberArea(self) if numbers else None
+        if numbers:
+            self.blockCountChanged.connect(lambda *_: self._update_lnarea_width())
+            self.updateRequest.connect(self._update_lnarea)
+            self._update_lnarea_width()
+
+    # ---- 行号区 ----
+    def line_number_area_width(self):
+        digits = max(2, len(str(max(1, self.blockCount()))))
+        return 10 + self.fontMetrics().horizontalAdvance("9") * digits
+
+    def _update_lnarea_width(self):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_lnarea(self, rect, dy):
+        if dy:
+            self._lnarea.scroll(0, dy)
+        else:
+            self._lnarea.update(0, rect.y(), self._lnarea.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_lnarea_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._has_numbers:
+            cr = self.contentsRect()
+            self._lnarea.setGeometry(cr.left(), cr.top(),
+                                     self.line_number_area_width(), cr.height())
+
+    def line_number_area_paint_event(self, event):
+        painter = QPainter(self._lnarea)
+        painter.fillRect(event.rect(), QColor("#f0f0f0"))
+        block = self.firstVisibleBlock()
+        num = block.blockNumber() + 1
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
+        painter.setPen(QColor("#999999"))
+        h = self.fontMetrics().height()
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                painter.drawText(0, top, self._lnarea.width() - 6, h,
+                                 Qt.AlignRight, str(num))
+            block = block.next()
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+            num += 1
+
+    # ---- Tab 缩进 ----
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Tab and not (event.modifiers() & Qt.ControlModifier):
+            self._indent_sel(bool(event.modifiers() & Qt.ShiftModifier))
+            return
+        if event.key() == Qt.Key_Backtab:
+            self._indent_sel(True)
+            return
+        super().keyPressEvent(event)
+
+    def _indent_sel(self, dedent):
+        n = self._indent
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            block = cursor.block()
+            if dedent:
+                t = block.text()
+                k = min(len(t) - len(t.lstrip(" ")), n)
+                if k == 0:
+                    return
+                cursor.movePosition(QTextCursor.StartOfBlock)
+                cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, k)
+                cursor.removeSelectedText()
+            else:
+                cursor.insertText(" " * n)
+            return
+        doc = self.document()
+        start = doc.findBlock(cursor.selectionStart())
+        end = doc.findBlock(cursor.selectionEnd())
+        cursor.beginEditBlock()
+        block = start
+        while True:
+            c = QTextCursor(block)
+            if dedent:
+                t = block.text()
+                k = min(len(t) - len(t.lstrip(" ")), n)
+                if k:
+                    c.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, k)
+                    c.removeSelectedText()
+            else:
+                c.movePosition(QTextCursor.StartOfBlock)
+                c.insertText(" " * n)
+            if block == end:
+                break
+            block = block.next()
+        cursor.endEditBlock()
+
+
 class HlslHighlighter(QSyntaxHighlighter):
     """HLSL 语法高亮 + 编译诊断红波浪线(与高亮共存)。"""
 
@@ -511,7 +633,7 @@ class HlslHighlighter(QSyntaxHighlighter):
 
 
 def _template_struct_fields(template_name, struct_name):
-    """从 pass 模板文件抽 struct 成员: [(类型, 名), ...]。"""
+    """从 pass 模板文件抽 struct 成员: [(类型, 名, 说明), ...]。"""
     path = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates",
                         template_name + ".hlsl")
     if not os.path.isfile(path):
@@ -523,10 +645,11 @@ def _template_struct_fields(template_name, struct_name):
         return []
     out = []
     for line in m.group(1).splitlines():
-        line = line.split("//")[0].strip().rstrip(";").strip()
-        parts = line.split()
+        code, _, comment = line.partition("//")
+        code = code.strip().rstrip(";").strip()
+        parts = code.split()
         if len(parts) >= 2:
-            out.append((" ".join(parts[:-1]), parts[-1]))
+            out.append((" ".join(parts[:-1]), parts[-1], comment.strip()))
     return out
 
 
@@ -803,12 +926,7 @@ class MmtrPanel(QWidget):
         self._vocab_cache = None    # 名称池词汇表缓存(编辑后失效)
 
         # Blob(shader) 编辑页: 反汇编 / 编辑 asm / 汇编放回 / 导入导出
-        self.ed_asm = QPlainTextEdit()
-        self.ed_asm.setLineWrapMode(QPlainTextEdit.NoWrap)
-        mono = QFont("Consolas")
-        mono.setStyleHint(QFont.Monospace)
-        self.ed_asm.setFont(mono)
-        self.ed_asm.setTabStopDistance(QFontMetrics(mono).horizontalAdvance(" ") * 2)
+        self.ed_asm = CodeEdit(indent=2)
         self._asm_hl = AsmHighlighter(self.ed_asm.document())
         self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
         self._asm_cache = {}        # 每 blob 一份 asm(切换 blob 时保存/恢复)
@@ -2211,17 +2329,13 @@ class MaterialSystemPanel(QWidget):
         root.addWidget(lw)
 
         self.tabs = QTabWidget()
-        self.ed_src = QPlainTextEdit()
-        mono = QFont("Consolas", 10)
-        mono.setStyleHint(QFont.Monospace)
-        self.ed_src.setFont(mono)
-        self.ed_src.setTabStopDistance(QFontMetrics(mono).horizontalAdvance(" ") * 4)
+        self.ed_src = CodeEdit(indent=4)
         self._src_hl = HlslHighlighter(self.ed_src.document())
         self.ed_src.textChanged.connect(self._on_src_changed)
         self.tabs.addTab(self.ed_src, "材质源 (HLSL)")
-        self.ed_full = QPlainTextEdit()
+        self.ed_full = CodeEdit(indent=4)
         self.ed_full.setReadOnly(True)
-        self.ed_full.setFont(QFont("Consolas", 9))
+        self._full_hl = HlslHighlighter(self.ed_full.document())
         self.tabs.addTab(self.ed_full, "组装结果")
         self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tree_info = QTreeWidget()
@@ -2309,6 +2423,32 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setText("配置合法")
             self.lbl_status.setStyleSheet("color:#1a7f37")
 
+    def _base_iface(self):
+        """基础 mmtr 的 Deferred PS 接口(按路径缓存, 避免重复反汇编拖慢 GUI)。"""
+        base = self.ed_mmtr.text().strip()
+        if base != getattr(self, "_iface_path", None):
+            self._iface_path = base
+            self._iface_cache = None
+            if base and os.path.isfile(base):
+                try:
+                    data = open(base, "rb").read()
+                    idx = mgen.pick_iface_ps(data, "Deferred")
+                    self._iface_cache = (miface.iface_from_dxbc(extract_blob(data, idx))
+                                         if idx is not None else None)
+                except Exception:  # noqa: BLE001
+                    self._iface_cache = None
+        return getattr(self, "_iface_cache", None)
+
+    def _effective_iface(self):
+        """基础接口 + 自定义输入扩展(与 generate 一致), 供编译/组装视图用。"""
+        iface = self._base_iface()
+        if iface is None:
+            return None
+        params, textures = mgen.parse_decls(self.ed_src.toPlainText())
+        if params or textures:
+            iface, _ = miface.extend(iface, "UserMaterial", params, textures)
+        return iface
+
     # ---- 输入页 ----
     def _wrap_inputs(self):
         w = QWidget()
@@ -2359,38 +2499,36 @@ class MaterialSystemPanel(QWidget):
         root = QTreeWidgetItem(["pass 输入 (基础 mmtr 的 Deferred PS)", "", ""])
         self.tree_inputs.addTopLevelItem(root)
         base = self.ed_mmtr.text().strip()
-        if base and os.path.isfile(base):
-            try:
-                data = open(base, "rb").read()
-                idx = mgen.pick_iface_ps(data, "Deferred")
-                iface = (miface.iface_from_dxbc(extract_blob(data, idx))
-                         if idx is not None else None)
-                if iface:
-                    for cb in iface["cbuffers"]:
-                        it = QTreeWidgetItem(["cbuffer: %s" % cb["name"], cb["reg"],
-                                              "%d 成员" % len(cb["members"])])
-                        root.addChild(it)
-                        for m in cb["members"]:
-                            it.addChild(QTreeWidgetItem([m["name"], m["type"],
-                                                         "@%d" % m["offset"]]))
-                    for t in iface["textures"]:
-                        root.addChild(QTreeWidgetItem(["texture: %s" % t["name"],
-                                                       t["fmt"], t["reg"]]))
-                    for s in iface["samplers"]:
-                        root.addChild(QTreeWidgetItem(["sampler: %s" % s["name"], "",
-                                                       s["reg"]]))
-                else:
-                    root.addChild(QTreeWidgetItem(["(无法解析接口)", "", ""]))
-            except Exception as e:  # noqa: BLE001
-                root.addChild(QTreeWidgetItem(["(读取失败: %s)" % e, "", ""]))
+        iface = self._base_iface()
+        if iface:
+            for cb in iface["cbuffers"]:
+                it = QTreeWidgetItem(["cbuffer: %s" % cb["name"], cb["reg"],
+                                      "%d 成员" % len(cb["members"])])
+                root.addChild(it)
+                for m in cb["members"]:
+                    cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
+                    cm.setData(0, Qt.UserRole, ("copy", m["name"]))
+                    it.addChild(cm)
+            for t in iface["textures"]:
+                ti = QTreeWidgetItem(["texture: %s" % t["name"], t["fmt"], t["reg"]])
+                ti.setData(0, Qt.UserRole, ("copy", t["name"]))
+                root.addChild(ti)
+            for s in iface["samplers"]:
+                si = QTreeWidgetItem(["sampler: %s" % s["name"], "", s["reg"]])
+                si.setData(0, Qt.UserRole, ("copy", s["name"]))
+                root.addChild(si)
+        elif base:
+            root.addChild(QTreeWidgetItem(["(读取接口失败)", "", ""]))
         else:
             root.addChild(QTreeWidgetItem(["(未选择基础 mmtr)", "", ""]))
         # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
         tmpl = self.cmb_tmpl.currentData() or "deferred_env"
-        pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名>"])
+        pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名> 引用"])
         self.tree_inputs.addTopLevelItem(pre)
-        for typ, nm in _template_struct_fields(tmpl, "MaterialInput"):
-            pre.addChild(QTreeWidgetItem(["mi." + nm, typ, ""]))
+        for typ, nm, desc in _template_struct_fields(tmpl, "MaterialInput"):
+            it = QTreeWidgetItem(["mi." + nm, typ, desc])
+            it.setData(0, Qt.UserRole, ("copy", "mi." + nm))
+            pre.addChild(it)
         # 3) 自定义输入(参数/贴图; 会写进 mmtr)
         self._load_decls_from_src()
         cust = QTreeWidgetItem(["自定义输入 (参数/贴图)", "", "写进 mmtr 参数表/绑定"])
@@ -2414,8 +2552,17 @@ class MaterialSystemPanel(QWidget):
         kind = item.data(0, Qt.UserRole) if item is not None else None
         if not kind:
             return None
-        return [("改名", lambda: self._rename_custom(kind)),
-                ("删除", self._del_custom)]
+        acts = []
+        if kind[0] in ("param", "tex"):
+            acts.append(("改名", lambda: self._rename_custom(kind)))
+            acts.append(("删除", self._del_custom))
+        token = kind[1]
+        acts.append(("复制: %s" % token, lambda: self._copy_token(token)))
+        return acts
+
+    def _copy_token(self, token):
+        _copy_to_clipboard(token)
+        self.lbl_status.setText("已复制: %s" % token)
 
     def _add_param(self):
         name, ok = QInputDialog.getText(self, "新增参数", "参数名(建议 VAR_ 开头):")
@@ -2546,15 +2693,17 @@ class MaterialSystemPanel(QWidget):
     def compile_check(self):
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_env"
+        iface = self._effective_iface()
         try:
-            self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None, tmpl))
+            self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None,
+                                                         tmpl, iface=iface))
         except Exception as e:  # noqa: BLE001
             self.ed_full.setPlainText(";; 组装失败: %s" % e)
             self._src_hl.set_diagnostics([])
             self.lbl_status.setText("[组装失败] %s" % e)
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl)
+        dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl, iface=iface)
         if err:
             diags = self._err_diags(err, tmpl)
             self._src_hl.set_diagnostics(diags)

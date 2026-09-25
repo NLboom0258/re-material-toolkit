@@ -8,7 +8,7 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
     // 切线空间法线
     float3 nt = nr.xyz * 2.0 - 1.0;
     m.NormalTS = nt;
-    float3 nWS = normalize(mi.T * nt.x + mi.B * nt.y + mi.N * nt.z);
+    float3 nWS = normalize(mi.Tangent * nt.x + mi.Bitangent * nt.y + mi.Normal * nt.z);
 
     // 限界光(LimLight): 基于法线.视线夹角的幂 → 写进 RT0(旁路光照)
     float ndv = dot(nWS.xzy, -mi.viewDir);
