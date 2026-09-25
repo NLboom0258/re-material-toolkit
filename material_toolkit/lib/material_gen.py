@@ -104,36 +104,85 @@ def pick_iface_ps(data, pass_name="Deferred"):
     return best[0] if best else None
 
 
+_DECL_RE = re.compile(r"^\s*//!\s*(\w+)\s+(.+?)\s*$")
+
+
+def parse_decls(material_src):
+    """解析材质源码里的声明行: `//! param <type> <name>` / `//! tex <name>`。
+
+    返回 (params=[(name,type)], textures=[name])。
+    """
+    from . import material_iface as MI
+    params, textures = [], []
+    for line in (material_src or "").splitlines():
+        m = _DECL_RE.match(line)
+        if not m:
+            continue
+        kind, rest = m.group(1).lower(), m.group(2).split()
+        if kind == "param" and len(rest) == 2:
+            if rest[0].lower() in MI.TYPE_SIZE:
+                typ, name = rest[0], rest[1]
+            else:
+                name, typ = rest[0], rest[1]
+            params.append((name, typ))
+        elif kind in ("tex", "texture") and rest:
+            textures.append(rest[0])
+    return params, textures
+
+
 def generate(template, material_src=None, template_name="deferred_env",
-             pass_name="Deferred", target="ps_5_0", iface_from_template=True):
+             pass_name="Deferred", target="ps_5_0", iface_from_template=True,
+             add_inputs=True):
     """材质函数 + 模板 mmtr -> (新 mmtr bytes, report dict)。
 
-    material_src 为 None 时用该 pass 模板的默认材质函数。
-    接口声明默认由模板 mmtr 的 Deferred PS **自动生成**(而非模板里写死的)。
+    - 接口声明默认由模板 mmtr 的 Deferred PS **自动生成**;
+    - 材质源码里的 `//! param <type> <name>` / `//! tex <name>` 声明会自动写进 mmtr
+      (参数表 / 绑定)并加入接口声明(⑤b)。
     """
+    from . import material_iface as MI
+    from .mmtr import Mmtr
+    from .binding import add_texture_slot
+
     out = bytes(template)
-    iface = None
-    if iface_from_template:
-        from . import material_iface as MI
-        bidx = pick_iface_ps(out, pass_name)
-        if bidx is not None:
-            iface = MI.iface_from_dxbc(B.extract_blob(out, bidx))
+    base_idx = pick_iface_ps(out, pass_name) if iface_from_template else None
+    iface = (MI.iface_from_dxbc(B.extract_blob(out, base_idx))
+             if base_idx is not None else None)
+
+    # 目标/跳过: 以“基础 PS”作参考(它等价于我们即将编译的 PS 的签名/绑定)
+    targets, skipped = [], []
+    if base_idx is not None:
+        base_an = analyze(B.extract_blob(out, base_idx))
+        for idx in collect_pass_ps(out, pass_name):
+            (targets if is_replaceable(base_an, analyze(B.extract_blob(out, idx)))
+             else skipped).append(idx)
+
+    # 材质声明的自定义参数/贴图
+    params, textures = parse_decls(material_src) if (add_inputs and material_src) \
+        else ([], [])
+    added_params = []
+    if iface is not None and (params or textures):
+        iface, added_params = MI.extend(iface, "UserMaterial", params, textures)
+
+    # 写进 mmtr: 参数 -> 参数表; 贴图 -> 各目标 blob 的绑定组
+    if added_params:
+        mm = Mmtr.from_bytes(out)
+        for name, size, off in added_params:
+            out = mm.add_cbuffer_param("UserMaterial", name, size, off)
+            mm = Mmtr.from_bytes(out)
+    for tname in textures:
+        for idx in targets:
+            out = add_texture_slot(out, idx, tname, rdef=False)
 
     ps, err = MP.compile_shading(material_src, template_name, target=target,
                                  iface=iface)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
-    ours = analyze(ps)
-
-    done, skipped = [], []
-    for idx in collect_pass_ps(out, pass_name):
-        if not is_replaceable(ours, analyze(B.extract_blob(out, idx))):
-            skipped.append(idx)
-            continue
+    bad = []
+    for idx in targets:
         out = R.replace_blob(out, idx, ps)
-        done.append(idx)
+        if not B.verify_dxbc(B.extract_blob(out, idx))["disasm_ok"]:
+            bad.append(idx)
 
-    bad = [i for i in done
-           if not B.verify_dxbc(B.extract_blob(out, i))["disasm_ok"]]
-    return out, {"replaced": done, "skipped": skipped, "bad": bad,
-                 "issues": MmtrModel(out).validate(), "ps_size": len(ps)}
+    return out, {"replaced": targets, "skipped": skipped, "bad": bad,
+                 "issues": MmtrModel(out).validate(), "ps_size": len(ps),
+                 "added_params": added_params, "added_textures": list(textures)}

@@ -1,4 +1,4 @@
-"""从模板 PS 反汇编自动生成 HLSL 接口声明(cbuffer / 贴图 / sampler)。
+"""从模板 PS 反汇编自动生成 HLSL 接口声明(cbuffer / 贴图 / sampler), 并支持扩展。
 
 用途: pass 模板里的接口块不再写死某个 master; 由模板 mmtr 的 Deferred PS 生成,
 既方便接新 master, 也是"材质自带参数/贴图"的基础。
@@ -14,6 +14,12 @@ _CBUF_RE = re.compile(r"^//\s*cbuffer\s+(\w+)")
 _MEM_RE = re.compile(
     r"^//\s+(.+?)\s+(\w+)(\[\d+\])?;\s*//\s*Offset:\s*(\d+)\s+Size:\s*(\d+)")
 _HEADER_SKIP = ("Name", "----")
+
+# 材质参数类型 -> 字节大小
+TYPE_SIZE = {"float": 4, "int": 4, "uint": 4, "bool": 4,
+             "float2": 8, "float3": 12, "float4": 16,
+             "float2x2": 16, "float3x3": 48, "float4x4": 64,
+             "row_major float4x4": 64, "row_major float3x4": 48}
 
 
 def _bindings(txt):
@@ -54,8 +60,9 @@ def _cbuffers(txt, binds):
         while i < len(lines) and not lines[i].strip().startswith("// }"):
             mm = _MEM_RE.match(lines[i].strip())
             if mm:
-                mtype, mname, arr, _off, _size = mm.groups()
-                members.append((mtype.strip(), mname + (arr or "")))
+                mtype, mname, arr, off, size = mm.groups()
+                members.append({"type": mtype.strip(), "name": mname + (arr or ""),
+                                "offset": int(off), "size": int(size)})
             i += 1
         out.append({"name": name,
                     "reg": re.sub(r"^cb", "b", binds.get(name, ("", "?"))[1]),
@@ -86,12 +93,47 @@ def iface_from_dxbc(dxbc):
             textures.append({"name": name, "reg": reg, "fmt": fmt})
 
     def _key(d):
-        r = d["reg"]
-        return int(re.sub(r"\D", "", r) or 0)
+        return int(re.sub(r"\D", "", d["reg"]) or 0)
 
     return {"cbuffers": cbuffers,
             "textures": sorted(textures, key=_key),
             "samplers": sorted(samplers, key=_key)}
+
+
+def next_offset(members, size):
+    """按 HLSL cbuffer 打包规则算出下一个成员的偏移(不跨 16 字节行)。"""
+    if not members:
+        return 0
+    last = members[-1]
+    off = last["offset"] + last["size"]
+    if (off % 16) + size > 16:
+        off = (off + 15) & ~15
+    return off
+
+
+def extend(iface, cbuffer="UserMaterial", params=(), textures=()):
+    """在接口上新增材质参数/贴图(供 ⑤b 用)。返回 (新 iface, 新增参数 [(name,size,offset)])。
+
+    params: [(name, type)]; textures: [name]。参数追加到 cbuffer 成员末尾(按 HLSL 打包)。
+    """
+    import copy
+    out = copy.deepcopy(iface)
+    added = []
+    cb = next((c for c in out["cbuffers"] if c["name"] == cbuffer), None)
+    if cb is not None:
+        for name, typ in params:
+            size = TYPE_SIZE.get(typ, 4)
+            off = next_offset(cb["members"], size)
+            cb["members"].append({"type": typ, "name": name,
+                                  "offset": off, "size": size})
+            added.append((name, size, off))
+    # 贴图: 新 t 号 = 现有最大 + 1
+    tmax = max([int(re.sub(r"\D", "", t["reg"]) or -1)
+                for t in out["textures"]] or [-1])
+    for name in textures:
+        tmax += 1
+        out["textures"].append({"name": name, "reg": "t%d" % tmax, "fmt": "float4"})
+    return out, added
 
 
 def hlsl_of(iface):
@@ -100,8 +142,8 @@ def hlsl_of(iface):
     for cb in iface["cbuffers"]:
         out.append("cbuffer %s : register(%s)" % (cb["name"], cb["reg"]))
         out.append("{")
-        for mtype, mname in cb["members"]:
-            out.append("    %s %s;" % (mtype, mname))
+        for m in cb["members"]:
+            out.append("    %s %s;" % (m["type"], m["name"]))
         out.append("};")
         out.append("")
     for t in iface["textures"]:
