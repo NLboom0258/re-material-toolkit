@@ -12,6 +12,7 @@
      输入) —— 那套用 `UserMaterialInstances` 结构化缓冲, 需专属模板。
 ⇒ 多带输入(=不含它们也能跑)可替换; 绑定/per-instance 不同则跳过。
 """
+import os
 import re
 
 from . import mmtr_blobs as B
@@ -71,9 +72,12 @@ def analyze(dxbc):
     }
 
 
-def is_replaceable(ours, target):
-    """我们的 PS 能否替换进目标 PS。"""
-    if target["per_instance"]:
+def is_replaceable(ours, target, allow_instance=False):
+    """我们的 PS 能否替换进目标 PS。
+
+    target 为 per-instance 时默认不替换(需 allow_instance=True, 且 ours 也是 instance 风格)。
+    """
+    if target["per_instance"] and not allow_instance:
         return False
     if ours["in"] != target["in"][:len(ours["in"])]:
         return False
@@ -132,12 +136,14 @@ def parse_decls(material_src):
 
 def generate(template, material_src=None, template_name="deferred_env",
              pass_name="Deferred", target="ps_5_0", iface_from_template=True,
-             add_inputs=True):
+             add_inputs=True, instance_template=None):
     """材质函数 + 模板 mmtr -> (新 mmtr bytes, report dict)。
 
     - 接口声明默认由模板 mmtr 的 Deferred PS **自动生成**;
     - 材质源码里的 `//! param <type> <name>` / `//! tex <name>` 声明会自动写进 mmtr
-      (参数表 / 绑定)并加入接口声明(⑤b)。
+      (参数表 / 绑定)并加入接口声明(⑤b);
+    - 目标 Deferred PS 分两种风格分别替换: cbuffer 路径(template_name) 与
+      per-instance 路径(instance_template, 默认探 `<template_name>_instance.hlsl`)。
     """
     from . import material_iface as MI
     from .mmtr import Mmtr
@@ -148,13 +154,27 @@ def generate(template, material_src=None, template_name="deferred_env",
     iface = (MI.iface_from_dxbc(B.extract_blob(out, base_idx))
              if base_idx is not None else None)
 
-    # 目标/跳过: 以“基础 PS”作参考(它等价于我们即将编译的 PS 的签名/绑定)
-    targets, skipped = [], []
-    if base_idx is not None:
-        base_an = analyze(B.extract_blob(out, base_idx))
-        for idx in collect_pass_ps(out, pass_name):
-            (targets if is_replaceable(base_an, analyze(B.extract_blob(out, idx)))
+    # 分类: cbuffer 路径(非 per-instance) / per-instance 路径
+    ps_all = collect_pass_ps(out, pass_name)
+    inst_base = next((i for i in ps_all
+                      if analyze(B.extract_blob(out, i))["per_instance"]), None)
+    cb_an = analyze(B.extract_blob(out, base_idx)) if base_idx is not None else None
+    inst_an = analyze(B.extract_blob(out, inst_base)) if inst_base is not None else None
+    cb_targets, inst_targets, skipped = [], [], []
+    for idx in ps_all:
+        a = analyze(B.extract_blob(out, idx))
+        if a["per_instance"]:
+            (inst_targets if (inst_an and is_replaceable(inst_an, a, True))
              else skipped).append(idx)
+        else:
+            (cb_targets if (cb_an and is_replaceable(cb_an, a))
+             else skipped).append(idx)
+
+    # 决定 instance 模板名
+    if instance_template is None and inst_targets:
+        cand = template_name + "_instance"
+        if os.path.exists(os.path.join(MP._TDIR, cand + ".hlsl")):
+            instance_template = cand
 
     # 材质声明的自定义参数/贴图
     params, textures = parse_decls(material_src) if (add_inputs and material_src) \
@@ -170,19 +190,38 @@ def generate(template, material_src=None, template_name="deferred_env",
             out = mm.add_cbuffer_param("UserMaterial", name, size, off)
             mm = Mmtr.from_bytes(out)
     for tname in textures:
-        for idx in targets:
+        for idx in cb_targets + inst_targets:
             out = add_texture_slot(out, idx, tname, rdef=False)
 
-    ps, err = MP.compile_shading(material_src, template_name, target=target,
-                                 iface=iface)
-    if err:
-        raise ValueError("HLSL 编译失败:\n%s" % err)
+    # cbuffer 风格
     bad = []
-    for idx in targets:
+    ps, err = MP.compile_shading(material_src, template_name, target=target,
+                                 iface=iface, style="cbuffer")
+    if err:
+        raise ValueError("HLSL 编译失败(cbuffer):\n%s" % err)
+    for idx in cb_targets:
         out = R.replace_blob(out, idx, ps)
         if not B.verify_dxbc(B.extract_blob(out, idx))["disasm_ok"]:
             bad.append(idx)
 
-    return out, {"replaced": targets, "skipped": skipped, "bad": bad,
+    # per-instance 风格
+    ps_inst = None
+    if inst_targets and instance_template:
+        ps_inst, err2 = MP.compile_shading(material_src, instance_template,
+                                           target=target, iface=iface,
+                                           style="instance")
+        if err2:
+            raise ValueError("HLSL 编译失败(instance):\n%s" % err2)
+        for idx in inst_targets:
+            out = R.replace_blob(out, idx, ps_inst)
+            if not B.verify_dxbc(B.extract_blob(out, idx))["disasm_ok"]:
+                bad.append(idx)
+    elif inst_targets:
+        skipped = skipped + inst_targets  # 无 instance 模板则跳过
+        inst_targets = []
+
+    return out, {"replaced": cb_targets, "replaced_instance": inst_targets,
+                 "skipped": skipped, "bad": bad,
                  "issues": MmtrModel(out).validate(), "ps_size": len(ps),
+                 "instance_ps_size": len(ps_inst) if ps_inst else 0,
                  "added_params": added_params, "added_textures": list(textures)}

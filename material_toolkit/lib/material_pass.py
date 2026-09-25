@@ -20,16 +20,25 @@ def _read(fname):
 
 
 def default_material(template="deferred_env"):
-    """该 pass 模板配套的默认材质函数(如 env 的等价实现)。"""
+    """该 pass 模板配套的默认材质函数(如 env 的等价实现)。
+
+    `<name>_instance` 变体与 `<name>` 共用默认材质(参数均已裸名暴露)。
+    """
     suffix = template.split("_", 1)[1] if "_" in template else template
-    return _read("mat_default_%s.hlsl" % suffix)
+    fname = "mat_default_%s.hlsl" % suffix
+    if not os.path.exists(os.path.join(_TDIR, fname)):
+        base = suffix[:-len("_instance")] if suffix.endswith("_instance") else suffix
+        fname = "mat_default_%s.hlsl" % base
+    return _read(fname)
 
 
-def build_source(material_src=None, template="deferred_env", iface=None):
+def build_source(material_src=None, template="deferred_env", iface=None,
+                 style="cbuffer"):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
     接口声明(否则用模板自带的写死声明, 便于单独编译/测试)。
+    style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
     """
     tpl = _read(template + ".hlsl")
     if MARKER not in tpl:
@@ -38,13 +47,13 @@ def build_source(material_src=None, template="deferred_env", iface=None):
         from . import material_iface as MI
         i0 = tpl.index(IFACE_BEGIN) + len(IFACE_BEGIN)
         i1 = tpl.index(IFACE_END)
-        tpl = tpl[:i0] + "\n" + MI.hlsl_of(iface) + tpl[i1:]
+        tpl = tpl[:i0] + "\n" + MI.hlsl_of(iface, style=style) + tpl[i1:]
     src = material_src if material_src is not None else default_material(template)
     return tpl.replace(MARKER, src)
 
 
 def compile_shading(material_src=None, template="deferred_env",
-                    entry="main", target="ps_5_0", iface=None):
+                    entry="main", target="ps_5_0", iface=None, style="cbuffer"):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。"""
-    return B.compile_hlsl(build_source(material_src, template, iface), entry,
+    return B.compile_hlsl(build_source(material_src, template, iface, style), entry,
                           target, name="%s.hlsl" % template)

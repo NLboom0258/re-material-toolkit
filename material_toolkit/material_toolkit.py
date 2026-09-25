@@ -221,8 +221,8 @@ def main():
         open(out, "wb").write(data)
         print(f"OK: mat-gen {src} + {mat or '(默认材质)'} -> {out} "
               f"({len(data)} bytes, PS {rep['ps_size']}B)")
-        print(f"  替换 blobs={rep['replaced']}  跳过(签名不符)={rep['skipped']}  "
-              f"坏={rep['bad']}")
+        print(f"  替换 blobs={rep['replaced']}  实例(cbuffer/per-instance)={rep['replaced_instance']}  "
+              f"跳过(签名不符)={rep['skipped']}  坏={rep['bad']}")
         _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
