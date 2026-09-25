@@ -11,7 +11,7 @@
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 - 材质系统页: **语义级“材质资产”编辑**(与 MMTR/MDF2 的结构/字节级编辑分开; 见 analysis §9)。
   左=选项(光照模式/着色类型/材质模板/基础 mmtr/材质名) + 操作(载入默认材质/新建/打开·保存 .mmat.json/编译校验/生成 mmtr/导出材质实例);
-  右=「材质源(HLSL)」(用户写 `MaterialMain`) / 「组装结果」(模板+材质拼接的完整 HLSL) / 「语义输出·声明」(表3a / 互斥 / `//! param`·`//! tex` / 校验)。
+  右=「材质源(HLSL)」(带 HLSL 高亮 + 编译报错红线) / 「组装结果」 / 「输入」(pass 输入·系统预制输入·自定义输入(可编辑)) / 「语义输出·校验」。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
 MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/float4 额外带**颜色块**(点击取色)。
 
@@ -56,12 +56,13 @@ from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
 from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
+from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
+    QColor, QFont, QFontMetrics, QSyntaxHighlighter, QTextCharFormat,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
@@ -443,6 +444,92 @@ class AsmHighlighter(QSyntaxHighlighter):
             j = k
 
 
+class HlslHighlighter(QSyntaxHighlighter):
+    """HLSL 语法高亮 + 编译诊断红波浪线(与高亮共存)。"""
+
+    def __init__(self, document):
+        super().__init__(document)
+        self._diags = {}          # 1基行号 -> [(start, end, msg)]
+
+        def fmt(color, bold=False, italic=False):
+            f = QTextCharFormat()
+            f.setForeground(QColor(color))
+            if bold:
+                f.setFontWeight(QFont.Bold)
+            if italic:
+                f.setFontItalic(True)
+            return f
+
+        def alt(ws):
+            return "|".join(sorted(ws, key=len, reverse=True))
+
+        self._err_color = QColor("#f14c4c")
+        self._rules = [
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_KEYWORDS)), fmt("#569cd6", bold=True)),
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_TYPES)), fmt("#4ec9b0")),
+            (QRegularExpression(r"\b(%s)\b" % alt(_HLSL_INTRINSICS)), fmt("#dcdcaa")),
+            (QRegularExpression(r"-?\d+\.\d+|\b0x[0-9a-fA-F]+\b|\b\d+\b"), fmt("#b5cea8")),
+            (QRegularExpression(r"//.*$"), fmt("#6a9955", italic=True)),
+        ]
+
+    def set_diagnostics(self, diags):
+        """diags: [(行1基, start, end, msg)]。"""
+        self._diags = {}
+        for ln, s, e, msg in diags:
+            self._diags.setdefault(ln, []).append((s, e, msg))
+        self.rehighlight()
+
+    def highlightBlock(self, text):
+        n = len(text)
+        cells = [None] * n
+        for pat, f in self._rules:
+            it = pat.globalMatch(text, 0)
+            while it.hasNext():
+                m = it.next()
+                s = m.capturedStart()
+                if s >= n:
+                    break
+                e = min(s + m.capturedLength(), n)
+                for j in range(s, e):
+                    cells[j] = f
+        for (s, e, _m) in self._diags.get(self.currentBlock().blockNumber() + 1, ()):
+            for j in range(max(0, s), min(n, e)):
+                base = (QTextCharFormat(cells[j]) if cells[j] is not None
+                        else QTextCharFormat())
+                base.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
+                base.setUnderlineColor(self._err_color)
+                cells[j] = base
+        j = 0
+        while j < n:
+            f = cells[j]
+            k = j + 1
+            while k < n and cells[k] == f:
+                k += 1
+            if f is not None:
+                self.setFormat(j, k - j, f)
+            j = k
+
+
+def _template_struct_fields(template_name, struct_name):
+    """从 pass 模板文件抽 struct 成员: [(类型, 名), ...]。"""
+    path = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates",
+                        template_name + ".hlsl")
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        txt = f.read()
+    m = re.search(r"struct\s+%s\s*\{(.*?)\}" % struct_name, txt, re.S)
+    if not m:
+        return []
+    out = []
+    for line in m.group(1).splitlines():
+        line = line.split("//")[0].strip().rstrip(";").strip()
+        parts = line.split()
+        if len(parts) >= 2:
+            out.append((" ".join(parts[:-1]), parts[-1]))
+    return out
+
+
 class _AsmCheckSignals(QObject):
     """后台汇编检查结果信号(gen, ok, errors[(line1b,msg)], log)。"""
     finished = Signal(int, bool, list, str)
@@ -721,6 +808,7 @@ class MmtrPanel(QWidget):
         mono = QFont("Consolas")
         mono.setStyleHint(QFont.Monospace)
         self.ed_asm.setFont(mono)
+        self.ed_asm.setTabStopDistance(QFontMetrics(mono).horizontalAdvance(" ") * 2)
         self._asm_hl = AsmHighlighter(self.ed_asm.document())
         self._edit_blob = None      # 当前编辑区 asm 对应的 blob 下标
         self._asm_cache = {}        # 每 blob 一份 asm(切换 blob 时保存/恢复)
@@ -2025,6 +2113,10 @@ class AssembleDialog(QDialog):
         return list(self._specs)
 
 
+# D3DCompile 错误行: 形如 "file.hlsl(12,5-9): error X3000: ..."
+_HLSL_ERR_RE = re.compile(r"\((\d+),(\d+)(?:-(\d+))?\):\s*(error|warning)\s+(\w+):\s*(.*)")
+
+
 def _pass_template_names():
     """可用的 pass 模板名(扫描 pass_templates/, 排除默认材质与 *_instance)。"""
     import glob
@@ -2120,16 +2212,25 @@ class MaterialSystemPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.ed_src = QPlainTextEdit()
-        self.ed_src.setFont(QFont("Consolas", 10))
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.Monospace)
+        self.ed_src.setFont(mono)
+        self.ed_src.setTabStopDistance(QFontMetrics(mono).horizontalAdvance(" ") * 4)
+        self._src_hl = HlslHighlighter(self.ed_src.document())
+        self.ed_src.textChanged.connect(self._on_src_changed)
         self.tabs.addTab(self.ed_src, "材质源 (HLSL)")
         self.ed_full = QPlainTextEdit()
         self.ed_full.setReadOnly(True)
         self.ed_full.setFont(QFont("Consolas", 9))
         self.tabs.addTab(self.ed_full, "组装结果")
+        self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
-        self.tabs.addTab(self.tree_info, "语义输出 / 声明")
+        self.tabs.addTab(self.tree_info, "语义输出 / 校验")
         root.addWidget(self.tabs, 1)
+        # 自定义输入(参数/贴图)状态: 与源码 `//!` 声明同步
+        self._params = []
+        self._textures = []
 
     # ---- 状态同步 ----
     def _sync_asset(self):
@@ -2190,18 +2291,9 @@ class MaterialSystemPanel(QWidget):
         for a, b, ch in masset.MUTEX:
             mx.addChild(QTreeWidgetItem([a, b, ch]))
         self.tree_info.addTopLevelItem(mx)
-
-        params, texs = mgen.parse_decls(self.asset.shading_source)
-        dp = QTreeWidgetItem(["声明 //! param", "", "%d 项" % len(params)])
-        for n, t in params:
-            dp.addChild(QTreeWidgetItem([n, t, ""]))
-        self.tree_info.addTopLevelItem(dp)
-        dt = QTreeWidgetItem(["声明 //! tex", "", "%d 项" % len(texs)])
-        for n in texs:
-            dt.addChild(QTreeWidgetItem([n, "", ""]))
-        self.tree_info.addTopLevelItem(dt)
         self.tree_info.expandAll()
         fit_columns(self.tree_info, (0, 1, 2))
+        self.refresh_inputs()
         self._set_status()
 
     def _set_status(self):
@@ -2216,6 +2308,183 @@ class MaterialSystemPanel(QWidget):
         else:
             self.lbl_status.setText("配置合法")
             self.lbl_status.setStyleSheet("color:#1a7f37")
+
+    # ---- 输入页 ----
+    def _wrap_inputs(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.tree_inputs = QTreeWidget()
+        self.tree_inputs.setHeaderLabels(["类别 / 名", "类型", "说明"])
+        v.addWidget(self.tree_inputs, 1)
+        bar = QHBoxLayout()
+        for text, cb in (("＋参数", self._add_param), ("＋贴图", self._add_tex),
+                         ("删除选中", self._del_custom),
+                         ("从源码重载声明", self._reload_decls_from_src)):
+            b = QPushButton(text)
+            b.clicked.connect(cb)
+            bar.addWidget(b)
+        bar.addStretch(1)
+        v.addLayout(bar)
+        attach_menu(self.tree_inputs, self._menu_inputs)
+        return w
+
+    def _load_decls_from_src(self):
+        self._params, self._textures = mgen.parse_decls(self.ed_src.toPlainText())
+
+    def _rewrite_decls(self):
+        """把自定义输入写成源码顶部的 `//!` 声明区(先删旧声明行)。"""
+        src = self.ed_src.toPlainText()
+        body = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("//!")).lstrip("\n")
+        lines = ["//! param %s %s" % (t, n) for n, t in self._params]
+        lines += ["//! tex %s" % n for n in self._textures]
+        head = ("\n".join(lines) + "\n\n") if lines else ""
+        self.ed_src.setPlainText(head + body)
+        self.refresh_inputs()
+        self.refresh_info()
+
+    def _reload_decls_from_src(self):
+        self._load_decls_from_src()
+        self.refresh_inputs()
+
+    def _on_src_changed(self):
+        # 源码变动 -> 旧诊断(行号)失效。延迟到事件循环再重绘, 避免在 textChanged
+        # 内同步 rehighlight 造成 highlightBlock 递归。
+        QTimer.singleShot(0, lambda: self._src_hl.set_diagnostics([]))
+
+    def refresh_inputs(self):
+        self.tree_inputs.clear()
+        # 1) pass 输入(基础 mmtr 的目标 pass PS 接口)
+        root = QTreeWidgetItem(["pass 输入 (基础 mmtr 的 Deferred PS)", "", ""])
+        self.tree_inputs.addTopLevelItem(root)
+        base = self.ed_mmtr.text().strip()
+        if base and os.path.isfile(base):
+            try:
+                data = open(base, "rb").read()
+                idx = mgen.pick_iface_ps(data, "Deferred")
+                iface = (miface.iface_from_dxbc(extract_blob(data, idx))
+                         if idx is not None else None)
+                if iface:
+                    for cb in iface["cbuffers"]:
+                        it = QTreeWidgetItem(["cbuffer: %s" % cb["name"], cb["reg"],
+                                              "%d 成员" % len(cb["members"])])
+                        root.addChild(it)
+                        for m in cb["members"]:
+                            it.addChild(QTreeWidgetItem([m["name"], m["type"],
+                                                         "@%d" % m["offset"]]))
+                    for t in iface["textures"]:
+                        root.addChild(QTreeWidgetItem(["texture: %s" % t["name"],
+                                                       t["fmt"], t["reg"]]))
+                    for s in iface["samplers"]:
+                        root.addChild(QTreeWidgetItem(["sampler: %s" % s["name"], "",
+                                                       s["reg"]]))
+                else:
+                    root.addChild(QTreeWidgetItem(["(无法解析接口)", "", ""]))
+            except Exception as e:  # noqa: BLE001
+                root.addChild(QTreeWidgetItem(["(读取失败: %s)" % e, "", ""]))
+        else:
+            root.addChild(QTreeWidgetItem(["(未选择基础 mmtr)", "", ""]))
+        # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
+        tmpl = self.cmb_tmpl.currentData() or "deferred_env"
+        pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名>"])
+        self.tree_inputs.addTopLevelItem(pre)
+        for typ, nm in _template_struct_fields(tmpl, "MaterialInput"):
+            pre.addChild(QTreeWidgetItem(["mi." + nm, typ, ""]))
+        # 3) 自定义输入(参数/贴图; 会写进 mmtr)
+        self._load_decls_from_src()
+        cust = QTreeWidgetItem(["自定义输入 (参数/贴图)", "", "写进 mmtr 参数表/绑定"])
+        self.tree_inputs.addTopLevelItem(cust)
+        pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(self._params)])
+        cust.addChild(pnode)
+        for n, t in self._params:
+            it = QTreeWidgetItem([n, t, ""])
+            it.setData(0, Qt.UserRole, ("param", n))
+            pnode.addChild(it)
+        tnode = QTreeWidgetItem(["贴图 (//! tex)", "", "%d" % len(self._textures)])
+        cust.addChild(tnode)
+        for n in self._textures:
+            it = QTreeWidgetItem([n, "", ""])
+            it.setData(0, Qt.UserRole, ("tex", n))
+            tnode.addChild(it)
+        self.tree_inputs.expandAll()
+        fit_columns(self.tree_inputs, (0, 1, 2))
+
+    def _menu_inputs(self, item):
+        kind = item.data(0, Qt.UserRole) if item is not None else None
+        if not kind:
+            return None
+        return [("改名", lambda: self._rename_custom(kind)),
+                ("删除", self._del_custom)]
+
+    def _add_param(self):
+        name, ok = QInputDialog.getText(self, "新增参数", "参数名(建议 VAR_ 开头):")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        typ = pick_type(self, "参数类型", "float4")
+        if typ is None:
+            return
+        self._load_decls_from_src()
+        if any(n == name for n, _ in self._params):
+            QMessageBox.warning(self, "重复", "参数已存在: %s" % name)
+            return
+        self._params.append((name, typ))
+        self._rewrite_decls()
+
+    def _add_tex(self):
+        name, ok = QInputDialog.getText(self, "新增贴图", "贴图槽名(如 BaseMetalMap):")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        self._load_decls_from_src()
+        if name in self._textures:
+            QMessageBox.warning(self, "重复", "贴图已存在: %s" % name)
+            return
+        self._textures.append(name)
+        self._rewrite_decls()
+
+    def _rename_custom(self, kind):
+        cat, name = kind
+        new, ok = QInputDialog.getText(self, "改名", "新名字:", text=name)
+        if not ok or not new.strip() or new.strip() == name:
+            return
+        new = new.strip()
+        self._load_decls_from_src()
+        if cat == "param":
+            self._params = [(new if n == name else n, t) for n, t in self._params]
+        else:
+            self._textures = [new if n == name else n for n in self._textures]
+        self._rewrite_decls()
+
+    def _del_custom(self):
+        it = self.tree_inputs.currentItem()
+        kind = it.data(0, Qt.UserRole) if it is not None else None
+        if not kind:
+            return
+        cat, name = kind
+        self._load_decls_from_src()
+        if cat == "param":
+            self._params = [(n, t) for n, t in self._params if n != name]
+        else:
+            self._textures = [n for n in self._textures if n != name]
+        self._rewrite_decls()
+
+    # ---- 编译诊断 ----
+    def _err_diags(self, err_text, tmpl):
+        """把 D3DCompile 报错行(组装文行号)映射回用户源码行。返回 [(行1基,start,end,msg)]。"""
+        off = mpass.material_line_offset(tmpl)
+        out = []
+        for line in (err_text or "").splitlines():
+            m = _HLSL_ERR_RE.search(line)
+            if not m:
+                continue
+            aln = int(m.group(1))
+            if aln <= off:
+                continue   # 模板内的错(非用户源码)
+            out.append((aln - off, max(0, int(m.group(2)) - 1), 10 ** 6,
+                        "%s %s: %s" % (m.group(4), m.group(5), m.group(6))))
+        return out
 
     # ---- 操作 ----
     def _browse_base_mmtr(self):
@@ -2281,15 +2550,25 @@ class MaterialSystemPanel(QWidget):
             self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None, tmpl))
         except Exception as e:  # noqa: BLE001
             self.ed_full.setPlainText(";; 组装失败: %s" % e)
-            QMessageBox.critical(self, "组装失败", str(e))
+            self._src_hl.set_diagnostics([])
+            self.lbl_status.setText("[组装失败] %s" % e)
+            self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        self.tabs.setCurrentIndex(1)
         dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl)
         if err:
-            self.lbl_status.setText("[编译失败] 见“组装结果”")
+            diags = self._err_diags(err, tmpl)
+            self._src_hl.set_diagnostics(diags)
+            self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
+            first = diags[0][3] if diags else (err.strip().splitlines()[0] if err.strip() else "?")
+            self.lbl_status.setText("[编译失败] %d 处%s: %s"
+                                    % (len(diags),
+                                       ("(第%d行)" % diags[0][0]) if diags else "",
+                                       first[:90]))
             self.lbl_status.setStyleSheet("color:#c0392b")
-            QMessageBox.warning(self, "编译失败", err[:4000])
+            self.lbl_status.setToolTip(err[:4000])
             return
+        self._src_hl.set_diagnostics([])
+        self.lbl_status.setToolTip("")
         v = verify_dxbc(dxbc)
         self.lbl_status.setText("编译 OK: %dB stage=%s disasm=%s strip=%s reflect=%s"
                                 % (len(dxbc), v["stage"], v["disasm_ok"],

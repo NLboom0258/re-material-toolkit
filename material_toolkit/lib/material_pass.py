@@ -32,6 +32,12 @@ def default_material(template="deferred_env"):
     return _read(fname)
 
 
+def material_line_offset(template="deferred_env"):
+    """组装文里“材质源第一行”之前的行数(用于把编译报错行号映射回用户源码行)。"""
+    tpl = _read(template + ".hlsl")
+    return tpl[:tpl.index(MARKER)].count("\n")
+
+
 def build_source(material_src=None, template="deferred_env", iface=None,
                  style="cbuffer"):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。

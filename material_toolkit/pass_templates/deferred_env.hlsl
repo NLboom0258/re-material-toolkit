@@ -107,6 +107,16 @@ struct MaterialOutput
     float  Translucency;   // >0 且 Metallic<=0 时为半透明
 };
 
+// ---- 系统预制输入(已算好, 材质可直接用; 见 GUI「输入」页) ----
+struct MaterialInput
+{
+    float2 uv0;            // 主 UV
+    float2 uv1;            // 副 UV
+    float3 N;              // 几何法线(世界/切线基; 已归一)
+    float3 T;              // 切线(已归一)
+    float3 B;              // 副切线(已归一)
+};
+
 //__MATERIAL_MAIN__
 
 // ---- 八面体法线编码(等价原件 octahedral 折叠) ----
@@ -140,8 +150,14 @@ PSOut main(PSIn i)
     float2 vel = (i.v4.zw / i.v5.x) - ndc;
 
     // ---- 2. 材质逻辑 ----
+    MaterialInput mi;
+    mi.uv0 = uv0;
+    mi.uv1 = uv1;
+    mi.N = N;
+    mi.T = T;
+    mi.B = B;
     MaterialOutput m;
-    MaterialMain(i, uv0, uv1, m);
+    MaterialMain(mi, m);
 
     // ---- 3. 打包 ----
     // 自发光强度(曝光 / detone 曲线)
