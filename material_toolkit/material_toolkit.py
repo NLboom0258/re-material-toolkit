@@ -22,6 +22,7 @@
   python material_toolkit.py mat-gen    <template.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
   python material_toolkit.py mat-std    <in.mmtr> [other.mmtr]
   python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
+  python material_toolkit.py mat-synth  <in.mmtr> [other.mmtr]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -65,6 +66,7 @@ from lib import material_gen as mgen  # noqa: E402
 from lib import material_instance as minst  # noqa: E402
 from lib import material_pass as mpass  # noqa: E402
 from lib import mmtr_standard as std  # noqa: E402
+from lib import mmtr_synth as synth  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -276,6 +278,12 @@ def main():
         print(f"  目标={rep['targets']}  替换={rep['replaced']}  跳过={rep['skipped']}  "
               f"坏={rep['bad']}  标准集保留={rep['standard_preserved']}")
         _selfcheck_mmtr(data)
+    elif cmd == "mat-synth":
+        data = open(a[0], "rb").read()
+        synth.report(data)
+        if len(a) > 1 and not a[1].startswith("-"):
+            other = open(a[1], "rb").read()
+            print("  同版本结构 vs %s: %s" % (a[1], synth.same_version(data, other)))
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)

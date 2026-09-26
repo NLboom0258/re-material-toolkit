@@ -82,6 +82,29 @@ def rdef_resources(blob):
         return None
 
 
+def rdef_uav_names(blob):
+    """RDEF 里 **UAV** 的名字集合 (bound resource type ∈ {4,6,7,8,9,10} = RWTYPED/
+    RWSTRUCTURED/RWBYTEADDRESS/APPEND/CONSUME/RWSTRUCTURED_WITH_COUNTER)。
+
+    用途: 判别"UAV-only"着色器(如 Pick PS: 除 cb 外只有 UAV) —— 其 mmtr 记录计数与
+    "非 cb/smp 即 SRV"的口径不一致(见 analysis/mmtr_record_fields.md)。无 RDEF 返回空集。
+    """
+    _UAV = (4, 6, 7, 8, 9, 10)
+    r = _rdef_of(blob)
+    if r is None:
+        return set()
+    try:
+        _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+    except Exception:
+        return set()
+    out = set()
+    for k in range(n_br):
+        p = br_off + k * 32
+        if _u32(r, p + 4) in _UAV:
+            out.add(_cstr(r, _u32(r, p)))
+    return out
+
+
 # RDEF target(profile token) -> stage (逆向 DMC5 exe; 见 mmtr_blobs.TARGET_STAGE)
 TARGET_STAGE = {0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x43530500: "CS",
                 0xFFFE0501: "VS", 0xFFFF0501: "PS", 0x43530501: "CS"}
