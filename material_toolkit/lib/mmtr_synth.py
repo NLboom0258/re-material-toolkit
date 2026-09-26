@@ -116,6 +116,140 @@ def verify_record_counts(data):
     return bad, exc
 
 
+# --------------------------------------------------------------- 语义 spec 合成(头部内容可计算)
+# 每槽的"语义字段"(位置/大小/程序指针/绑定指针/计数) 可计算; 其余(TBD/gap/程序表) 归"残差"照抄。
+_SLOT_SEMANTIC_FIELDS = (0x00, 0x08, -0x28, -0x20, 0x9C, 0x88, 0x8C, 0xD8,
+                         0x38, 0x40, 0x48, 0x50, 0x58, 0x60,
+                         0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xC4)
+
+
+def _blob_at(spec, off):
+    """从 spec[blobs] 里取绝对偏移 off 处的 blob; 非 blob 起点返回 None。"""
+    if not off:
+        return None
+    bs = SKELETON_HI + len(spec["tail"])
+    i = off - bs
+    b = spec["blobs"]
+    if i < 0 or i + 28 > len(b) or b[i:i + 4] != b"DXBC":
+        return None
+    return bytes(b[i:i + struct.unpack_from("<I", b, i + 24)[0]])
+
+
+def _counts_for(ps_blob, vs_blob):
+    """(record_counts dict, uav_only) ; 取不到 RDEF 返回 (None, False)。"""
+    pres = rdef_resources(ps_blob) if ps_blob else None
+    vres = rdef_resources(vs_blob) if vs_blob else None
+    if pres is None and vres is None:
+        return None, False
+    c = record_counts(pres, vres)
+    uav = bool(pres) and bool(pres[2]) and pres[2] <= rdef_uav_names(ps_blob)
+    return c, uav
+
+
+def slot_specs(data):
+    """每槽的语义 spec(非空槽): 程序/大小/名字指针/绑定指针/计数。"""
+    data = bytes(data)
+    img = MmtrImage.from_bytes(data)
+    out = []
+    for i, r in enumerate(MmtrModel(data).parse_records()):
+        if r.is_empty and not r.vs_blob and not r.cs_blob:
+            continue
+        base = REC_LO + i * REC_SIZE
+        out.append({
+            "slot": i, "ps": r.blob_off, "vs": r.vs_blob, "cs": r.cs_blob,
+            "ps_size": r.blob_size, "vs_size": img.rec_field(i, 0x88),
+            "name_ptr": r.name_ptr,
+            "bind": (r.cb[0], r.cb[1], r.smp[0], r.smp[1], r.tex[0], r.tex[1]),
+            "counts": {k: img.rec_field(i, fo) for k, fo, _m in _COUNT_FIELDS},
+            "cc": img.buf[base + 0xCC],
+        })
+    return out
+
+
+def _semantic_positions(slots):
+    """语义字段覆盖的绝对字节位(用于从全量内容里扣除出"残差")。"""
+    pos = set()
+    for s in slots:
+        base = REC_LO + s["slot"] * REC_SIZE
+        for fo in _SLOT_SEMANTIC_FIELDS:
+            for t in range(4):
+                pos.add(base + fo + t)
+        pos.add(base + 0xCC)
+    return pos
+
+
+def extract(data):
+    """提取合成 spec: skeleton + tail + blobs + string_ptr + slots(语义) + residual(其余内容字段)。"""
+    data = bytes(data)
+    img = MmtrImage.from_bytes(data)
+    full = {p: struct.unpack_from("<I", img.buf, p)[0] for p in content_positions()}
+    slots = slot_specs(data)
+    sem = _semantic_positions(slots)
+    return {"skeleton": MmtrTemplate(data).skeleton, "tail": img.tail, "blobs": img.blobs,
+            "string_ptr": struct.unpack_from("<I", img.buf, 0x10)[0],
+            "slots": slots, "residual": {p: v for p, v in full.items() if p not in sem}}
+
+
+def instantiate(spec, program_of=None, recompute_counts=False):
+    """由合成 spec 组装 mmtr。
+
+    program_of: {slot: {"ps"/"vs"/"cs": blob 绝对偏移}} —— 覆盖该槽程序(合成时接入我们的 PS)。
+    recompute_counts: True 时按 RDEF **重算**计数(UAV-only PS 如 Pick 除外, 退回 spec)。
+    """
+    head = bytearray(spec["skeleton"])
+    struct.pack_into("<I", head, 0x08, SKELETON_HI + len(spec["tail"]))
+    struct.pack_into("<I", head, 0x10, spec["string_ptr"])
+    for p, v in spec["residual"].items():
+        struct.pack_into("<I", head, p, v)
+    prog_of = program_of or {}
+    for s in spec["slots"]:
+        slot = s["slot"]
+        base = REC_LO + slot * REC_SIZE
+        ps = prog_of.get(slot, {}).get("ps", s["ps"])
+        vs = prog_of.get(slot, {}).get("vs", s["vs"])
+        cs = prog_of.get(slot, {}).get("cs", s["cs"])
+        # 指派新程序时, 自动同步其大小(否则 +0x9c/+0x88 与实际不符)
+        ps_size = s["ps_size"]
+        vs_size = s["vs_size"]
+        if "ps" in prog_of.get(slot, {}):
+            b = _blob_at(spec, ps)
+            if b is not None:
+                ps_size = len(b)
+        if "vs" in prog_of.get(slot, {}):
+            b = _blob_at(spec, vs)
+            if b is not None:
+                vs_size = len(b)
+        struct.pack_into("<I", head, base + 0x00, ps)
+        struct.pack_into("<I", head, base - 0x28, vs)
+        struct.pack_into("<I", head, base - 0x20, vs)
+        struct.pack_into("<I", head, base + 0x08, cs)
+        struct.pack_into("<I", head, base + 0x9C, ps_size)
+        struct.pack_into("<I", head, base + 0x88, vs_size)
+        struct.pack_into("<I", head, base + 0x8C, vs_size)
+        struct.pack_into("<I", head, base + 0xD8, s["name_ptr"])
+        for fo, v in zip((0x38, 0x40, 0x48, 0x50, 0x58, 0x60), s["bind"]):
+            struct.pack_into("<I", head, base + fo, v)
+        counts, cc = s["counts"], s["cc"]
+        if recompute_counts:
+            c, uav = _counts_for(_blob_at(spec, ps), _blob_at(spec, vs))
+            if c is not None and not uav:
+                counts = {k: c[k] for k, _fo, _m in _COUNT_FIELDS}
+                cc = c["cc"] & 0xFF
+        for k, fo, mask in _COUNT_FIELDS:
+            v = counts[k]
+            if mask is not None:
+                cur = struct.unpack_from("<I", head, base + fo)[0]
+                v = (cur & ~mask & 0xFFFFFFFF) | (v & mask)
+            struct.pack_into("<I", head, base + fo, v)
+        head[base + 0xCC] = cc & 0xFF
+    return bytes(head) + bytes(spec["tail"]) + bytes(spec["blobs"])
+
+
+def roundtrip_spec(data):
+    """extract -> instantiate 是否逐字节回到原文件(头部内容可从语义 spec 完整重构)。"""
+    return instantiate(extract(data)) == bytes(data)
+
+
 def report(data):
     """打印合成基座自检: 分离可逆 / 版本指纹 / 记录计数校验。"""
     import hashlib
@@ -124,6 +258,7 @@ def report(data):
     print("file size=%d blobs=%d" % (len(data), B.blob_count(data)))
     print("  分离可逆(split->join==原文件): %s" % roundtrip(data))
     print("  版本骨架 md5: %s" % hashlib.md5(MmtrTemplate(data).skeleton).hexdigest())
+    print("  语义 spec 往返(extract->instantiate): %s" % roundtrip_spec(data))
     bad, exc = verify_record_counts(data)
     print("  记录计数按 RDEF 重算: 真不匹配 %d 处; 已知例外(Pick) %d 处" % (len(bad), len(exc)))
     for it in bad[:10]:
