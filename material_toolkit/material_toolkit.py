@@ -24,6 +24,7 @@
   python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
   python material_toolkit.py mat-synth  <in.mmtr> [other.mmtr]
   python material_toolkit.py mat-rebuild <in.mmtr> -o <out.mmtr>
+  python material_toolkit.py mat-self   <base.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_bare] [--pass Deferred]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -69,6 +70,7 @@ from lib import material_pass as mpass  # noqa: E402
 from lib import mmtr_standard as std  # noqa: E402
 from lib import mmtr_synth as synth  # noqa: E402
 from lib import mmtr_tail as mtail  # noqa: E402
+from lib import mmtr_selfgen as selfgen  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -299,6 +301,20 @@ def main():
         print(f"OK: mat-rebuild {src} -> {out} ({len(data)}=={len(new)} bytes) "
               f"槽={n} 组不匹配={len(bad)}")
         _selfcheck_mmtr(new)
+    elif cmd == "mat-self":
+        src = a[0]
+        mat = a[1] if len(a) > 1 and not a[1].startswith("-") else None
+        out = a[a.index("-o") + 1] if "-o" in a else "self.mmtr.1808168797"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_bare"
+        pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
+        material_src = open(mat, encoding="utf-8").read() if mat else None
+        data, rep = selfgen.build(open(src, "rb").read(), material_src, pname, tpl)
+        open(out, "wb").write(data)
+        print(f"OK: mat-self {src} + {mat or '(默认材质)'} -> {out} "
+              f"({len(data)} bytes, 零声明 PS {rep['ps_size']}B) 规范化尾段={rep['canonical']}")
+        print(f"  替换={rep['replaced']}  跳过={rep['skipped']}  坏={rep['bad']}  "
+              f"重算计数槽={rep['recounted']}")
+        _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)
