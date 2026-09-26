@@ -82,6 +82,36 @@ def rdef_resources(blob):
         return None
 
 
+def rdef_bind_order(blob):
+    """RDEF bound resources 按**数组顺序**分桶 -> {"cb":[name...], "smp":[...], "tex":[...]} 保序。
+
+    分桶按 D3D11_SIT type: cb=0, smp=3, tex=SRV 类 {1(tbuffer),2(texture),5(structured),
+    7(byteaddress)}; **UAV 类 {4,6,8,9,10,11} 丢弃**(尾段池只收 SRV, 不收 UAV)。
+    用途: mmtr 尾段"绑定组"(池名列表)可由 PS/VS 的 RDEF 派生 —— 规则 = VS序 ++ PS序 按类去重
+    (见 analysis/pass_matrix.md §10)。无 RDEF 返回 None。
+    """
+    r = _rdef_of(blob)
+    if r is None:
+        return None
+    try:
+        _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+    except Exception:
+        return None
+    out = {"cb": [], "smp": [], "tex": []}
+    for k in range(n_br):
+        p = br_off + k * 32
+        nm = _cstr(r, _u32(r, p))
+        t = _u32(r, p + 4)
+        if t == 0:
+            out["cb"].append(nm)
+        elif t == 3:
+            out["smp"].append(nm)
+        elif t in (1, 2, 5, 7):          # SRV 类(tbuffer/texture/structured/byteaddress)
+            out["tex"].append(nm)
+        # 其余(UAV 4/6/8/9/10/11)不入池
+    return out
+
+
 def rdef_uav_names(blob):
     """RDEF 里 **UAV** 的名字集合 (bound resource type ∈ {4,6,7,8,9,10} = RWTYPED/
     RWSTRUCTURED/RWBYTEADDRESS/APPEND/CONSUME/RWSTRUCTURED_WITH_COUNTER)。

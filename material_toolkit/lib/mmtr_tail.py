@@ -276,6 +276,98 @@ def build_desc(programs, head=bytes(4)):
     return bytes(out), placement
 
 
+# --------------------------------------------------------------- 绑定组: 由 RDEF 派生(验证)
+# 实测规则(analysis/pass_matrix.md §10): 记录的"绑定组"(池/表名列表) = 
+#   VS 资源(RDEF 数组序) ++ PS 资源(RDEF 数组序), 按类(cb/smp/tex)去重。
+# 这使尾段的"绑定层"可由程序(blob)的 RDEF 完全派生。
+
+def _dedup(seq):
+    seen, out = set(), []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def derive_group(vs_blob, ps_blob):
+    """由 VS/PS 的 RDEF 派生绑定组: {kind: [name...]}(VS序 ++ PS序 按类去重)。
+
+    注: 尾段池只收 **SRV**(含 STRUCTURED/BYTEADDRESS), **不含 UAV**(如 Pick 的
+    `PickAddressList*`); 去 UAV 已由 `rdef.rdef_bind_order` 按 type 处理。
+    无 RDEF 的程序当空。返回 {"cb": [...], "smp": [...], "tex": [...]}。
+    """
+    try:
+        from .rdef import rdef_bind_order
+    except ImportError:
+        from rdef import rdef_bind_order
+    empty = {"cb": [], "smp": [], "tex": []}
+    vb = (rdef_bind_order(vs_blob) if vs_blob else None) or empty
+    pb = (rdef_bind_order(ps_blob) if ps_blob else None) or empty
+    return {k: _dedup(vb[k] + pb[k]) for k in ("cb", "smp", "tex")}
+
+
+def record_group(data, slot, tail=None):
+    """读**本题(donor)**中某记录的绑定组(从尾段池/表切片取名字)。
+
+    tail 传已经 decode 的 TailModel(批量时复用, 避免重复解析)。
+    返回 {"cb": [...], "smp": [...], "tex": [...]}; 空槽返回全空。用于与 `derive_group` 比对。
+    """
+    try:
+        from .mmtr_build import MmtrImage, REC_LO, REC_SIZE
+    except ImportError:
+        from mmtr_build import MmtrImage, REC_LO, REC_SIZE
+    t = tail if tail is not None else TailModel.decode(data)
+    img = MmtrImage.from_bytes(data)
+    bs = t.boundaries
+
+    def names(off, n, is_cb):
+        base = bs["cbuffer"] if is_cb else bs["pool"]
+        step = 32 if is_cb else 16
+        k = off - base
+        if not off or k < 0 or k % step:
+            return []
+        if is_cb:
+            return [t.cbuffer_entries[(k // 32) + q]["name"] for q in range(n)
+                    if (k // 32) + q < len(t.cbuffer_entries)]
+        return [t.pool_entries[(k // 16) + q][3] for q in range(n)
+                if (k // 16) + q < len(t.pool_entries)]
+
+    c6 = (img.rec_field(slot, 0xC4) >> 16) & 0xFF
+    nsmp = img.rec_field(slot, 0xB0) >> 16
+    ntex = img.buf[REC_LO + slot * REC_SIZE + 0xCC]
+    return {"cb": names(img.rec_field(slot, 0x40), c6, True),
+            "smp": names(img.rec_field(slot, 0x50), nsmp, False),
+            "tex": names(img.rec_field(slot, 0x60), ntex, False)}
+
+
+def check_groups(data):
+    """校验: 每条非空记录的【池切片】 == 由 PS/VS RDEF 派生的绑定组。
+
+    返回 (n_checked, mismatches); mismatches = [(slot, kind, donor_list, derived_list), ...]。
+    这是"尾段绑定层可由 RDEF 派生"的硬验证。
+    """
+    try:
+        from .mmtr_model import MmtrModel
+        from .mmtr_build import MmtrImage
+    except ImportError:
+        from mmtr_model import MmtrModel
+        from mmtr_build import MmtrImage
+    img = MmtrImage.from_bytes(data)
+    tail = TailModel.decode(data)
+    n, bad = 0, []
+    for slot, r in enumerate(MmtrModel(data).parse_records()):
+        if r.is_empty and not r.vs_blob:
+            continue
+        n += 1
+        got = record_group(data, slot, tail)
+        want = derive_group(img.blob_at(r.vs_blob), img.blob_at(r.blob_off))
+        for kind in ("cb", "smp", "tex"):
+            if got[kind] != want[kind]:
+                bad.append((slot, kind, got[kind], want[kind]))
+    return n, bad
+
+
 if __name__ == "__main__":
     import sys
     d = open(sys.argv[1], "rb").read()
