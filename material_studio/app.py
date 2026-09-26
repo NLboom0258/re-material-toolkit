@@ -2251,14 +2251,26 @@ class AssembleDialog(QDialog):
 _HLSL_ERR_RE = re.compile(r"\((\d+),(\d+)(?:-(\d+))?\):\s*(error|warning)\s+(\w+):\s*(.*)")
 
 
-def _pass_template_names():
-    """可用的 pass 模板名(扫描 pass_templates/, 排除默认材质与 *_instance)。"""
+def _pass_of_template(tmpl):
+    """模板名 -> 目标 pass 名(deferred_* -> Deferred / forward_* -> Forward）。"""
+    return "Forward" if (tmpl or "").startswith("forward") else "Deferred"
+
+
+def _pass_template_names(shading=None):
+    """可用的 pass 模板名(扫描 pass_templates/, 排除默认材质与 *_instance)。
+
+    shading 给 "deferred"/"forward" 时只返回对应族(模板须与着色类型对齐)。
+    """
     import glob
     d = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates")
     out = []
     for p in sorted(glob.glob(os.path.join(d, "*.hlsl"))):
         n = os.path.basename(p)[:-5]
         if n.startswith("mat_default_") or n.endswith("_instance"):
+            continue
+        if shading == "forward" and not n.startswith("forward"):
+            continue
+        if shading == "deferred" and not n.startswith("deferred"):
             continue
         out.append(n)
     return out
@@ -2293,7 +2305,7 @@ class MaterialSystemPanel(QWidget):
         for label, val in (("延迟", "deferred"), ("前向", "forward")):
             self.cmb_shading.addItem(label, val)
         self.cmb_tmpl = NoWheelComboBox()
-        for t in _pass_template_names():
+        for t in _pass_template_names(self.cmb_shading.currentData()):
             self.cmb_tmpl.addItem(t, t)
         self.ed_mmtr = QLineEdit()
         btn_mmtr = QPushButton("选择…")
@@ -2312,8 +2324,9 @@ class MaterialSystemPanel(QWidget):
         form.addRow("材质名", self.ed_name)
         left.addLayout(form)
 
-        for c in (self.cmb_light, self.cmb_shading, self.cmb_tmpl):
+        for c in (self.cmb_light, self.cmb_tmpl):
             c.currentIndexChanged.connect(self._on_option_changed)
+        self.cmb_shading.currentIndexChanged.connect(self._on_shading_changed)
         self.ed_name.textChanged.connect(self._on_name_changed)
 
         btns = QHBoxLayout()
@@ -2379,11 +2392,14 @@ class MaterialSystemPanel(QWidget):
         self._loading = True
         try:
             for cmb, val in ((self.cmb_light, self.asset.lighting_mode),
-                             (self.cmb_shading, self.asset.shading_type),
-                             (self.cmb_tmpl, self.asset.template.get("pass_template"))):
+                             (self.cmb_shading, self.asset.shading_type)):
                 i = cmb.findData(val)
                 if i >= 0:
                     cmb.setCurrentIndex(i)
+            self._repopulate_templates()
+            i = self.cmb_tmpl.findData(self.asset.template.get("pass_template"))
+            if i >= 0:
+                self.cmb_tmpl.setCurrentIndex(i)
             self.ed_mmtr.setText(self.asset.template.get("mmtr", ""))
             self.ed_name.setText(self.asset.name)
             if self.ed_src.toPlainText() != self.asset.shading_source:
@@ -2396,6 +2412,24 @@ class MaterialSystemPanel(QWidget):
         if self._loading:
             return
         self.refresh_info()
+
+    def _repopulate_templates(self):
+        """按当前着色类型过滤模板下拉(模板须与着色类型对齐）。"""
+        cur = self.cmb_tmpl.currentData()
+        self.cmb_tmpl.blockSignals(True)
+        self.cmb_tmpl.clear()
+        for t in _pass_template_names(self.cmb_shading.currentData()):
+            self.cmb_tmpl.addItem(t, t)
+        i = self.cmb_tmpl.findData(cur)
+        if i >= 0:
+            self.cmb_tmpl.setCurrentIndex(i)
+        self.cmb_tmpl.blockSignals(False)
+
+    def _on_shading_changed(self, *_):
+        if self._loading:
+            return
+        self._repopulate_templates()
+        self._on_option_changed()
 
     def _on_name_changed(self, *_):
         if self._loading:
@@ -2416,15 +2450,21 @@ class MaterialSystemPanel(QWidget):
             root.addChild(it)
         self.tree_info.addTopLevelItem(root)
 
-        so = QTreeWidgetItem(["语义输出 (表3a)", "", ""])
-        for n, t, tgt in masset.SEMANTIC_OUTPUTS:
-            so.addChild(QTreeWidgetItem([n, t, tgt]))
-        self.tree_info.addTopLevelItem(so)
-
-        mx = QTreeWidgetItem(["互斥(共用 GBuffer 通道)", "", ""])
-        for a, b, ch in masset.MUTEX:
-            mx.addChild(QTreeWidgetItem([a, b, ch]))
-        self.tree_info.addTopLevelItem(mx)
+        tmpl_now = self.asset.template.get("pass_template") or "deferred_env"
+        if tmpl_now.startswith("deferred"):
+            so = QTreeWidgetItem(["语义输出 (表3a · GBuffer 落点)", "", ""])
+            for n, t, tgt in masset.SEMANTIC_OUTPUTS:
+                so.addChild(QTreeWidgetItem([n, t, tgt]))
+            self.tree_info.addTopLevelItem(so)
+            mx = QTreeWidgetItem(["互斥(共用 GBuffer 通道)", "", ""])
+            for a, b, ch in masset.MUTEX:
+                mx.addChild(QTreeWidgetItem([a, b, ch]))
+            self.tree_info.addTopLevelItem(mx)
+        else:
+            so = QTreeWidgetItem(["输出 (模板 MaterialOutput)", "", "逐字段=最终输出项"])
+            for typ, nm, desc in _template_struct_fields(tmpl_now, "MaterialOutput"):
+                so.addChild(QTreeWidgetItem([nm, typ, desc]))
+            self.tree_info.addTopLevelItem(so)
         self.tree_info.expandAll()
         fit_columns(self.tree_info, (0, 1, 2))
         self.refresh_inputs()
@@ -2444,15 +2484,17 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setStyleSheet("color:#1a7f37")
 
     def _base_iface(self):
-        """基础 mmtr 的 Deferred PS 接口(按路径缓存, 避免重复反汇编拖慢 GUI)。"""
+        """基础 mmtr 的**目标 pass**(由当前模板推出)PS 接口; 按 (路径, pass) 缓存。"""
         base = self.ed_mmtr.text().strip()
-        if base != getattr(self, "_iface_path", None):
-            self._iface_path = base
+        pass_name = _pass_of_template(self.cmb_tmpl.currentData())
+        key = (base, pass_name)
+        if key != getattr(self, "_iface_key", None):
+            self._iface_key = key
             self._iface_cache = None
             if base and os.path.isfile(base):
                 try:
                     data = open(base, "rb").read()
-                    idx = mgen.pick_iface_ps(data, "Deferred")
+                    idx = mgen.pick_iface_ps(data, pass_name)
                     self._iface_cache = (miface.iface_from_dxbc(extract_blob(data, idx))
                                          if idx is not None else None)
                 except Exception:  # noqa: BLE001
@@ -2520,7 +2562,8 @@ class MaterialSystemPanel(QWidget):
     def refresh_inputs(self):
         self.tree_inputs.clear()
         # 1) pass 输入(基础 mmtr 的目标 pass PS 接口)
-        root = QTreeWidgetItem(["pass 输入 (基础 mmtr 的 Deferred PS)", "", ""])
+        pass_name = _pass_of_template(self.cmb_tmpl.currentData())
+        root = QTreeWidgetItem(["pass 输入 (基础 mmtr 的 %s PS)" % pass_name, "", ""])
         self.tree_inputs.addTopLevelItem(root)
         base = self.ed_mmtr.text().strip()
         iface = self._base_iface()

@@ -8,7 +8,7 @@
 //   INTERPOLATOR1 = (uv0.y, 切线.xyz)
 //   INTERPOLATOR2 = (切线w符号, 世界坐标.xyz)
 //   (另有 SV_IsFrontFace; 本 MVP 暂不暴露, 以保持输入签名兼容所有变体)
-// 输出: 单张 SV_Target0 = 最终颜色(此处取 m.Emissive)。
+// 输出: 单张 SV_Target0 = 最终颜色(取 m.Color)。
 // 组装方式: 本文件 + 用户的 MaterialMain(插入到下方标记行处)。
 // ============================================================================
 
@@ -40,16 +40,10 @@ struct PSIn
     float4 v3    : INTERPOLATOR2;  // reg3  x=切线w符号, yzw=世界坐标
 };
 
-// ---- 材质语义输出(表3a; 由 MaterialMain 赋值) ----
+// ---- 材质输出(前向 = 最终颜色; 由 MaterialMain 赋值) ----
 struct MaterialOutput
 {
-    float3 BaseColor;
-    float  Metallic;
-    float  Roughness;
-    float3 NormalTS;
-    float3 Emissive;       // 前向: 最终输出色(o0)
-    float  Occlusion;
-    float  Translucency;
+    float3 Color;          // 最终输出色(o0)
 };
 
 // ---- 系统预制输入(前向: 已算好, 材质可直接用; 见 GUI「输入」页) ----
@@ -101,6 +95,6 @@ float4 main(PSIn i) : SV_Target0
     MaterialOutput m;
     MaterialMain(mi, m);
 
-    // ---- 3. 输出(前向 = 最终颜色; 取 m.Emissive) ----
-    return float4(m.Emissive, 1.0);
+    // ---- 3. 输出(前向 = 最终颜色) ----
+    return float4(m.Color, 1.0);
 }
