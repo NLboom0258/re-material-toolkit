@@ -27,6 +27,9 @@ except ImportError:  # 允许脚本直接 import
     from mmtr_build import MmtrTemplate, SKELETON_HI  # noqa: F401
 
 VERSION = 0x01100004
+# 引擎 post 表区(InputLayout 元素表等; PT 指针指向此处)。
+# ⚠ skeleton 把"记录字段"清零, 而槽 1081/1082 的记录字段正落在该区 ⇒ 必须单独留存原值。
+POST_LO = 0x46210
 _DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "presets", "v%08x" % VERSION)
 
@@ -59,6 +62,10 @@ def pt_path():
     return os.path.join(_DIR, "pt.bin")
 
 
+def post_path():
+    return os.path.join(_DIR, "post.bin")
+
+
 def info_path():
     return os.path.join(_DIR, "info.json")
 
@@ -83,6 +90,12 @@ def desc():
 
 def pt():
     with open(pt_path(), "rb") as f:
+        return f.read()
+
+
+def post():
+    """post 表区原值 [POST_LO, SKELETON_HI)(skeleton 里该区被记录栅格清零)。"""
+    with open(post_path(), "rb") as f:
         return f.read()
 
 
@@ -117,6 +130,9 @@ def extract(ref_data, outdir=None):
     # 程序表(PT) 区(5×264B; 内容含指针, 构建时需重定位)
     with open(os.path.join(outdir, "pt.bin"), "wb") as f:
         f.write(ref_data[0x14:0x14 + 5 * 264])
+    # post 表区原值(skeleton 会把它当作"记录字段"清零 ⇒ 单独留存)
+    with open(os.path.join(outdir, "post.bin"), "wb") as f:
+        f.write(ref_data[POST_LO:SKELETON_HI])
     # 参考 blob 起点 -> md5(供按内容重定位 PT 里的 blob 指针)
     bmap, o = {}, int(tail.boundaries["blob_start"])
     while o + 28 <= len(ref_data) and ref_data[o:o + 4] == b"DXBC":

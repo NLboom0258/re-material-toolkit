@@ -36,6 +36,9 @@ except ImportError:  # 允许脚本直接 import
 
 _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
 
+# 引擎 post 表区: InputLayout 元素表等(PT 指针指向此处); 记录栅格尾部与其交叠。
+POST_LO = 0x46210
+
 
 def _u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
@@ -284,12 +287,20 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
     bm = {int(k): v for k, v in P.blobmap().items()}
     rb = info["bases"]
     ptn = info.get("ptnames") or []
+    pt_miss, pt_nomap = [], []
     for off in range(0, len(pt) - 3, 4):
         v = _u32(pt, off)
         if not v:
             continue
         if v in bm:
-            nv = off_of.get(bm[v], 0)
+            if bm[v] in off_of:
+                nv = off_of[bm[v]]
+            else:
+                nv = 0
+                pt_miss.append((off, v, bm[v]))
+        elif rb["blob_start"] <= v < (rb["blob_start"] + 0x200000):
+            nv = v
+            pt_nomap.append((off, v))
         elif rb["desc"] <= v < rb["string"]:
             nv = desc_base + (v - rb["desc"])
         elif rb["string"] <= v < rb["blob_start"]:
@@ -311,6 +322,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         struct.pack_into("<I", pt, off, nv)
     head[0x14:0x14 + len(pt)] = pt
 
+    # 7b) 保护尾部 post 表: 记录栅格(槽 1082 的 base-0x28)会与引擎的 InputLayout
+    #     元素表区 [0x46210,0x46350) 交叠 —— 必须从骨架原样恢复, 否则元素数被覆写为 0。
+    head[POST_LO:SKELETON_HI] = P.post()
+
     # 8) 容器头
     struct.pack_into("<I", head, 0x08, blob_start)
     struct.pack_into("<I", head, 0x10, str_base + str_rel[info.get("str10") or ""])
@@ -319,4 +334,5 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         "size": len(out), "blob_start": blob_start, "n_blobs": len(off_of),
         "ps_size": len(ps_blob), "records": len(slots),
         "groups": len(order), "str10": info.get("str10"),
+        "pt_miss": pt_miss, "pt_nomap": pt_nomap,
     }
