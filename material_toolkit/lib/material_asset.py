@@ -5,10 +5,9 @@
 - pass 模板(系统)调用材质函数并做各 pass 的打包/输出;
 - 本模块只做【模型 + JSON + 校验】, 不含编译/装配(M2/M3)。
 
-两个正交选项:
-- lighting_mode: ``default``(引擎固定光照, 材质只给 PBR) / ``custom``(用户自写光照);
+两个**正交**选项(可任意组合, 无非法组合):
+- lighting_mode: ``default``(材质只给 PBR; 光照/打包由模板按引擎逻辑做) / ``custom``(材质**直控输出**: 前向=写最终色、延迟=写原始 GBuffer; 最终输出前的后处理也交给材质);
 - shading_type:  ``deferred`` / ``forward``。
-MVP 仅实现 (default, deferred)。
 """
 import json
 
@@ -17,10 +16,19 @@ FORMAT = "mmat/1"
 LIGHTING_MODES = ("default", "custom")
 SHADING_TYPES = ("deferred", "forward")
 
-# 非法组合 -> 原因(仿 UE: 允许设置, 但报错说明)
-ILLEGAL_COMBOS = {
-    ("custom", "deferred"): "自定义光照在延迟着色下不可用(延迟 pass 拿不到光照输入)——请改用前向着色",
+# custom 下“输出/后处理”由材质控制的契约(shading_type -> [(名, 说明)])
+CUSTOM_OUTPUTS = {
+    "forward": [("Color", "最终输出色(o0; 雾/曝光等后处理也由材质写)")],
+    "deferred": [("RT0", "原始 GBuffer RT0(Emissive)"),
+                 ("RT1", "原始 GBuffer RT1(BaseColorMetallic)"),
+                 ("RT2", "原始 GBuffer RT2(NormalRoughnessMisc)"),
+                 ("RT3", "原始 GBuffer RT3(OcclusionVelocitySubSurface)")],
 }
+# 最终输出前的“后处理”步骤(custom 下交给材质; AA 动量/速度固定, 不暴露)
+POST_EXPOSED = [
+    ("EmissiveScale", "自发光曝光/detone 缩放(延迟)"),
+    ("Fog", "雾/吸收(前向)"),
+]
 
 # 表 3a: 语义输出。基准落点 = 默认光照 + 延迟(GBuffer)。(name, type, target)
 SEMANTIC_OUTPUTS = [
@@ -93,14 +101,18 @@ class MaterialAsset(object):
         return (self.lighting_mode, self.shading_type)
 
     def combo_problem(self):
-        """返回非法原因(合法则 None)。"""
-        return ILLEGAL_COMBOS.get(self.combo())
+        """组合是否非法。两选项正交, **无非法组合** ⇒ 恒 None。"""
+        return None
 
     def output_specs(self):
-        """当前选项下的语义输出表。MVP 只有 (default, deferred)。"""
-        if self.combo() == ("default", "deferred"):
-            return list(SEMANTIC_OUTPUTS)
-        return []   # 其它组合(前向/自定义)尚未实现
+        """当前选项下的输出契约。default → 表3a(PBR 语义); custom → 直控输出。"""
+        if self.lighting_mode == "custom":
+            return list(CUSTOM_OUTPUTS[self.shading_type])
+        return list(SEMANTIC_OUTPUTS)
+
+    def post_steps(self):
+        """custom 下交给材质的“最终输出前后处理”步骤(default 下由模板/引擎做)。"""
+        return list(POST_EXPOSED) if self.lighting_mode == "custom" else []
 
     # ---- 校验 ----
     def validate(self):
@@ -110,9 +122,6 @@ class MaterialAsset(object):
             out.append(("error", "未知 lighting_mode: %r" % self.lighting_mode))
         if self.shading_type not in SHADING_TYPES:
             out.append(("error", "未知 shading_type: %r" % self.shading_type))
-        prob = self.combo_problem()
-        if prob:
-            out.append(("error", prob))
         if not self.template.get("mmtr"):
             out.append(("warn", "未指定模板 mmtr(生成时需要)"))
         for p in self.parameters:

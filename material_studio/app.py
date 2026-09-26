@@ -2451,7 +2451,16 @@ class MaterialSystemPanel(QWidget):
         self.tree_info.addTopLevelItem(root)
 
         tmpl_now = self.asset.template.get("pass_template") or "deferred_env"
-        if tmpl_now.startswith("deferred"):
+        if self.asset.lighting_mode == "custom":
+            so = QTreeWidgetItem(["输出 (自定义光照 · 直控)", "", ""])
+            for n, desc in masset.CUSTOM_OUTPUTS.get(self.asset.shading_type, []):
+                so.addChild(QTreeWidgetItem([n, "", desc]))
+            self.tree_info.addTopLevelItem(so)
+            po = QTreeWidgetItem(["后处理 (交给材质)", "", ""])
+            for n, desc in masset.POST_EXPOSED:
+                po.addChild(QTreeWidgetItem([n, "", desc]))
+            self.tree_info.addTopLevelItem(po)
+        elif tmpl_now.startswith("deferred"):
             so = QTreeWidgetItem(["语义输出 (表3a · GBuffer 落点)", "", ""])
             for n, t, tgt in masset.SEMANTIC_OUTPUTS:
                 so.addChild(QTreeWidgetItem([n, t, tgt]))
