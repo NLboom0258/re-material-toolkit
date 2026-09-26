@@ -20,6 +20,8 @@
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
   python material_toolkit.py mat-gen    <template.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
+  python material_toolkit.py mat-std    <in.mmtr> [other.mmtr]
+  python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -61,6 +63,8 @@ from lib import mmtr_blobs as B  # noqa: E402
 from lib import mmtr_assemble as aset  # noqa: E402
 from lib import material_gen as mgen  # noqa: E402
 from lib import material_instance as minst  # noqa: E402
+from lib import material_pass as mpass  # noqa: E402
+from lib import mmtr_standard as std  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -248,6 +252,29 @@ def main():
               f"({len(data)} bytes, PS {rep['ps_size']}B)")
         print(f"  替换 blobs={rep['replaced']}  实例(cbuffer/per-instance)={rep['replaced_instance']}  "
               f"跳过(签名不符)={rep['skipped']}  坏={rep['bad']}")
+        _selfcheck_mmtr(data)
+    elif cmd == "mat-std":
+        data = open(a[0], "rb").read()
+        other = (open(a[1], "rb").read()
+                 if len(a) > 1 and not a[1].startswith("-") else None)
+        std.report(data, other)
+    elif cmd == "mat-skeleton":
+        src = a[0]
+        mat = a[1] if len(a) > 1 and not a[1].startswith("-") else None
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr.1808168797"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_env"
+        pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
+        material_src = open(mat, encoding="utf-8").read() if mat else None
+        ps, err = mpass.compile_shading(material_src, tpl)
+        if err:
+            print("编译失败:\n%s" % err)
+            sys.exit(1)
+        data, rep = std.generate(open(src, "rb").read(), ps, pname)
+        open(out, "wb").write(data)
+        print(f"OK: mat-skeleton {src} + {mat or '(默认材质)'} -> {out} "
+              f"({len(data)} bytes, PS {rep['ps_size']}B)")
+        print(f"  目标={rep['targets']}  替换={rep['replaced']}  跳过={rep['skipped']}  "
+              f"坏={rep['bad']}  标准集保留={rep['standard_preserved']}")
         _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
