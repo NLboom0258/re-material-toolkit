@@ -442,6 +442,211 @@ def check_groups(data):
     return n, bad
 
 
+# --------------------------------------------------------------- 规范合成(①-b)
+def rebuild_canonical(data):
+    """规范重建尾段: pool/cbuffer/param/string 按(组)去重重建 + desc 原样平移, 并重指
+    记录/程序表 的尾部指针。**头部尺寸不变**(尾段 padding 到原长, 避开 blob 指针重映射)。
+
+    仅处理 version `0x01100004` 布局; 无法安全重建时返回 None。
+    组 = 一个"绑定 slice"(cb 表切片 + smp 池切片 + tex 池切片), 按指针三元组归并;
+    同一组只发一套。strings 按引用去重。
+    """
+    data = bytes(data)
+    try:
+        t = TailModel.decode(data)
+    except ValueError:
+        return None
+    try:
+        from .mmtr_build import PT_LO, PT_N, PT_SIZE, REC_LO, REC_N, REC_SIZE
+    except ImportError:
+        from mmtr_build import PT_LO, PT_N, PT_SIZE, REC_LO, REC_N, REC_SIZE
+    bs = t.boundaries
+    old_bs = bs["blob_start"]
+    old_tail_len = old_bs - SKELETON_HI
+    desc = bytes(data[bs["desc"]:bs["string"]])
+    old_desc = bs["desc"]
+
+    pool_by_off = {e[0]: e for e in t.pool_entries}
+    cb_by_off = {e["off"]: e for e in t.cbuffer_entries}
+    pa_by_off = {e[0]: e for e in t.param_entries}
+
+    def u32(o):
+        return struct.unpack_from("<I", data, o)[0]
+
+    def cb_defs(ptr, n):
+        out = []
+        for k in range(n):
+            e = cb_by_off.get(ptr + 32 * k)
+            if e is None:
+                return None
+            mem, mo = [], e["members_off"]
+            for j in range(e["count"]):
+                pe = pa_by_off.get(mo + 16 * j)
+                if pe is None:
+                    break
+                mem.append((pe[5], pe[3], pe[4]))
+            out.append((e["name"], e["size"], e["count"], tuple(mem)))
+        return out
+
+    def pool_names(ptr, n):
+        out = []
+        for k in range(n):
+            e = pool_by_off.get(ptr + 16 * k)
+            if e is None:
+                return None
+            out.append(e[3])
+        return out
+
+    names, nset = [], set()
+
+    def use(nm):
+        if nm and nm not in nset:
+            nset.add(nm)
+            names.append(nm)
+
+    def name_at(v):
+        if bs["string"] <= v < old_bs:
+            return _ascii(data, v)
+        return None
+
+    slots = [(PT_LO + i * PT_SIZE, "pt", i) for i in range(PT_N)] + \
+            [(REC_LO + i * REC_SIZE, "rec", i) for i in range(REC_N)]
+    groups, gorder, slot_gk = {}, [], {}
+    for base, kind, i in slots:
+        for fo in (0xD8, 0x104):
+            use(name_at(u32(base + fo)))
+        cbt, smpt, text = u32(base + 0x40), u32(base + 0x50), u32(base + 0x60)
+        if not (cbt or smpt or text):
+            continue
+        c6 = (u32(base + 0xC4) >> 16) & 0xFF
+        nsmp = u32(base + 0xB0) >> 16
+        ntex = data[base + 0xCC]
+        key = (cbt, smpt, text, nsmp, ntex, c6)
+        if key not in groups:
+            g = {"cb": cb_defs(cbt, c6) if cbt else [],
+                 "smp": pool_names(smpt, nsmp) if smpt else [],
+                 "tex": pool_names(text, ntex) if text else []}
+            if g["cb"] is None or g["smp"] is None or g["tex"] is None:
+                return None
+            groups[key] = g
+            gorder.append(key)
+            for d in g["cb"]:
+                use(d[0])
+                for (mn, _ms, _mo) in d[3]:
+                    use(mn)
+            for nm in g["smp"] + g["tex"]:
+                use(nm)
+        slot_gk[(kind, i)] = key
+    use(name_at(u32(0x10)))
+
+    smp_uniq, tex_uniq, cb_uniq, param_rel = {}, {}, {}, {}
+    smp_order, tex_order, cb_order = [], [], []
+    for gk in gorder:
+        g = groups[gk]
+        for key, uniq, order in ((tuple(g["smp"]), smp_uniq, smp_order),
+                                 (tuple(g["tex"]), tex_uniq, tex_order),
+                                 (tuple(g["cb"]), cb_uniq, cb_order)):
+            if key not in uniq:
+                uniq[key] = None
+                order.append(key)
+
+    param, param_name_at = bytearray(), []
+    for ck in cb_order:
+        for d in ck:
+            if d in param_rel:
+                continue
+            param_rel[d] = len(param)
+            for (mn, ms, mo) in d[3]:
+                param_name_at.append((len(param), mn))
+                param += struct.pack("<IIII", 0, 0, ascii_hash(mn), (ms << 16) | mo)
+
+    cb, cb_name_at, cb_mem_at = bytearray(), [], []
+    for ck in cb_order:
+        cb_uniq[ck] = len(cb)
+        for d in ck:
+            cb_name_at.append((len(cb), d[0]))
+            cb_mem_at.append((len(cb), d))
+            cb += struct.pack("<QIIIIQ", 0, ascii_hash(d[0]), 0, d[1], d[2], 0)
+
+    pool, pool_name_at = bytearray(), []
+    for sk in smp_order:
+        smp_uniq[sk] = len(pool)
+        for nm in sk:
+            pool_name_at.append((len(pool), nm))
+            pool += struct.pack("<QII", 0, ascii_hash(nm), 0)
+    for tk in tex_order:
+        tex_uniq[tk] = len(pool)
+        for nm in tk:
+            pool_name_at.append((len(pool), nm))
+            pool += struct.pack("<QII", 0, ascii_hash(nm), 0)
+
+    cb_rel = {gk: cb_uniq[tuple(groups[gk]["cb"])] for gk in gorder}
+    smp_rel = {gk: smp_uniq[tuple(groups[gk]["smp"])] for gk in gorder}
+    tex_rel = {gk: tex_uniq[tuple(groups[gk]["tex"])] for gk in gorder}
+
+    str_pool, str_rel = bytearray(), {}
+    for nm in names:
+        str_rel[nm] = len(str_pool)
+        str_pool += nm.encode("latin1", "replace") + b"\x00"
+
+    pool_base = SKELETON_HI
+    cb_base = pool_base + len(pool)
+    param_base = cb_base + len(cb)
+    desc_base = param_base + len(param)
+    pad = old_tail_len - (len(pool) + len(cb) + len(param) + len(desc) + len(str_pool))
+    if pad < 0:
+        return None
+    str_base = desc_base + len(desc) + pad
+
+    for off, nm in pool_name_at:
+        struct.pack_into("<Q", pool, off, str_base + str_rel[nm])
+    for off, nm in cb_name_at:
+        struct.pack_into("<Q", cb, off, str_base + str_rel[nm])
+    for off, d in cb_mem_at:
+        struct.pack_into("<Q", cb, off + 24, param_base + param_rel[d])
+    for off, nm in param_name_at:
+        struct.pack_into("<I", param, off, str_base + str_rel[nm])
+
+    new_tail = bytes(pool) + bytes(cb) + bytes(param) + desc + b"\x00" * pad + bytes(str_pool)
+
+    head = bytearray(data[:SKELETON_HI])
+    hnm = name_at(u32(0x10))
+    if hnm in str_rel:
+        struct.pack_into("<I", head, 0x10, str_base + str_rel[hnm])
+    for base, kind, i in slots:
+        for fo in (0x38, 0x48, 0x58):
+            v = u32(base + fo)
+            if v:
+                struct.pack_into("<I", head, base + fo, desc_base + (v - old_desc))
+        gk = slot_gk.get((kind, i))
+        if gk is not None:
+            struct.pack_into("<I", head, base + 0x40, cb_base + cb_rel[gk])
+            struct.pack_into("<I", head, base + 0x50, pool_base + smp_rel[gk])
+            struct.pack_into("<I", head, base + 0x60, pool_base + tex_rel[gk])
+        for fo in (0xD8, 0x104):
+            v = u32(base + fo)
+            nm = name_at(v)
+            if nm in str_rel:
+                struct.pack_into("<I", head, base + fo, str_base + str_rel[nm])
+    return bytes(head) + new_tail + data[old_bs:]
+
+
+def verify_rebuild(data, out):
+    """重建前后 逐槽比对绑定组名字(环境无关的正确性检查)。返回 (n, mismatches)。"""
+    try:
+        from .mmtr_model import MmtrModel
+    except ImportError:
+        from mmtr_model import MmtrModel
+    n, bad = 0, []
+    src, dst = MmtrModel(data).parse_records(), MmtrModel(out).parse_records()
+    for slot in range(min(len(src), len(dst))):
+        a, b = record_group(data, slot), record_group(out, slot)
+        n += 1
+        if a != b:
+            bad.append((slot, a, b))
+    return n, bad
+
+
 if __name__ == "__main__":
     import sys
     d = open(sys.argv[1], "rb").read()

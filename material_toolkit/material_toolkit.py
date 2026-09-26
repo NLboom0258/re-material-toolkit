@@ -23,6 +23,7 @@
   python material_toolkit.py mat-std    <in.mmtr> [other.mmtr]
   python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
   python material_toolkit.py mat-synth  <in.mmtr> [other.mmtr]
+  python material_toolkit.py mat-rebuild <in.mmtr> -o <out.mmtr>
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -67,6 +68,7 @@ from lib import material_instance as minst  # noqa: E402
 from lib import material_pass as mpass  # noqa: E402
 from lib import mmtr_standard as std  # noqa: E402
 from lib import mmtr_synth as synth  # noqa: E402
+from lib import mmtr_tail as mtail  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -284,6 +286,19 @@ def main():
         if len(a) > 1 and not a[1].startswith("-"):
             other = open(a[1], "rb").read()
             print("  同版本结构 vs %s: %s" % (a[1], synth.same_version(data, other)))
+    elif cmd == "mat-rebuild":
+        src = a[0]
+        out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr.1808168797"
+        data = open(src, "rb").read()
+        new = mtail.rebuild_canonical(data)
+        if new is None:
+            print("FAIL: 无法规范重建(非主版本或尾段过大)")
+            return
+        open(out, "wb").write(new)
+        n, bad = mtail.verify_rebuild(data, new)
+        print(f"OK: mat-rebuild {src} -> {out} ({len(data)}=={len(new)} bytes) "
+              f"槽={n} 组不匹配={len(bad)}")
+        _selfcheck_mmtr(new)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)
