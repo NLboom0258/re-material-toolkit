@@ -159,43 +159,32 @@ struct MaterialOutput
 
 //__MATERIAL_MAIN__
 
-// ---- 方向光级联阴影: 返回 [0,1](1=受光)。MVP: 单次 CompareLevelZero(未做 PCF 抖动)。 ----
+// ---- 方向光级联阴影(UV 选级联; 对应原版前向 PS 的 uv-based 分支) ----
+// 注: 原版另有“距离选级联(SDSM)”分支(if SDSMEnable); 本函数为 uv-based, 待实机确认用哪条。
+// 返回 [0,1](1=受光)。
 float RE_DirShadow(float3 posWS)
 {
-    float4 ls = mul(float4(posWS, 1.0), DL_ViewProjection);   // xy∈[0,1], z=depth
-    float2 uv;
-    float  depth;
-    float  arr;
-    // 级联选择(atlas 子区 remap: uv = ls.xy * CT.z + CT.xy)
-    float2 t1 = float2(ls.x * Cascade_Translate1.z + Cascade_Translate1.x,
+    float4 ls = mul(float4(posWS, 1.0), DL_ViewProjection);   // primary 投影 xy∈[0,1]
+    float2 u1 = float2(ls.x * Cascade_Translate1.z + Cascade_Translate1.x,
                        ls.y * Cascade_Translate1.z + Cascade_Translate1.y);
-    if (max(abs(t1.x - 0.5), abs(t1.y - 0.5)) < 0.5)
-    {
-        uv = t1; depth = ls.z + DL_Bias; arr = (float)DL_ArrayIndex;
-    }
+    float2 u2 = float2(ls.x * Cascade_Translate2.z + Cascade_Translate2.x,
+                       ls.y * Cascade_Translate2.z + Cascade_Translate2.y);
+    float2 u3 = float2(ls.x * Cascade_Translate3.z + Cascade_Translate3.x,
+                       ls.y * Cascade_Translate3.z + Cascade_Translate3.y);
+    float2 uv;
+    float  arr;
+    // 逐一测试：cascade1 用原始 ls; 之后用上一级 remap 后的 uv(同原版)
+    if (max(abs(ls.x - 0.5), abs(ls.y - 0.5)) < 0.5)
+        { uv = u1; arr = (float)DL_ArrayIndex; }
+    else if (max(abs(u1.x - 0.5), abs(u1.y - 0.5)) < 0.5)
+        { uv = u2; arr = (float)DL_ArrayIndex + 1.0; }
+    else if (max(abs(u2.x - 0.5), abs(u2.y - 0.5)) < 0.5)
+        { uv = u3; arr = (float)DL_ArrayIndex + 2.0; }
+    else if (max(abs(u3.x - 0.5), abs(u3.y - 0.5)) < 0.5)
+        { uv = u3; arr = (float)DL_ArrayIndex + 3.0; }
     else
-    {
-        float2 t2 = float2(ls.x * Cascade_Translate2.z + Cascade_Translate2.x,
-                           ls.y * Cascade_Translate2.z + Cascade_Translate2.y);
-        if (max(abs(t2.x - 0.5), abs(t2.y - 0.5)) < 0.5)
-        {
-            uv = t2; depth = ls.z + DL_Bias; arr = (float)DL_ArrayIndex + 1.0;
-        }
-        else
-        {
-            float2 t3 = float2(ls.x * Cascade_Translate3.z + Cascade_Translate3.x,
-                               ls.y * Cascade_Translate3.z + Cascade_Translate3.y);
-            if (max(abs(t3.x - 0.5), abs(t3.y - 0.5)) < 0.5)
-            {
-                uv = t3; depth = ls.z + DL_Bias; arr = (float)DL_ArrayIndex + 2.0;
-            }
-            else
-            {
-                return 1.0;   // 不在任何级联内 -> 不投影
-            }
-        }
-    }
-    return ShadowMapSRV.SampleCmpLevelZero(LinearCompare, float3(uv, arr), depth);
+        return 1.0;   // 不在任何级联内 -> 不投影
+    return ShadowMapSRV.SampleCmpLevelZero(LinearCompare, float3(uv, arr), ls.z + DL_Bias);
 }
 
 float4 main(PSIn i) : SV_Target0
@@ -230,16 +219,16 @@ float4 main(PSIn i) : SV_Target0
     MaterialOutput m;
     MaterialMain(mi, m);
 
-    // ---- 3. 光照(引擎式: 方向光 NoL + 级联阴影) ----
+    // ---- 3. 光照(引擎式: 方向光 NoL; 级联阴影本轮暂关, 先验证光照) ----
     float3 mt = normalize(m.NormalTS);
     float3 nWS = normalize(mi.Tangent * mt.x + mi.Bitangent * mt.y + mi.Normal * mt.z);
 
     float3 light = float3(0.0, 0.0, 0.0);
     if (DL_Enable != 0)
     {
-        float ndl = saturate(dot(nWS, -DL_Direction));
-        float shadow = RE_DirShadow(mi.positionWS);
-        light = DL_Color * (ndl * shadow);
+        // 原版前向 PS: dp3_sat r0.y, r2.xyzx, cb3[0].xyzx  => dot(N, +DL_Direction)
+        float ndl = saturate(dot(nWS, DL_Direction));
+        light = DL_Color * ndl;
     }
 
     float3 color = m.BaseColor * (light + 0.05) + m.Emissive;   // +0.05 环境光(便于观察)
