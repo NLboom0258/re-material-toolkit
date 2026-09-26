@@ -2276,6 +2276,21 @@ def _pass_template_names(shading=None):
     return out
 
 
+# 各着色类型的“默认模板”(更标准: 延迟=character(角色 PBR, 输入更全);前向=hair(近普通材质))
+_PREFERRED_TEMPLATES = {
+    "deferred": ("deferred_character", "deferred_env"),
+    "forward": ("forward_hairtransparentex", "forward_eyetransparentex"),
+}
+
+
+def _default_template(shading):
+    names = _pass_template_names(shading)
+    for cand in _PREFERRED_TEMPLATES.get(shading, ()):
+        if cand in names:
+            return cand
+    return names[0] if names else None
+
+
 class MaterialSystemPanel(QWidget):
     """材质系统页: 语义级“材质资产”编辑(选项 + 材质函数 HLSL) -> 生成 mmtr。
 
@@ -2287,7 +2302,7 @@ class MaterialSystemPanel(QWidget):
         super().__init__(parent)
         self._loading = False
         self._last_mmtr_bytes = None
-        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_env"})
+        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_character"})
         self._build_ui()
         self._apply_asset()
         self._load_default_material()
@@ -2414,15 +2429,17 @@ class MaterialSystemPanel(QWidget):
         self.refresh_info()
 
     def _repopulate_templates(self):
-        """按当前着色类型过滤模板下拉(模板须与着色类型对齐）。"""
+        """按当前着色类型过滤模板下拉; 当前项不在新列表时改用该着色的默认模板。"""
         cur = self.cmb_tmpl.currentData()
+        shading = self.cmb_shading.currentData()
         self.cmb_tmpl.blockSignals(True)
         self.cmb_tmpl.clear()
-        for t in _pass_template_names(self.cmb_shading.currentData()):
+        for t in _pass_template_names(shading):
             self.cmb_tmpl.addItem(t, t)
         i = self.cmb_tmpl.findData(cur)
-        if i >= 0:
-            self.cmb_tmpl.setCurrentIndex(i)
+        if i < 0:
+            i = self.cmb_tmpl.findData(_default_template(shading))
+        self.cmb_tmpl.setCurrentIndex(i if i >= 0 else 0)
         self.cmb_tmpl.blockSignals(False)
 
     def _on_shading_changed(self, *_):
@@ -2734,7 +2751,7 @@ class MaterialSystemPanel(QWidget):
         self.refresh_info()
 
     def _new_asset(self):
-        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_env"})
+        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_character"})
         self._last_mmtr_bytes = None
         self.ed_src.setPlainText("")
         self._apply_asset()
