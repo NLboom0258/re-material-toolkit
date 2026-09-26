@@ -2256,10 +2256,23 @@ def _pass_of_template(tmpl):
     return "Forward" if (tmpl or "").startswith("forward") else "Deferred"
 
 
-def _pass_template_names(shading=None):
+def _template_category(name):
+    """模板归属 (shading, lighting):
+    - forward_*         -> ("forward", "custom")    前向目前=自定义输出
+    - deferred_*_custom -> ("deferred", "custom")   延迟直写(原始 GBuffer)
+    - 其它 deferred_*   -> ("deferred", "default")  延迟默认光照
+    """
+    if name.startswith("forward"):
+        return ("forward", "custom")
+    if name.endswith("_custom"):
+        return ("deferred", "custom")
+    return ("deferred", "default")
+
+
+def _pass_template_names(shading=None, lighting=None):
     """可用的 pass 模板名(扫描 pass_templates/, 排除默认材质与 *_instance)。
 
-    shading 给 "deferred"/"forward" 时只返回对应族(模板须与着色类型对齐)。
+    shading/lighting 给定时只返回匹配 (着色类型, 光照模式) 的模板。
     """
     import glob
     d = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates")
@@ -2268,24 +2281,27 @@ def _pass_template_names(shading=None):
         n = os.path.basename(p)[:-5]
         if n.startswith("mat_default_") or n.endswith("_instance"):
             continue
-        if shading == "forward" and not n.startswith("forward"):
+        cs, cl = _template_category(n)
+        if shading and cs != shading:
             continue
-        if shading == "deferred" and not n.startswith("deferred"):
+        if lighting and cl != lighting:
             continue
         out.append(n)
     return out
 
 
-# 各着色类型的“默认模板”(更标准: 延迟=character(角色 PBR, 输入更全);前向=hair(近普通材质))
+# 各 (着色类型, 光照模式) 的“默认模板”
 _PREFERRED_TEMPLATES = {
-    "deferred": ("deferred_character", "deferred_env"),
-    "forward": ("forward_hairtransparentex", "forward_eyetransparentex"),
+    ("deferred", "default"): ("deferred_character", "deferred_env"),
+    ("deferred", "custom"): ("deferred_custom",),
+    ("forward", "custom"): ("forward_hairtransparentex", "forward_eyetransparentex"),
+    ("forward", "default"): (),
 }
 
 
-def _default_template(shading):
-    names = _pass_template_names(shading)
-    for cand in _PREFERRED_TEMPLATES.get(shading, ()):
+def _default_template(shading, lighting):
+    names = _pass_template_names(shading, lighting)
+    for cand in _PREFERRED_TEMPLATES.get((shading, lighting), ()):
         if cand in names:
             return cand
     return names[0] if names else None
@@ -2320,7 +2336,8 @@ class MaterialSystemPanel(QWidget):
         for label, val in (("延迟", "deferred"), ("前向", "forward")):
             self.cmb_shading.addItem(label, val)
         self.cmb_tmpl = NoWheelComboBox()
-        for t in _pass_template_names(self.cmb_shading.currentData()):
+        for t in _pass_template_names(self.cmb_shading.currentData(),
+                                      self.cmb_light.currentData()):
             self.cmb_tmpl.addItem(t, t)
         self.ed_mmtr = QLineEdit()
         btn_mmtr = QPushButton("选择…")
@@ -2339,9 +2356,9 @@ class MaterialSystemPanel(QWidget):
         form.addRow("材质名", self.ed_name)
         left.addLayout(form)
 
-        for c in (self.cmb_light, self.cmb_tmpl):
-            c.currentIndexChanged.connect(self._on_option_changed)
-        self.cmb_shading.currentIndexChanged.connect(self._on_shading_changed)
+        self.cmb_tmpl.currentIndexChanged.connect(self._on_option_changed)
+        self.cmb_light.currentIndexChanged.connect(self._on_mode_changed)
+        self.cmb_shading.currentIndexChanged.connect(self._on_mode_changed)
         self.ed_name.textChanged.connect(self._on_name_changed)
 
         btns = QHBoxLayout()
@@ -2429,20 +2446,21 @@ class MaterialSystemPanel(QWidget):
         self.refresh_info()
 
     def _repopulate_templates(self):
-        """按当前着色类型过滤模板下拉; 当前项不在新列表时改用该着色的默认模板。"""
+        """按 (着色类型, 光照模式) 过滤模板下拉; 当前项不在新列表时用该组合默认模板。"""
         cur = self.cmb_tmpl.currentData()
         shading = self.cmb_shading.currentData()
+        lighting = self.cmb_light.currentData()
         self.cmb_tmpl.blockSignals(True)
         self.cmb_tmpl.clear()
-        for t in _pass_template_names(shading):
+        for t in _pass_template_names(shading, lighting):
             self.cmb_tmpl.addItem(t, t)
         i = self.cmb_tmpl.findData(cur)
         if i < 0:
-            i = self.cmb_tmpl.findData(_default_template(shading))
+            i = self.cmb_tmpl.findData(_default_template(shading, lighting))
         self.cmb_tmpl.setCurrentIndex(i if i >= 0 else 0)
         self.cmb_tmpl.blockSignals(False)
 
-    def _on_shading_changed(self, *_):
+    def _on_mode_changed(self, *_):
         if self._loading:
             return
         self._repopulate_templates()
@@ -2751,7 +2769,11 @@ class MaterialSystemPanel(QWidget):
         self.refresh_info()
 
     def _new_asset(self):
-        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_character"})
+        sh = self.cmb_shading.currentData()
+        lt = self.cmb_light.currentData()
+        tmpl = _default_template(sh, lt)
+        self.asset = masset.MaterialAsset(lighting_mode=lt, shading_type=sh,
+                                          template={"pass_template": tmpl})
         self._last_mmtr_bytes = None
         self.ed_src.setPlainText("")
         self._apply_asset()
@@ -2835,7 +2857,8 @@ class MaterialSystemPanel(QWidget):
                 return None, None
         try:
             data, rep = mgen.generate(open(base, "rb").read(),
-                                      self.asset.shading_source or None, tmpl)
+                                      self.asset.shading_source or None, tmpl,
+                                      pass_name=_pass_of_template(tmpl))
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))
             return None, None
