@@ -2585,7 +2585,9 @@ class MaterialSystemPanel(QWidget):
                 si.setData(0, Qt.UserRole, ("copy", s["name"]))
                 root.addChild(si)
         elif base:
-            root.addChild(QTreeWidgetItem(["(读取接口失败)", "", ""]))
+            root.addChild(QTreeWidgetItem(
+                ["(读取接口失败: 基础 mmtr 无 %s pass)" % pass_name, "",
+                 "检查着色类型/基础 mmtr 是否匹配模板"]))
         else:
             root.addChild(QTreeWidgetItem(["(未选择基础 mmtr)", "", ""]))
         # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
