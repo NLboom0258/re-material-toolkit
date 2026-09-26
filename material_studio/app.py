@@ -473,8 +473,14 @@ class CodeEdit(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._lnarea = _LineNumberArea(self) if numbers else None
         if numbers:
-            self._lnbg = QColor("#d8d8d8")
-            self._lnfg = QColor("#7a7a7a")
+            # 行号区底色跟随代码区(QPalette.Base), 明/暗主题自适应;
+            # 不要写死浅色 —— 暗色主题下会变成刺眼的“白条”。
+            base = self.palette().color(QPalette.Base)
+            self._lnbg = QColor(base)
+            self._lnfg = QColor("#8f8f8f") if base.lightness() < 128 else QColor("#7a7a7a")
+            # 分隔线(紧贴代码一侧, 与行号分开, 仿周道/主流 IDE 样式)
+            self._lnborder = (QColor(base).lighter(150) if base.lightness() < 128
+                              else QColor(base).darker(140))
             pal = self._lnarea.palette()
             pal.setColor(QPalette.Window, self._lnbg)
             self._lnarea.setPalette(pal)
@@ -517,12 +523,16 @@ class CodeEdit(QPlainTextEdit):
         h = self.fontMetrics().height()
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
-                painter.drawText(0, top, self._lnarea.width() - 6, h,
+                painter.drawText(0, top, self._lnarea.width() - 8, h,
                                  Qt.AlignRight, str(num))
             block = block.next()
             top = bottom
             bottom = top + round(self.blockBoundingRect(block).height())
             num += 1
+        # 行号区与代码之间画一条竖线(紧贴代码内容一侧)
+        painter.setPen(self._lnborder)
+        x = self._lnarea.width() - 1
+        painter.drawLine(x, event.rect().top(), x, event.rect().bottom())
 
     # ---- Tab 缩进 ----
     def keyPressEvent(self, event):
