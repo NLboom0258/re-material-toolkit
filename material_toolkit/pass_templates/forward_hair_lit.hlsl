@@ -159,6 +159,9 @@ struct MaterialOutput
 
 //__MATERIAL_MAIN__
 
+// 安全归一化(零向量->0, 不产生 NaN)
+float3 RNormalize(float3 v) { return v / max(length(v), 1e-6); }
+
 // ---- 方向光级联阴影(UV 选级联; 对应原版前向 PS 的 uv-based 分支) ----
 // 注: 原版另有“距离选级联(SDSM)”分支(if SDSMEnable); 本函数为 uv-based, 待实机确认用哪条。
 // 返回 [0,1](1=受光)。
@@ -189,12 +192,12 @@ float RE_DirShadow(float3 posWS)
 
 float4 main(PSIn i) : SV_Target0
 {
-    // ---- 1. 输入解包 ----
-    float3 N     = normalize(i.v1.xyz);
-    float3 T     = normalize(float3(i.v2.w, i.v3.x, i.v3.y));
+    // ---- 1. 输入解包(安全归一化, 避免零向量 NaN) ----
+    float3 N     = RNormalize(i.v1.xyz);
+    float3 T     = RNormalize(float3(i.v2.w, i.v3.x, i.v3.y));
     float  tsign = i.v3.z;
     float3 posWS = float3(i.v3.w, i.v4.x, i.v4.y);
-    float3 B     = normalize(cross(N, T)) * ((tsign < 0.0) ? -1.0 : 1.0);
+    float3 B     = RNormalize(cross(N, T)) * ((tsign < 0.0) ? -1.0 : 1.0);
 
     float3 camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
                            transposeViewInvMat[2].w);
@@ -221,7 +224,7 @@ float4 main(PSIn i) : SV_Target0
 
     // ---- 3. 光照(引擎式: 方向光 NoL; 级联阴影本轮暂关, 先验证光照) ----
     float3 mt = normalize(m.NormalTS);
-    float3 nWS = normalize(mi.Tangent * mt.x + mi.Bitangent * mt.y + mi.Normal * mt.z);
+    float3 nWS = RNormalize(mi.Tangent * mt.x + mi.Bitangent * mt.y + mi.Normal * mt.z);
 
     float3 light = float3(0.0, 0.0, 0.0);
     if (DL_Enable != 0)
