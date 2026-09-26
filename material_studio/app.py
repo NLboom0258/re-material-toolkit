@@ -2258,12 +2258,13 @@ def _pass_of_template(tmpl):
 
 def _template_category(name):
     """模板归属 (shading, lighting):
-    - forward_*         -> ("forward", "custom")    前向目前=自定义输出
-    - deferred_*_custom -> ("deferred", "custom")   延迟直写(原始 GBuffer)
-    - 其它 deferred_*   -> ("deferred", "default")  延迟默认光照
+    - forward_*_lit     -> ("forward", "default")  前向引擎式光照(继承引擎光照)
+    - 其它 forward_*    -> ("forward", "custom")   前向自定义输出
+    - deferred_*_custom -> ("deferred", "custom")  延迟直写(原始 GBuffer)
+    - 其它 deferred_*   -> ("deferred", "default") 延迟默认光照
     """
     if name.startswith("forward"):
-        return ("forward", "custom")
+        return ("forward", "default" if name.endswith("_lit") else "custom")
     if name.endswith("_custom"):
         return ("deferred", "custom")
     return ("deferred", "default")
@@ -2295,7 +2296,7 @@ _PREFERRED_TEMPLATES = {
     ("deferred", "default"): ("deferred_character", "deferred_env"),
     ("deferred", "custom"): ("deferred_custom",),
     ("forward", "custom"): ("forward_hairtransparentex", "forward_eyetransparentex"),
-    ("forward", "default"): (),
+    ("forward", "default"): ("forward_hair_lit",),
 }
 
 

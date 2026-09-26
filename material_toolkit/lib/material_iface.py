@@ -78,19 +78,22 @@ def iface_from_dxbc(dxbc):
     cbuffers = _cbuffers(txt, binds)
 
     textures, samplers = [], []
+    lines = txt.splitlines()
     for name, (typ, reg) in binds.items():
-        if typ == "sampler":
-            samplers.append({"name": name, "reg": reg})
+        if typ in ("sampler", "sampler_c"):
+            samplers.append({"name": name, "reg": reg, "cmp": typ == "sampler_c"})
         elif typ == "texture":
-            fmt = "?"
-            for line in txt.splitlines():
+            fmt, dim = "?", "2d"
+            for line in lines:
                 s = line.strip()
                 if s.startswith("//") and s[2:].strip().startswith(name + " "):
                     parts = s[2:].split()
                     if len(parts) >= 3:
                         fmt = parts[2]
+                    if len(parts) >= 4:
+                        dim = parts[3]
                     break
-            textures.append({"name": name, "reg": reg, "fmt": fmt})
+            textures.append({"name": name, "reg": reg, "fmt": fmt, "dim": dim})
 
     def _key(d):
         return int(re.sub(r"\D", "", d["reg"]) or 0)
@@ -156,13 +159,27 @@ def _flat_cbuffer(out, cb):
     out.append("")
 
 
+# 元素类型 / 维度 -> HLSL 资源声明
+_ELEM = {"float": "float", "float2": "float2", "float3": "float3", "float4": "float4",
+         "int": "int", "uint": "uint", "half": "float", "min16float": "float"}
+_DIMTYPE = {"2d": "Texture2D", "2darray": "Texture2DArray", "1d": "Texture1D",
+            "1darray": "Texture1DArray", "cube": "TextureCube", "3d": "Texture3D"}
+
+
 def _texture_decl(t, reg=None):
     reg = reg or t["reg"]
-    if t["fmt"] == "byte":
+    fmt = t.get("fmt")
+    dim = t.get("dim") or "2d"
+    if fmt == "byte":
         return "ByteAddressBuffer %s : register(%s);" % (t["name"], reg)
-    if t["fmt"] == "float4":
-        return "Texture2D<float4> %s : register(%s);" % (t["name"], reg)
-    return "// [跳过] %s : %s (fmt=%s)" % (t["name"], reg, t["fmt"])
+    elem = _ELEM.get(fmt)
+    base = _DIMTYPE.get(dim)
+    if elem is None or base is None:
+        # 结构化缓冲(fmt=struct)等需配套 struct 定义, 这里暂不声明(不用即可)
+        return "// [跳过] %s : %s (fmt=%s dim=%s)" % (t["name"], reg, fmt, dim)
+    if fmt == "uint" and dim == "3d":
+        elem = "uint4"
+    return "%s<%s> %s : register(%s);" % (base, elem, t["name"], reg)
 
 
 def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
@@ -182,7 +199,8 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         for t in iface["textures"]:
             out.append(_texture_decl(t))
         for s in iface["samplers"]:
-            out.append("SamplerState %s : register(%s);" % (s["name"], s["reg"]))
+            ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
+            out.append("%s %s : register(%s);" % (ty, s["name"], s["reg"]))
         return "\n".join(out) + "\n"
 
     # ---- style == "instance" ----
@@ -222,5 +240,6 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         else:
             out.append(_texture_decl(t, "t%d" % (_regnum(t["reg"]) + 1)))
     for s in iface["samplers"]:
-        out.append("SamplerState %s : register(%s);" % (s["name"], s["reg"]))
+        ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
+        out.append("%s %s : register(%s);" % (ty, s["name"], s["reg"]))
     return "\n".join(out) + "\n"
