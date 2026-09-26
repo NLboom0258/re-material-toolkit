@@ -341,6 +341,80 @@ def record_group(data, slot, tail=None):
             "tex": names(img.rec_field(slot, 0x60), ntex, False)}
 
 
+# tex 描述符 code 的高字节(type)由 RDEF dimension 决定(观测自 env; 见 §10)
+_TEX_DIM_TYPE = {1: 0x80, 3: 0x05, 4: 0x02, 5: 0x06, 8: 0x03, 9: 0x04}
+
+
+def _bind_info_map(blob):
+    """RDEF bound resources -> {name: (type, bind_point, dim)}。"""
+    try:
+        from .rdef import rdef_bind_info
+    except ImportError:
+        from rdef import rdef_bind_info
+    info = rdef_bind_info(blob) if blob else None
+    if not info:
+        return {}
+    return {nm: (t, bp, dim) for nm, t, bp, dim, _ret in info}
+
+
+def check_desc(data):
+    """校验每条记录的**绑定描述符条目** (u0,code) 是否 = RDEF 派生值。
+
+    期望: `u0`=VS 绑定寄存器; `code`=`(type<<24)|(stage<<16)|PS绑定寄存器`;
+    `stage` 掩码 `0x01`=VS/`0x10`=PS/`0x11`=共享; type: cb=0xff / smp=0x00 /
+    tex=由 RDEF dimension 映射(`_TEX_DIM_TYPE`; 未知维只比 bp/stage)。
+    返回 (n_checked, mismatches); mismatches = [(slot,kind,name,u0,exp_u0,code,exp_stage,exp_low,got_type,exp_type)]。
+    """
+    try:
+        from .mmtr_build import MmtrImage, REC_LO, REC_SIZE
+        from .mmtr_model import MmtrModel
+    except ImportError:
+        from mmtr_build import MmtrImage, REC_LO, REC_SIZE
+        from mmtr_model import MmtrModel
+    img = MmtrImage.from_bytes(data)
+    model = MmtrModel(data)
+    n, bad = 0, []
+    for slot, r in enumerate(model.parse_records()):
+        if r.is_empty and not r.vs_blob:
+            continue
+        vs, ps = img.blob_at(r.vs_blob), img.blob_at(r.blob_off)
+        vm, pm = _bind_info_map(vs), _bind_info_map(ps)
+        grp = derive_group(vs, ps)
+        c6 = (img.rec_field(slot, 0xC4) >> 16) & 0xFF
+        nsmp = img.rec_field(slot, 0xB0) >> 16
+        ntex = img.buf[REC_LO + slot * REC_SIZE + 0xCC]
+        for kind, dptr, cnt in (("cb", img.rec_field(slot, 0x38), c6),
+                                ("smp", img.rec_field(slot, 0x48), nsmp),
+                                ("tex", img.rec_field(slot, 0x58), ntex)):
+            if not dptr or cnt == 0:
+                continue
+            names = grp[kind]
+            if len(names) < cnt:
+                continue
+            for k in range(cnt):
+                off = dptr + k * 8
+                u0, code = _u32(data, off), _u32(data, off + 4)
+                nm = names[k]
+                vi, pi = vm.get(nm), pm.get(nm)
+                exp_stage = 0x11 if (vi and pi) else (0x01 if vi else 0x10)
+                exp_u0 = vi[1] if vi else 0
+                exp_low = pi[1] if pi else 0
+                if kind == "cb":
+                    exp_type = 0xFF
+                elif kind == "smp":
+                    exp_type = 0x00
+                else:
+                    exp_type = _TEX_DIM_TYPE.get((vi or pi)[2]) if (vi or pi) else None
+                got_type = (code >> 24) & 0xFF
+                n += 1
+                if not (u0 == exp_u0 and (code >> 16) & 0xFF == exp_stage
+                        and code & 0xFFFF == exp_low
+                        and (exp_type is None or got_type == exp_type)):
+                    bad.append((slot, kind, nm, u0, exp_u0, code, exp_stage,
+                                exp_low, got_type, exp_type))
+    return n, bad
+
+
 def check_groups(data):
     """校验: 每条非空记录的【池切片】 == 由 PS/VS RDEF 派生的绑定组。
 

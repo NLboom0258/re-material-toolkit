@@ -82,6 +82,26 @@ def rdef_resources(blob):
         return None
 
 
+def rdef_bind_info(blob):
+    """RDEF bound resources 按数组序 -> [(name, type, bind_point, dim, ret), ...]; 无 RDEF 返回 None。
+
+    用于由 RDEF 生成 mmtr 尾段描述符条目(见 analysis/pass_matrix.md §10)。
+    """
+    r = _rdef_of(blob)
+    if r is None:
+        return None
+    try:
+        _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+    except Exception:
+        return None
+    out = []
+    for k in range(n_br):
+        p = br_off + k * 32
+        out.append((_cstr(r, _u32(r, p)), _u32(r, p + 4), _u32(r, p + 20),
+                    _u32(r, p + 12), _u32(r, p + 8)))
+    return out
+
+
 def rdef_bind_order(blob):
     """RDEF bound resources 按**数组顺序**分桶 -> {"cb":[name...], "smp":[...], "tex":[...]} 保序。
 
