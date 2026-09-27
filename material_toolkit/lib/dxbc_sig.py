@@ -86,3 +86,26 @@ def sig_str(sig):
     """人类可读: `NORMAL#0:r1.f TEXCOORD#0:r4.3`。"""
     return " ".join("%s#%d:r%d.%x" % (n or "<unnamed>", s, r, m)
                     for (n, s, _sv, _c, r, m, _rw) in sig)
+
+
+def check_input_supported(ps_sig, vs_sig, ignore_sysval=True):
+    """校验 "PS 输入 ⊆ VS 输出": 每个 PS 输入槽(语义名+索引)读的分量必须在 VS 输出里。
+
+    D3D12 建 PSO 时会校验此项: 超标则整个材质 pass **被静默跳过**(不崩不报错); DX11 宽容。
+    规则: 对每个 PS 输入元素, 其 mask 必须是 VS 同槽(同名+同语义索引)mask 的**子集**。
+    系统值语义(SV_*, sysval!=0)恒可用, 默认跳过。名称比较**忽略大小写**
+    (参考 PS 写 `SV_Position`, 参考 VS 写 `SV_POSITION`)。
+
+    返回 [(name, sem_index, ps_mask, vs_mask)] (vs_mask=None = VS 无此槽); 空 = 合规。
+    """
+    vs = {}
+    for (n, s, _sv, _c, _r, m, _rw) in vs_sig:
+        vs[(n.upper(), s)] = m
+    bad = []
+    for (n, s, sv, _c, _r, m, _rw) in ps_sig:
+        if ignore_sysval and sv:
+            continue
+        vm = vs.get((n.upper(), s))
+        if m & ~(vm or 0):
+            bad.append((n, s, m, vm))
+    return bad

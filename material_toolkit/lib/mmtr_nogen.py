@@ -403,10 +403,27 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     struct.pack_into("<I", head, 0x08, blob_start)
     struct.pack_into("<I", head, 0x10, str_base + str_rel[info.get("str10") or ""])
     out = bytes(head) + tail + bytes(blob)
+
+    # 8b) 输入边界校验: 我们的 PS 的 ISGN 必须 ⊆ 各材质槽对应 VS 的 OSGN
+    #     (DX12 建 PSO 会校验; 超标则整个材质 pass 被静默跳过 —— 见 PROJECT_SUMMARY "DX12")
+    from . import dxbc_sig as _SG
+    boundary, _seen = [], set()
+    for s in slots:
+        if not (s["ps"] and s["vs"]) or s["rec"].get("ps_kind") != "material_ps":
+            continue
+        _k = (hashlib.md5(s["ps"]).hexdigest(), hashlib.md5(s["vs"]).hexdigest())
+        if _k in _seen:
+            continue
+        _seen.add(_k)
+        for _n, _sem, _pm, _vm in _SG.check_input_supported(
+                _SG.input_signature(s["ps"]), _SG.output_signature(s["vs"])):
+            boundary.append((s["slot"], _n, _sem, _pm, _vm))
+
     return out, {
         "size": len(out), "blob_start": blob_start, "n_blobs": len(off_of),
         "ps_size": len(ps_blob), "records": len(slots),
         "groups": len(order), "str10": info.get("str10"),
         "pt_miss": pt_miss, "pt_nomap": pt_nomap,
+        "boundary": boundary, "boundary_pairs": len(_seen),
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
     }
