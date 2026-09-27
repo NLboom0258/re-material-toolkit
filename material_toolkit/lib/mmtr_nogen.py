@@ -10,6 +10,7 @@
 """
 import hashlib
 import json
+import os
 import struct
 
 try:
@@ -97,16 +98,20 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
 
-    # 1b) per-instance(Instancing) 零声明 PS: 实例化绘制绑 UserMaterialInstances(结构化) 与
-    #     cbuffer 风格主 PS 不自洽 ⇒ 实例化主 pass 槽改用零声明 PS(不读任何材质资源; 先自洽,
-    #     之后可拓展为完整 instance 风格 PS 以显示真实材质)。
-    inst_slots = [r for r in recs
-                  if "Instancing" in r["tech"] and r.get("ps_kind") == "material_ps"]
-    ps_bare = None
-    if inst_slots:
-        ps_bare, err_bare = MP.compile_shading(None, "deferred_bare")
-        if err_bare:
-            raise ValueError("零声明 PS 编译失败:\n%s" % err_bare)
+    # 1b) 逐实例材质("…Instancing2")槽: 引擎绑 UserMaterialInstances(结构化), 与 cbuffer 风格
+    #     主 PS 不自洽 ⇒ 用 **instance 风格 PS**(读 UserMaterialInstances, 纹理 +1,
+    #     实例索引 NOINTERPOLATOR0)。判定按**预设里该槽 PS 是否用 UMI**(records.ps_inst)。
+    #     仅当模板有 `<template>_instance` 对应件时才另编(如 deferred_std); 零声明模板(deferred_bare)
+    #     本就不读资源, 实例化也用同一份主 PS。
+    inst_tpl = template + "_instance"
+    inst_slots = [r for r in recs if r.get("ps_inst")]
+    ps_inst = None
+    if inst_slots and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl")):
+        inst_iface = iface if iface is not None else P.std_iface()
+        ps_inst, err_inst = MP.compile_shading(material_src, inst_tpl, iface=inst_iface,
+                                               style="instance", keepalive=ka)
+        if err_inst:
+            raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
     # 2) 逐槽解析程序
     slots = []
@@ -115,7 +120,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         vs = bank_blob("standard_vs|%s|%s" % (pre, tech)) if r.get("vs_kind") else None
         cs = bank_blob("%s|%s|%s" % (r["cs_kind"], pre, tech)) if r.get("cs_kind") else None
         if r.get("ps_kind") == "material_ps":
-            ps = ps_bare if (ps_bare is not None and "Instancing" in tech) else ps_blob
+            ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
         elif r.get("ps_kind"):
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:

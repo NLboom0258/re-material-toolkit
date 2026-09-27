@@ -138,6 +138,7 @@ def extract(ref_data, outdir=None):
     from .mmtr_blobs import extract_blob
     from .mmtr_material import MaterialModel, parse_technology
     from .mmtr_tail import TailModel
+    from . import rdef as _R
 
     tail = TailModel.decode(ref_data)
     desc = bytes(ref_data[tail.boundaries["desc"]:tail.boundaries["string"]])
@@ -197,6 +198,16 @@ def extract(ref_data, outdir=None):
         return v - desc_lo if desc_lo <= v < desc_hi else None
 
     kinds = blob_kinds(ref_data)
+    _umi = {}
+
+    def _ps_is_inst(i):
+        """该 PS 是否用 `UserMaterialInstances`(结构化) = “逐实例材质”(≈技术名带 …Instancing2)。"""
+        if i not in _umi:
+            names = {n for (n, _t, _bp, _d, _r)
+                     in (_R.rdef_bind_info(extract_blob(ref_data, i)) or [])}
+            _umi[i] = "UserMaterialInstances" in names
+        return _umi[i]
+
     recs = []
     for v in MaterialModel(ref_data).variants():
         pt = parse_technology(v["tech"])
@@ -205,6 +216,7 @@ def extract(ref_data, outdir=None):
             "slot": v["slot"], "prefix": v["prefix"] or "", "tech": v["tech"],
             "pass": (pt["pass"] if pt else None),
             "ps_kind": (kinds.get(v["ps"]) if v["ps"] >= 0 else None),
+            "ps_inst": bool(v["ps"] >= 0 and _ps_is_inst(v["ps"])),
             "vs_kind": (kinds.get(v["vs"]) if v["vs"] >= 0 else None),
             "cs_kind": (kinds.get(v["cs"]) if v["cs"] >= 0 else None),
             # 按槽结构字段(版本级): +0x18 常量; +0xC8 小整数
