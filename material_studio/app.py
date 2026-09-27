@@ -2604,42 +2604,51 @@ class MaterialSystemPanel(QWidget):
 
     def refresh_inputs(self):
         self.tree_inputs.clear()
-        # 1) 固有输入(标准接口; 只读)
-        root = QTreeWidgetItem(["固有输入 (标准接口, 只读)", "",
-                                "引擎要求完整资源集才会绑定材质贴图/参数"])
-        self.tree_inputs.addTopLevelItem(root)
+        # 1) 标准接口: 按"来源"分两组 —— 引擎固有(引擎给值) / 标准材质槽(mdf2 给值, 可选)
         src_of = {e["name"]: e.get("source", "") for e in minp.std()}
         iface = self._base_iface()
-        if iface:
-            # 按类别分组: cbuffer / texture / sampler 各一个可展开分类(成员默认折叠)
-            grp = {}
-            for cat in ("cbuffer", "texture", "sampler"):
-                g = QTreeWidgetItem(["%s (%d)" % (cat, len(iface[cat + "s"])), "",
-                                     "标准接口 · 只读"])
-                root.addChild(g)
-                grp[cat] = g
-            for cb in iface["cbuffers"]:
-                it = QTreeWidgetItem([cb["name"], cb["reg"],
-                                      "%s · %d 成员"
-                                      % (src_of.get(cb["name"], ""), len(cb["members"]))])
-                grp["cbuffer"].addChild(it)
-                for m in cb["members"]:
-                    cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
-                    cm.setData(0, Qt.UserRole, ("copy", m["name"]))
-                    it.addChild(cm)
-            for t in iface["textures"]:
-                ti = QTreeWidgetItem([t["name"], t["fmt"],
-                                      "%s · %s" % (src_of.get(t["name"], ""), t["reg"])])
-                ti.setData(0, Qt.UserRole, ("copy", t["name"]))
-                grp["texture"].addChild(ti)
-            for s in iface["samplers"]:
-                si = QTreeWidgetItem([s["name"], "",
-                                      "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
-                si.setData(0, Qt.UserRole, ("copy", s["name"]))
-                grp["sampler"].addChild(si)
-        else:
+        if not iface:
+            root = QTreeWidgetItem(["固有输入", "", ""])
+            self.tree_inputs.addTopLevelItem(root)
             root.addChild(QTreeWidgetItem(
                 ["(缺少预设标准接口: 先跑 scripts/_gen_iface.py)", "", ""]))
+        else:
+            for gkey, gtitle, gdesc in (
+                    ("engine", "固有输入 (引擎, 只读)", "引擎提供值; 材质无需声明"),
+                    ("material", "标准材质槽 (可选, 由 mdf2 提供)",
+                     "引擎固定槽位(t1/t2/t3/b3); 材质用到才生效")):
+                sub = {c: [x for x in iface[c + "s"]
+                           if src_of.get(x["name"], "") == gkey]
+                       for c in ("cbuffer", "texture", "sampler")}
+                if not any(sub.values()):
+                    continue
+                top = QTreeWidgetItem([gtitle, "", gdesc])
+                self.tree_inputs.addTopLevelItem(top)
+                # 每组内部再按 cbuffer / texture / sampler 分类(成员默认折叠)
+                grp = {}
+                for cat in ("cbuffer", "texture", "sampler"):
+                    g = QTreeWidgetItem(["%s (%d)" % (cat, len(sub[cat])), "", ""])
+                    top.addChild(g)
+                    grp[cat] = g
+                for cb in sub["cbuffer"]:
+                    it = QTreeWidgetItem([cb["name"], cb["reg"],
+                                          "%s · %d 成员"
+                                          % (src_of.get(cb["name"], ""), len(cb["members"]))])
+                    grp["cbuffer"].addChild(it)
+                    for m in cb["members"]:
+                        cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
+                        cm.setData(0, Qt.UserRole, ("copy", m["name"]))
+                        it.addChild(cm)
+                for t in sub["texture"]:
+                    ti = QTreeWidgetItem([t["name"], t["fmt"],
+                                          "%s · %s" % (src_of.get(t["name"], ""), t["reg"])])
+                    ti.setData(0, Qt.UserRole, ("copy", t["name"]))
+                    grp["texture"].addChild(ti)
+                for s in sub["sampler"]:
+                    si = QTreeWidgetItem([s["name"], "",
+                                          "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
+                    si.setData(0, Qt.UserRole, ("copy", s["name"]))
+                    grp["sampler"].addChild(si)
         # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
         tmpl = self.cmb_tmpl.currentData() or "deferred_std"
         pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名> 引用"])
