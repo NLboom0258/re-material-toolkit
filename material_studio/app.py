@@ -55,6 +55,8 @@ from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E40
 from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
 from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
 from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
+from tools.material_toolkit.lib import mmtr_presets as presets  # noqa: E402
+from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
@@ -2342,26 +2344,12 @@ class MaterialSystemPanel(QWidget):
                                       self.cmb_light.currentData()):
             self.cmb_tmpl.addItem(t, t)
         self.ed_mmtr = QLineEdit()
-        btn_mmtr = QPushButton("选择…")
-        btn_mmtr.clicked.connect(self._browse_base_mmtr)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self.ed_mmtr)
-        row.addWidget(btn_mmtr)
-        w_mmtr = QWidget()
-        w_mmtr.setLayout(row)
+        self.ed_mmtr.setPlaceholderText("导出 mdf2 时的 MasterMaterial 路径(可留空)")
         self.ed_name = QLineEdit()
-        self.chk_nogen = QCheckBox("无 donor(凭空生成)")
-        self.chk_nogen.setToolTip(
-            "勾选后不需要基础 mmtr: 用版本预设 + 我们的材质 PS 直接生成(不接任何 master)。\n"
-            "注意: 材质贴图/参数要生效, 模板需用声明了完整标准资源集的 deferred_std(见 skill §三十四z)")
-        self.chk_nogen.stateChanged.connect(self._on_nogen_toggled)
-        self.ed_mmtr.setEnabled(True)
         form.addRow("光照模式", self.cmb_light)
         form.addRow("着色类型", self.cmb_shading)
         form.addRow("材质模板(pass)", self.cmb_tmpl)
-        form.addRow("基础 mmtr", w_mmtr)
-        form.addRow("生成方式", self.chk_nogen)
+        form.addRow("材质路径(mdf2 用)", self.ed_mmtr)
         form.addRow("材质名", self.ed_name)
         left.addLayout(form)
 
@@ -2537,22 +2525,10 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setStyleSheet("color:#1a7f37")
 
     def _base_iface(self):
-        """基础 mmtr 的**目标 pass**(由当前模板推出)PS 接口; 按 (路径, pass) 缓存。"""
-        base = self.ed_mmtr.text().strip()
-        pass_name = _pass_of_template(self.cmb_tmpl.currentData())
-        key = (base, pass_name)
-        if key != getattr(self, "_iface_key", None):
-            self._iface_key = key
-            self._iface_cache = None
-            if base and os.path.isfile(base):
-                try:
-                    data = open(base, "rb").read()
-                    idx = mgen.pick_iface_ps(data, pass_name)
-                    self._iface_cache = (miface.iface_from_dxbc(extract_blob(data, idx))
-                                         if idx is not None else None)
-                except Exception:  # noqa: BLE001
-                    self._iface_cache = None
-        return getattr(self, "_iface_cache", None)
+        """**标准接口**(预设 iface.json) —— 固有输入来源; 不再依赖“基础 mmtr”。"""
+        if not hasattr(self, "_iface_cache"):
+            self._iface_cache = presets.std_iface()
+        return self._iface_cache
 
     def _effective_iface(self):
         """基础接口 + 自定义输入扩展(与 generate 一致), 供编译/组装视图用。"""
@@ -2614,35 +2590,35 @@ class MaterialSystemPanel(QWidget):
 
     def refresh_inputs(self):
         self.tree_inputs.clear()
-        # 1) pass 输入(基础 mmtr 的目标 pass PS 接口)
-        pass_name = _pass_of_template(self.cmb_tmpl.currentData())
-        root = QTreeWidgetItem(["pass 输入 (基础 mmtr 的 %s PS)" % pass_name, "", ""])
+        # 1) 固有输入(标准接口; 只读)
+        root = QTreeWidgetItem(["固有输入 (标准接口, 只读)", "",
+                                "引擎要求完整资源集才会绑定材质贴图/参数"])
         self.tree_inputs.addTopLevelItem(root)
-        base = self.ed_mmtr.text().strip()
+        src_of = {e["name"]: e.get("source", "") for e in minp.std()}
         iface = self._base_iface()
         if iface:
             for cb in iface["cbuffers"]:
                 it = QTreeWidgetItem(["cbuffer: %s" % cb["name"], cb["reg"],
-                                      "%d 成员" % len(cb["members"])])
+                                      "%s · %d 成员"
+                                      % (src_of.get(cb["name"], ""), len(cb["members"]))])
                 root.addChild(it)
                 for m in cb["members"]:
                     cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
                     cm.setData(0, Qt.UserRole, ("copy", m["name"]))
                     it.addChild(cm)
             for t in iface["textures"]:
-                ti = QTreeWidgetItem(["texture: %s" % t["name"], t["fmt"], t["reg"]])
+                ti = QTreeWidgetItem(["texture: %s" % t["name"], t["fmt"],
+                                      "%s · %s" % (src_of.get(t["name"], ""), t["reg"])])
                 ti.setData(0, Qt.UserRole, ("copy", t["name"]))
                 root.addChild(ti)
             for s in iface["samplers"]:
-                si = QTreeWidgetItem(["sampler: %s" % s["name"], "", s["reg"]])
+                si = QTreeWidgetItem(["sampler: %s" % s["name"], "",
+                                      "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
                 si.setData(0, Qt.UserRole, ("copy", s["name"]))
                 root.addChild(si)
-        elif base:
-            root.addChild(QTreeWidgetItem(
-                ["(读取接口失败: 基础 mmtr 无 %s pass)" % pass_name, "",
-                 "检查着色类型/基础 mmtr 是否匹配模板"]))
         else:
-            root.addChild(QTreeWidgetItem(["(未选择基础 mmtr)", "", ""]))
+            root.addChild(QTreeWidgetItem(
+                ["(缺少预设标准接口: 先跑 scripts/_gen_iface.py)", "", ""]))
         # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
         tmpl = self.cmb_tmpl.currentData() or "deferred_env"
         pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名> 引用"])
@@ -2756,16 +2732,6 @@ class MaterialSystemPanel(QWidget):
         return out
 
     # ---- 操作 ----
-    def _browse_base_mmtr(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择基础 mmtr", "",
-                                              "mmtr (*.mmtr.*);;All (*)")
-        if path:
-            self.ed_mmtr.setText(path)
-            self.asset.template["mmtr"] = path
-            if not self.ed_name.text().strip():
-                stem = re.sub(r"\.mmtr(\.\d+)?$", "", os.path.basename(path))
-                self.ed_name.setText(stem)
-
     def _load_default_material(self):
         tmpl = self.cmb_tmpl.currentData() or "deferred_env"
         try:
@@ -2850,46 +2816,25 @@ class MaterialSystemPanel(QWidget):
                                    v["strip_ok"], v["reflect_ok"]))
         self.lbl_status.setStyleSheet("color:#1a7f37")
 
-    def _base_mmtr(self):
-        return self.ed_mmtr.text().strip()
-
-    def _on_nogen_toggled(self, *_):
-        """切到「无 donor」时禁用基础 mmtr 输入(不再需要)。"""
-        self.ed_mmtr.setEnabled(not self.chk_nogen.isChecked())
-
     def _generate(self):
+        """生成 mmtr: 无 donor(版本预设 + 我们的材质 PS; 不接任何 master)。"""
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_env"
         if not self.asset.is_ok():
             errs = "\n".join(m for lv, m in self.asset.validate() if lv == "error")
             if QMessageBox.question(self, "配置有误", errs + "\n\n仍要生成吗？") != QMessageBox.Yes:
                 return None, None
-        if self.chk_nogen.isChecked():
-            # 无 donor: 版本预设 + 我们的材质 PS(凭空生成; 不接任何 master)
-            try:
-                data, rp = nogen.build(self.asset.shading_source or None,
-                                       _pass_of_template(tmpl), tmpl)
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(self, "生成失败", str(e))
-                return None, None
-            self._last_mmtr_bytes = data
-            return data, {"replaced": [], "replaced_instance": [], "skipped": [],
-                          "bad": [], "issues": rp.get("issues", []),
-                          "ps_size": rp["ps_size"], "groups": rp["groups"],
-                          "records": rp["records"], "nogen": True}
-        base = self._base_mmtr()
-        if not base or not os.path.isfile(base):
-            QMessageBox.warning(self, "缺少基础 mmtr", "请选择存在的模板 mmtr 文件")
-            return None, None
         try:
-            data, rep = mgen.generate(open(base, "rb").read(),
-                                      self.asset.shading_source or None, tmpl,
-                                      pass_name=_pass_of_template(tmpl))
+            data, rp = nogen.build(self.asset.shading_source or None,
+                                   _pass_of_template(tmpl), tmpl)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))
             return None, None
         self._last_mmtr_bytes = data
-        return data, rep
+        return data, {"replaced": [], "replaced_instance": [], "skipped": [],
+                      "bad": [], "issues": rp.get("issues", []),
+                      "ps_size": rp["ps_size"], "groups": rp["groups"],
+                      "records": rp["records"], "nogen": True}
 
     def generate_mmtr(self):
         data, rep = self._generate()
@@ -2901,15 +2846,15 @@ class MaterialSystemPanel(QWidget):
         if not path:
             return
         open(path, "wb").write(data)
-        tag = "无 donor" if rep.get("nogen") else "模板"
-        self.lbl_status.setText("已生成(%s) %s (%dB) 替换=%s 实例=%s 跳过=%s"
+        tag = "无 donor"
+        self.lbl_status.setText("已生成(%s) %s (%dB) PS=%sB 绑定组=%s 槽=%s"
                                 % (tag, os.path.basename(path), len(data),
-                                   rep.get("replaced"), rep.get("replaced_instance"),
-                                   rep.get("skipped")))
+                                   rep.get("ps_size"), rep.get("groups"),
+                                   rep.get("records")))
         QMessageBox.information(self, "生成成功",
-                                "-> %s\n\n方式=%s\n替换=%s\n实例=%s\n跳过=%s"
-                                % (path, tag, rep.get("replaced"),
-                                   rep.get("replaced_instance"), rep.get("skipped")))
+                                "-> %s\n\n方式=%s\nPS=%sB\n绑定组=%s\n记录槽=%s"
+                                % (path, tag, rep.get("ps_size"), rep.get("groups"),
+                                   rep.get("records")))
 
     def export_instance(self):
         self._sync_asset()
