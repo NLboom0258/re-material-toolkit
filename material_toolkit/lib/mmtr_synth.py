@@ -116,6 +116,29 @@ def verify_record_counts(data):
     return bad, exc
 
 
+def boundary_issues(data):
+    """输入边界校验: 每槽 PS 的输入签名(ISGN) 必须 ⊆ 其 VS 的输出签名(OSGN)。
+
+    D3D12 建 PSO 会校验"PS 输入 ⊆ VS 输出"; 超标则整个材质 pass **被静默跳过**(不崩不报错) ——
+    见 PROJECT_SUMMARY "DX12"。名称忽略大小写、跳过系统值语义(详见 dxbc_sig.check_input_supported)。
+
+    返回 [(slot, name, sem_index, ps_mask, vs_mask)] (vs_mask=None = VS 无此槽); 空 = 合规。
+    """
+    data = bytes(data)
+    img = MmtrImage.from_bytes(data)
+    from . import dxbc_sig as SG
+    out = []
+    for slot in range(REC_N):
+        ps = img.rec_field(slot, 0x00)
+        vs = img.rec_field(slot, -0x20)
+        if not ps or not vs:
+            continue
+        for (n, sem, pm, vm) in SG.check_input_supported(
+                SG.input_signature(img.blob_at(ps)), SG.output_signature(img.blob_at(vs))):
+            out.append((slot, n, sem, pm, vm))
+    return out
+
+
 # --------------------------------------------------------------- 语义 spec 合成(头部内容可计算)
 # 每槽的"语义字段"(位置/大小/程序指针/绑定指针/计数) 可计算; 其余(TBD/gap/程序表) 归"残差"照抄。
 _SLOT_SEMANTIC_FIELDS = (0x00, 0x08, -0x28, -0x20, 0x9C, 0x88, 0x8C, 0xD8,

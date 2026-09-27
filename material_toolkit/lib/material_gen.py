@@ -227,8 +227,10 @@ def generate(template, material_src=None, template_name="deferred_env",
         if not B.verify_dxbc(B.extract_blob(out, idx))["disasm_ok"]:
             bad.append(idx)
 
+    from . import mmtr_synth as _S
     return out, {"replaced": cb_targets, "replaced_instance": inst_targets,
                  "skipped": skipped, "bad": bad,
                  "issues": MmtrModel(out).validate(), "ps_size": len(ps),
                  "instance_ps_size": len(ps_inst) if ps_inst else 0,
-                 "added_params": added_params, "added_textures": list(textures)}
+                 "added_params": added_params, "added_textures": list(textures),
+                 "boundary": _S.boundary_issues(out)}
