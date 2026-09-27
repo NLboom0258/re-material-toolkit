@@ -31,7 +31,9 @@ cbuffer SceneInfo : register(b0)
 cbuffer GBufferType : register(b1)
 {
     float  gbufferTypeFlag;
-    float3 gbufferTypeReserve;
+    float  gbufferTypeReserve0;
+    float  gbufferTypeReserve1;
+    float  gbufferTypeReserve2;
 };
 
 cbuffer Tonemap : register(b2)

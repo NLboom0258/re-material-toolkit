@@ -31,7 +31,9 @@ cbuffer SceneInfo : register(b0)
 cbuffer GBufferType : register(b1)
 {
     float  gbufferTypeFlag;
-    float3 gbufferTypeReserve;
+    float  gbufferTypeReserve0;
+    float  gbufferTypeReserve1;
+    float  gbufferTypeReserve2;
 };
 
 cbuffer Tonemap : register(b2)
@@ -190,6 +192,8 @@ PSOut main(PSIn i)
         o.o0.rgb += BaseMetalMap.Sample(AutomaticWrap, i.v2.zz).rgb;
         o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
         o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
+                  + gbufferTypeReserve0.xxx + gbufferTypeReserve1.xxx
+                  + gbufferTypeReserve2.xxx
                   + exposureAdjustment.xxx + VAR_BaseColor.rgb;
         //__KEEPALIVE__
     }
