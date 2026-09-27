@@ -66,6 +66,10 @@ def post_path():
     return os.path.join(_DIR, "post.bin")
 
 
+def iface_path():
+    return os.path.join(_DIR, "iface.json")
+
+
 def info_path():
     return os.path.join(_DIR, "info.json")
 
@@ -97,6 +101,18 @@ def post():
     """post 表区原值 [POST_LO, SKELETON_HI)(skeleton 里该区被记录栅格清零)。"""
     with open(post_path(), "rb") as f:
         return f.read()
+
+
+def std_iface():
+    """引擎/材质“标准接口”(由参考 Deferred PS 抽取; 含 UserMaterial 标准成员)。
+
+    无 donor 构建时作为**基础接口**, 再加材质自己声明的参数/贴图。无文件返回 None。
+    """
+    p = iface_path()
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def info():
@@ -133,6 +149,14 @@ def extract(ref_data, outdir=None):
     # post 表区原值(skeleton 会把它当作"记录字段"清零 ⇒ 单独留存)
     with open(os.path.join(outdir, "post.bin"), "wb") as f:
         f.write(ref_data[POST_LO:SKELETON_HI])
+    # 标准材质接口(来自参考 Deferred PS): 无 donor 构建的基础接口
+    from .material_gen import pick_iface_ps
+    from .material_iface import iface_from_dxbc
+    _bi = pick_iface_ps(ref_data, "Deferred")
+    if _bi is not None:
+        with open(os.path.join(outdir, "iface.json"), "w", encoding="utf-8") as f:
+            json.dump(iface_from_dxbc(extract_blob(ref_data, _bi)), f,
+                      ensure_ascii=False, separators=(",", ":"))
     # 参考 blob 起点 -> md5(供按内容重定位 PT 里的 blob 指针)
     bmap, o = {}, int(tail.boundaries["blob_start"])
     while o + 28 <= len(ref_data) and ref_data[o:o + 4] == b"DXBC":

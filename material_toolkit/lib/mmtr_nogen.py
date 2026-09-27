@@ -57,25 +57,32 @@ def _variant_name(r):
 
 
 def _iface_from_decls(material_src):
-    """按材质源码里的 `//! param/tex` 声明生成接口(零 donor 用的基础接口)。
+    """按材质源码里的 `//! param/tex` 声明生成接口(**规范发射**)。
 
-    基础 = UserMaterial(b3) 空 cbuffer + 标准采样器 AutomaticWrap(s0);
-    贴图寄存器从 **t1** 起(标准 Deferred: t0=WhitePtSrv, t1=BaseMetalMap...)。
-    无声明时返回 None(保持零声明)。
+    基础 = 预设里的**标准材质接口**(引擎 cbuffer/SRV + UserMaterial 标准成员);
+    材质自己的参数追加到 UserMaterial(按 HLSL 打包算偏移), 贴图接在标准贴图之后(t4 起)。
+    引用到的参数/贴图由 RDEF 自动进尾段(参数表/池/描述符/计数)。
+    无声明时返回 None(保持零声明 / 模板自带接口)。
     """
     from . import material_gen as MG
     from . import material_iface as MI
     params, textures = MG.parse_decls(material_src)
     if not params and not textures:
         return None
-    iface = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
-             "textures": [],
-             "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
-    iface, _added = MI.extend(iface, "UserMaterial", params, textures)
-    for k, t in enumerate(iface["textures"]):
-        t["reg"] = "t%d" % (k + 1)
-        if t.get("fmt") != "byte":
-            t["fmt"], t["dim"] = "float4", "2d"
+    import copy
+    base = P.std_iface()
+    if base is None:
+        base = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
+                "textures": [],
+                "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
+    # 声明**标准名**时直接复用标准接口里的项(不重复发射)
+    known_p = {m["name"] for c in base["cbuffers"] for m in c["members"]}
+    known_t = {t["name"] for t in base["textures"]}
+    params = [(n, t) for (n, t) in params if n not in known_p]
+    textures = [n for n in textures if n not in known_t]
+    iface = copy.deepcopy(base)
+    if params or textures:
+        iface, _added = MI.extend(iface, "UserMaterial", params, textures)
     return iface
 
 
