@@ -90,7 +90,7 @@ struct PSIn
     float4 v2    : INTERPOLATOR1; // reg2  x=UV0.y, yz=UV1, w=切线.x
     float4 v3    : INTERPOLATOR2; // reg3  xy=切线.yz, z=bitangent 符号, w=世界坐标.x
     float4 v4    : INTERPOLATOR3; // reg4  xy=世界坐标.yz, zw=速度项
-    float4 v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)
+    float  v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)(VS 仅输出 x ⇒ 必须声明标量)
 };
 
 // ---- 输出签名(4 张 GBuffer) ----

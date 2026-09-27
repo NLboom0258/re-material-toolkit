@@ -120,7 +120,7 @@ struct PSIn
     float4 v2    : INTERPOLATOR1; // reg2  x=UV0.y, yz=UV1, w=切线.x
     float4 v3    : INTERPOLATOR2; // reg3  xy=切线, z=bitangent 符号
     float4 v4    : INTERPOLATOR3; // reg4  zw=速度项(当前)
-    float4 v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)
+    float  v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)(VS 仅输出 x ⇒ 声明标量)
     nointerpolation float idx : NOINTERPOLATOR0; // reg6  材质实例索引
 };
 

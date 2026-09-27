@@ -65,7 +65,18 @@ def build_source(material_src=None, template="deferred_env", iface=None,
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None):
-    """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。"""
-    return B.compile_hlsl(build_source(material_src, template, iface, style, keepalive),
-                          entry, target, name="%s.hlsl" % template)
+                    keepalive=None, graft=False):
+    """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
+
+    注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
+    静默跳过的根因是 **PS 的 ISGN 声明分量超出了 VS 的 OSGN 输出**(如把 `INTERPOLATOR4`
+    声明成 `float4` 而 VS 只输出 `.x`); 模板改成标量后, 我们自编译的元数据本身就合法,
+    **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
+    """
+    dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style, keepalive),
+                               entry, target, name="%s.hlsl" % template)
+    if err or not graft:
+        return dxbc, err
+    from . import ps_meta
+    dxbc, _info = ps_meta.graft(dxbc)
+    return dxbc, err

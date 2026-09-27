@@ -70,6 +70,24 @@ def iface_path():
     return os.path.join(_DIR, "iface.json")
 
 
+def ps_meta_paths():
+    """参考 Deferred PS 的元数据块文件(RDEF/ISGN/OSGN), 供"元数据嫁接"。"""
+    return tuple(os.path.join(_DIR, "ps_meta.%s" % k) for k in ("rdef", "isgn", "osgn"))
+
+
+def _chunk_payload(dxbc, name):
+    """取 DXBC 中某块(fourCC)的 payload(无则 None)。"""
+    if not dxbc or len(dxbc) < 32 or dxbc[:4] != b"DXBC":
+        return None
+    n = struct.unpack_from("<I", dxbc, 28)[0]
+    for i in range(n):
+        o = struct.unpack_from("<I", dxbc, 32 + 4 * i)[0]
+        if dxbc[o:o + 4] == name.encode():
+            sz = struct.unpack_from("<I", dxbc, o + 4)[0]
+            return dxbc[o + 8:o + 8 + sz]
+    return None
+
+
 def info_path():
     return os.path.join(_DIR, "info.json")
 
@@ -115,6 +133,18 @@ def std_iface():
         return json.load(f)
 
 
+def ps_meta():
+    """参考 Deferred PS 的 RDEF/ISGN/OSGN 块 payload(供 PS "元数据嫁接"); 无则 None。"""
+    paths = ps_meta_paths()
+    if not all(os.path.exists(p) for p in paths):
+        return None
+    out = {}
+    for k, p in zip(("RDEF", "ISGN", "OSGN"), paths):
+        with open(p, "rb") as f:
+            out[k] = f.read()
+    return out
+
+
 def info():
     with open(info_path(), encoding="utf-8") as f:
         return json.load(f)
@@ -158,6 +188,15 @@ def extract(ref_data, outdir=None):
         with open(os.path.join(outdir, "iface.json"), "w", encoding="utf-8") as f:
             json.dump(iface_from_dxbc(extract_blob(ref_data, _bi)), f,
                       ensure_ascii=False, separators=(",", ":"))
+    # 参考 Deferred PS 的元数据块(RDEF/ISGN/OSGN) —— 供编译出的 PS 做"元数据嫁接"
+    # (DX12 会严格比对元数据, 不一致会静默跳过该材质 pass; 见 lib/ps_meta.py)
+    if _bi is not None:
+        _ps = extract_blob(ref_data, _bi)
+        for _k in ("RDEF", "ISGN", "OSGN"):
+            _pl = _chunk_payload(_ps, _k)
+            if _pl is not None:
+                with open(os.path.join(outdir, "ps_meta.%s" % _k.lower()), "wb") as f:
+                    f.write(_pl)
     # 参考 blob 起点 -> md5(供按内容重定位 PT 里的 blob 指针)
     bmap, o = {}, int(tail.boundaries["blob_start"])
     while o + 28 <= len(ref_data) and ref_data[o:o + 4] == b"DXBC":
