@@ -151,8 +151,15 @@ _ASM_OPCODES = {
     "ftoi", "itof", "ftou", "utof", "f16tof32", "f32tof16", "sincos",
     "cos", "sin", "exp", "log", "sqrt", "rsq", "rcp", "frc", "round_ne",
     "round_ni", "round_pi", "round_z", "ishl", "ishr", "ushr", "imad",
-    "umad", "umul", "udiv", "umod", "imod", "ine", "ige", "ilt", "ieq",
-    "ineg", "iadd", "inot", "ult", "uge", "ugt", "ule", "ueq", "une",
+    "imul", "umad", "umul", "udiv", "umod", "imod", "ine", "ige", "ilt",
+    "ieq", "ineg", "iadd", "inot", "imax", "imin", "umax", "umin",
+    "ult", "uge", "ugt", "ule", "ueq", "une",
+    # 双精度(SM5 亦有): 常见几条
+    "dadd", "dmax", "dmin", "dmul", "ddiv", "dfma", "drcp", "drsq",
+    "dsqrt", "dcmp", "dmov", "dmovc", "dtof", "ftod", "dtoi", "itod",
+    "dtou", "utod", "dbreakc", "ddiscard",
+    # 曲面细分阶段(hs/ds 的非 dcl_ 声明)
+    "hs_decls", "hs_control_point_phase", "hs_fork_phase", "hs_join_phase",
     "ubfe", "ibfe", "switch", "case", "default", "endswitch", "loop",
     "endloop", "break", "breakc", "continue", "continuec", "if_nz", "if_z",
     "else", "endif", "ret", "retc", "call", "callc", "nop", "sync", "emit",
@@ -164,6 +171,24 @@ _ASM_OPCODES = {
     "imm_atomic_xor", "imm_atomic_exch", "imm_atomic_cmp_exch",
     "atomic_iadd", "atomic_imax", "atomic_imin", "atomic_and", "atomic_or",
     "atomic_xor", "atomic_exch", "atomic_cmp_exch",
+    # 补齐汇编器(Assembler.cpp)里有、而这里缺的指令(2026-09-28, 由 _asmops_diff 全量核对)
+    "abort", "atomic_cmp_store", "atomic_umax", "atomic_umin",
+    "bufinfo", "bufinfo_indexable", "deq", "dge", "dlt", "dne",
+    "deriv_rtx_coarse", "deriv_rtx_fine", "deriv_rty_coarse", "deriv_rty_fine",
+    "emit_then_cut", "eval_snapped",
+    "gather4_aoffimmi", "gather4_aoffimmi_indexable",
+    "gather4_c_aoffimmi", "gather4_c_aoffimmi_indexable",
+    "gather4_po_c", "gather4_po_c_indexable",
+    "imm_atomic_umax", "imm_atomic_umin",
+    "ld_aoffimmi", "ld_aoffimmi_indexable", "ldms", "ldms_aoffimmi",
+    "ldms_aoffimmi_indexable", "ldms_indexable", "lod", "msad", "round_nz",
+    "sample_aoffimmi", "sample_aoffimmi_indexable",
+    "sample_b_aoffimmi", "sample_b_aoffimmi_indexable",
+    "sample_c_aoffimmi", "sample_c_aoffimmi_indexable",
+    "sample_c_lz_aoffimmi", "sample_c_lz_aoffimmi_indexable",
+    "sample_d_aoffimmi", "sample_d_aoffimmi_indexable",
+    "sample_l_aoffimmi", "sample_l_aoffimmi_indexable",
+    "sampled", "uaddc", "usubb",
 }
 
 # HLSL 混合标记(见翻译器 README); 不在其中的 HLSL*/DXBC* 会标红
