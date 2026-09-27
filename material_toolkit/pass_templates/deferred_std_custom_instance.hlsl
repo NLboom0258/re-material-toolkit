@@ -39,9 +39,10 @@ struct MaterialInput
     float2 uv1;
     float3 positionWS;
     float3 viewDir;
-    float3 Normal;
-    float3 Tangent;
-    float3 Bitangent;
+    float3 Normal;         // ⚠ GBuffer/插值约定(已 .xzy); 光照请用 NormalWS
+    float3 NormalWS;       // 世界(光照)空间法线(= Normal.xzy) —— 与光方向同空间, 做 N·L 用它
+    float3 Tangent;        // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
+    float3 Bitangent;      // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 camPos;
     float3 camDir;
     float3 camUp;
@@ -86,6 +87,7 @@ PSOut main(PSIn i)
     mi.uv1 = i.v2.yz;
     mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);
     mi.Normal = normalize(i.v1.xyz).xzy;
+    mi.NormalWS = mi.Normal.xzy;   // 世界(光照)空间; 做 N·L 用这个
     mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     mi.Bitangent = cross(mi.Normal, mi.Tangent);
     mi.Bitangent = (i.v3.z < 0.0) ? -mi.Bitangent : mi.Bitangent;

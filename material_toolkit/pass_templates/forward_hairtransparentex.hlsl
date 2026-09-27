@@ -57,7 +57,8 @@ struct MaterialInput
 {
     float2 uv0;            // 主 UV
     float2 uv1;            // 副 UV
-    float3 Normal;         // 世界法线(已归一)
+    float3 Normal;         // 世界空间法线(本模板未做 .xzy, 可直接用于光照)
+    float3 NormalWS;       // = Normal(本模板同值; 统一命名, 便于材质源跨模板通用)
     float3 Tangent;        // 世界切线(已归一)
     float3 Bitangent;      // 世界副切线(已归一)
     float3 positionWS;     // 世界坐标
@@ -94,6 +95,7 @@ float4 main(PSIn i) : SV_Target0
     mi.uv0 = uv0;
     mi.uv1 = uv1;
     mi.Normal = N;
+    mi.NormalWS = mi.Normal;       // 本模板 mi.Normal 已是世界空间
     mi.Tangent = T;
     mi.Bitangent = B;
     mi.positionWS = posWS;

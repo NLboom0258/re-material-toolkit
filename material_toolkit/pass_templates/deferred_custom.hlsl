@@ -112,9 +112,10 @@ struct MaterialInput
     float2 uv1;            // 副 UV
     float3 positionWS;     // 世界坐标
     float3 viewDir;        // 相机 -> 像素(单位向量)
-    float3 Normal;         // 切线基: 法线
-    float3 Tangent;        // 切线基: 切线
-    float3 Bitangent;      // 切线基: 副切线
+    float3 Normal;         // ⚠ GBuffer/插值约定(已 .xzy); 光照请用 NormalWS
+    float3 NormalWS;       // 世界(光照)空间法线(= Normal.xzy) —— 与光方向同空间, 做 N·L 用它
+    float3 Tangent;        // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
+    float3 Bitangent;      // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 camPos;         // 相机世界坐标
     float3 camDir;         // 相机前向(已归一)
     float3 camUp;          // 相机上向(已归一)
@@ -160,6 +161,7 @@ PSOut main(PSIn i)
     mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
                                  transposeViewInvMat[2].y));
     mi.Normal = normalize(i.v1.xyz).xzy;
+    mi.NormalWS = mi.Normal.xzy;   // 世界(光照)空间; 做 N·L 用这个
     mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     mi.Bitangent = cross(mi.Normal, mi.Tangent);
     mi.Bitangent = (i.v3.z < 0.0) ? -mi.Bitangent : mi.Bitangent;
