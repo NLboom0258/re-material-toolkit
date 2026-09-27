@@ -56,8 +56,35 @@ def _variant_name(r):
     return (r.get("prefix") or "") + r["tech"]
 
 
-def build(material_src, pass_name="Deferred", template="deferred_bare"):
-    """-> (mmtr bytes, report)。"""
+def _iface_from_decls(material_src):
+    """按材质源码里的 `//! param/tex` 声明生成接口(零 donor 用的基础接口)。
+
+    基础 = UserMaterial(b3) 空 cbuffer + 标准采样器 AutomaticWrap(s0);
+    贴图寄存器从 **t1** 起(标准 Deferred: t0=WhitePtSrv, t1=BaseMetalMap...)。
+    无声明时返回 None(保持零声明)。
+    """
+    from . import material_gen as MG
+    from . import material_iface as MI
+    params, textures = MG.parse_decls(material_src)
+    if not params and not textures:
+        return None
+    iface = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
+             "textures": [],
+             "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
+    iface, _added = MI.extend(iface, "UserMaterial", params, textures)
+    for k, t in enumerate(iface["textures"]):
+        t["reg"] = "t%d" % (k + 1)
+        if t.get("fmt") != "byte":
+            t["fmt"], t["dim"] = "float4", "2d"
+    return iface
+
+
+def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
+    """-> (mmtr bytes, report)。
+
+    iface: 接口(来自 material_iface); None 时按材质源码的 `//! param/tex` 声明自动生成
+           (无声明则保持零声明)。
+    """
     if not P.has_preset():
         raise RuntimeError("缺少预设: 先跑 scripts/gen_presets.py <ref.mmtr>")
     skeleton = P.skeleton()
@@ -72,7 +99,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         return bytes(bank_data[e[0]:e[0] + e[1]]) if e else None
 
     # 1) 我们的 PS
-    ps_blob, err = MP.compile_shading(material_src, template)
+    if iface is None:
+        iface = _iface_from_decls(material_src)
+    ps_blob, err = MP.compile_shading(material_src, template, iface=iface)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
 
@@ -119,9 +148,39 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         t4 = _uav_order(ps) or _uav_order(vs) or []
         key = (tuple(cbd), tuple(bo["smp"]), tuple(bo["tex"]), tuple(t4))
         if key not in groups:
-            groups[key] = {"cb": cbd, "smp": bo["smp"], "tex": bo["tex"], "t4": t4}
+            groups[key] = {"cb": cbd, "smp": bo["smp"], "tex": bo["tex"], "t4": t4,
+                           "vs": vs, "ps": ps}
             order.append(key)
         gkey[i] = key
+
+    # 3b) 描述符区: 预设原样(供未建模指针 +0x30/+0x68) + 我们**按组派生**的 8B 条目。
+    #     ⚠ 不能整体照搬预设: 我们的 PS 资源集与参考不同 ⇒ 名称与条目会错位(绑不上)。
+    def _grp_names(g, kind):
+        return [d[0] for d in g["cb"]] if kind == "cb" else list(g[kind])
+
+    pre = P.desc()
+    pad = b"\x00" * ((8 - (len(pre) % 8)) % 8)
+    gen, gplace = bytearray(), {}
+    for k in order:
+        g = groups[k]
+        vm, pm = T._bind_info_map(g.get("vs")), T._bind_info_map(g.get("ps"))
+        pos = {}
+        for kind in ("cb", "smp", "tex"):
+            pos[kind] = len(pre) + len(pad) + len(gen)
+            for nm in _grp_names(g, kind):
+                vi, pi = vm.get(nm), pm.get(nm)
+                if kind == "cb":
+                    typ = 0xFF
+                elif kind == "smp":
+                    typ = 0x00
+                else:
+                    typ = T._TEX_DIM_TYPE.get((vi or pi or (0, 0, "2d"))[2], 0x02)
+                stage = 0x11 if (vi and pi) else (0x01 if vi else 0x10)
+                code = (typ << 24) | (stage << 16) | (pi[1] if pi else 0)
+                # 第一条 u32 = VS 绑定寄存器(仅 VS 侧/共享才有)
+                gen += struct.pack("<II", (vi[1] if vi else 0), code)
+        gplace[k] = pos
+    desc = pre + pad + bytes(gen)
 
     # 4) 尾段各段(pool/cb/param/desc/string)
     smp_u, tex_u, cb_u, t4_u = {}, {}, {}, {}
@@ -248,13 +307,19 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         struct.pack_into("<I", head, base + 0x18, int(r.get("x18") or 0))
         struct.pack_into("<I", head, base + 0xC8, int(r.get("c8") or 0))
         struct.pack_into("<I", head, base + 0xA0, len(s["cs"]) if s["cs"] else 0)
-        for fo, rk in ((0x30, "d30"), (0x38, "d38"), (0x48, "d48"),
-                       (0x58, "d58"), (0x68, "d68")):
+        for fo, rk in ((0x30, "d30"), (0x68, "d68")):
             rel = r.get(rk)
             struct.pack_into("<I", head, base + fo, desc_base + rel if rel else 0)
         k = gkey.get(i)
         if k is not None:
             g = groups[k]
+            gp = gplace[k]
+            struct.pack_into("<I", head, base + 0x38,
+                             desc_base + gp["cb"] if g["cb"] else 0)
+            struct.pack_into("<I", head, base + 0x48,
+                             desc_base + gp["smp"] if g["smp"] else 0)
+            struct.pack_into("<I", head, base + 0x58,
+                             desc_base + gp["tex"] if g["tex"] else 0)
             struct.pack_into("<I", head, base + 0x40, cb_base + cb_rel[k] if g["cb"] else 0)
             struct.pack_into("<I", head, base + 0x50, pool_base + smp_rel[k] if g["smp"] else 0)
             struct.pack_into("<I", head, base + 0x60, pool_base + tex_rel[k] if g["tex"] else 0)
@@ -335,4 +400,5 @@ def build(material_src, pass_name="Deferred", template="deferred_bare"):
         "ps_size": len(ps_blob), "records": len(slots),
         "groups": len(order), "str10": info.get("str10"),
         "pt_miss": pt_miss, "pt_nomap": pt_nomap,
+        "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
     }
