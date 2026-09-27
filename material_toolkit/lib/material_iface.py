@@ -163,7 +163,9 @@ def _flat_cbuffer(out, cb):
 _ELEM = {"float": "float", "float2": "float2", "float3": "float3", "float4": "float4",
          "int": "int", "uint": "uint", "half": "float", "min16float": "float"}
 _DIMTYPE = {"2d": "Texture2D", "2darray": "Texture2DArray", "1d": "Texture1D",
-            "1darray": "Texture1DArray", "cube": "TextureCube", "3d": "Texture3D"}
+            "1darray": "Texture1DArray", "cube": "TextureCube", "3d": "Texture3D",
+            "cubearray": "TextureCubeArray", "2dms": "Texture2DMS",
+            "2dmsarray": "Texture2DMSArray"}
 
 
 def _texture_decl(t, reg=None):

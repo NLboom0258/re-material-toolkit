@@ -174,6 +174,7 @@ PSOut main(PSIn i)
         o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
         o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
                   + exposureAdjustment.xxx + VAR_LimLight_Color.rgb;
+        //__KEEPALIVE__
     }
     return o;
 }

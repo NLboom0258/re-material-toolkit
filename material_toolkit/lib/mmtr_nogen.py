@@ -57,32 +57,13 @@ def _variant_name(r):
 
 
 def _iface_from_decls(material_src):
-    """按材质源码里的 `//! param/tex` 声明生成接口(**规范发射**)。
+    """按材质源码里的 `//! param/tex/engine` 声明生成接口(**规范发射**)。
 
-    基础 = 预设里的**标准材质接口**(引擎 cbuffer/SRV + UserMaterial 标准成员);
-    材质自己的参数追加到 UserMaterial(按 HLSL 打包算偏移), 贴图接在标准贴图之后(t4 起)。
-    引用到的参数/贴图由 RDEF 自动进尾段(参数表/池/描述符/计数)。
-    无声明时返回 None(保持零声明 / 模板自带接口)。
+    委托 `material_inputs.build_iface_and_keepalive`(基础 = 预设**标准材质接口**);
+    无声明时返回 None。保活由 build 单独取(此处忽略)。
     """
-    from . import material_gen as MG
-    from . import material_iface as MI
-    params, textures = MG.parse_decls(material_src)
-    if not params and not textures:
-        return None
-    import copy
-    base = P.std_iface()
-    if base is None:
-        base = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
-                "textures": [],
-                "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
-    # 声明**标准名**时直接复用标准接口里的项(不重复发射)
-    known_p = {m["name"] for c in base["cbuffers"] for m in c["members"]}
-    known_t = {t["name"] for t in base["textures"]}
-    params = [(n, t) for (n, t) in params if n not in known_p]
-    textures = [n for n in textures if n not in known_t]
-    iface = copy.deepcopy(base)
-    if params or textures:
-        iface, _added = MI.extend(iface, "UserMaterial", params, textures)
+    from . import material_inputs as INP
+    iface, _ka, _rep = INP.build_iface_and_keepalive(material_src, P.std_iface())
     return iface
 
 
@@ -105,10 +86,14 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         e = bank.get(key)
         return bytes(bank_data[e[0]:e[0] + e[1]]) if e else None
 
-    # 1) 我们的 PS
+    # 1) 我们的 PS (接口 + 保活: 材质声明 -> 规范发射; 引擎资源声明 -> 声明即保活)
+    from . import material_inputs as INP
+    ka = ""
     if iface is None:
-        iface = _iface_from_decls(material_src)
-    ps_blob, err = MP.compile_shading(material_src, template, iface=iface)
+        iface, ka, _rep = INP.build_iface_and_keepalive(material_src, P.std_iface())
+    else:
+        _if, ka, _rep = INP.build_iface_and_keepalive(material_src, iface)
+    ps_blob, err = MP.compile_shading(material_src, template, iface=iface, keepalive=ka)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
 
