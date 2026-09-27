@@ -25,6 +25,7 @@
   python material_toolkit.py mat-synth  <in.mmtr> [other.mmtr]
   python material_toolkit.py mat-rebuild <in.mmtr> -o <out.mmtr>
   python material_toolkit.py mat-self   <base.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_bare] [--pass Deferred]
+  python material_toolkit.py mat-nogen  [material.hlsl] -o <out.mmtr> [--template deferred_std] [--pass Deferred]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -71,6 +72,7 @@ from lib import mmtr_standard as std  # noqa: E402
 from lib import mmtr_synth as synth  # noqa: E402
 from lib import mmtr_tail as mtail  # noqa: E402
 from lib import mmtr_selfgen as selfgen  # noqa: E402
+from lib import mmtr_nogen as nogen  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -314,6 +316,20 @@ def main():
               f"({len(data)} bytes, 零声明 PS {rep['ps_size']}B) 规范化尾段={rep['canonical']}")
         print(f"  替换={rep['replaced']}  跳过={rep['skipped']}  坏={rep['bad']}  "
               f"重算计数槽={rep['recounted']}")
+        _selfcheck_mmtr(data)
+    elif cmd == "mat-nogen":
+        mat = a[0] if a and not a[0].startswith("-") else None
+        out = a[a.index("-o") + 1] if "-o" in a else "nogen.mmtr.1808168797"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_std"
+        pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
+        material_src = open(mat, encoding="utf-8").read() if mat else None
+        data, rep = nogen.build(material_src, pname, tpl)
+        open(out, "wb").write(data)
+        print(f"OK: mat-nogen {mat or '(默认材质)'} --template {tpl} -> {out} "
+              f"({len(data)} bytes, PS {rep['ps_size']}B, blobs={rep['n_blobs']}, "
+              f"组={rep['groups']}, 槽={rep['records']})")
+        print(f"  接口贴图={rep['iface_tex'] or '无'}  "
+              f"PT 未解析={len(rep['pt_miss'])} 未映射={len(rep['pt_nomap'])}")
         _selfcheck_mmtr(data)
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
