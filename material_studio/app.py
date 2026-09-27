@@ -2296,8 +2296,8 @@ def _pass_template_names(shading=None, lighting=None):
 
 # 各 (着色类型, 光照模式) 的“默认模板”
 _PREFERRED_TEMPLATES = {
-    ("deferred", "default"): ("deferred_character", "deferred_env"),
-    ("deferred", "custom"): ("deferred_custom",),
+    ("deferred", "default"): ("deferred_std", "deferred_character", "deferred_env"),
+    ("deferred", "custom"): ("deferred_std_custom", "deferred_custom"),
     ("forward", "custom"): ("forward_hairtransparentex", "forward_eyetransparentex"),
     ("forward", "default"): ("forward_hair_lit",),
 }
@@ -2322,7 +2322,7 @@ class MaterialSystemPanel(QWidget):
         super().__init__(parent)
         self._loading = False
         self._last_mmtr_bytes = None
-        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_character"})
+        self.asset = masset.MaterialAsset(template={"pass_template": "deferred_std"})
         self._build_ui()
         self._apply_asset()
         self._load_default_material()
@@ -2483,7 +2483,7 @@ class MaterialSystemPanel(QWidget):
             root.addChild(it)
         self.tree_info.addTopLevelItem(root)
 
-        tmpl_now = self.asset.template.get("pass_template") or "deferred_env"
+        tmpl_now = self.asset.template.get("pass_template") or "deferred_std"
         if self.asset.lighting_mode == "custom":
             so = QTreeWidgetItem(["输出 (自定义光照 · 直控)", "", ""])
             for n, desc in masset.CUSTOM_OUTPUTS.get(self.asset.shading_type, []):
@@ -2634,7 +2634,7 @@ class MaterialSystemPanel(QWidget):
             root.addChild(QTreeWidgetItem(
                 ["(缺少预设标准接口: 先跑 scripts/_gen_iface.py)", "", ""]))
         # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
-        tmpl = self.cmb_tmpl.currentData() or "deferred_env"
+        tmpl = self.cmb_tmpl.currentData() or "deferred_std"
         pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名> 引用"])
         self.tree_inputs.addTopLevelItem(pre)
         for typ, nm, desc in _template_struct_fields(tmpl, "MaterialInput"):
@@ -2765,7 +2765,7 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 操作 ----
     def _load_default_material(self):
-        tmpl = self.cmb_tmpl.currentData() or "deferred_env"
+        tmpl = self.cmb_tmpl.currentData() or "deferred_std"
         try:
             src = mpass.default_material(tmpl)
         except Exception as e:  # noqa: BLE001
@@ -2816,7 +2816,7 @@ class MaterialSystemPanel(QWidget):
 
     def compile_check(self):
         self._sync_asset()
-        tmpl = self.asset.template.get("pass_template") or "deferred_env"
+        tmpl = self.asset.template.get("pass_template") or "deferred_std"
         iface, ka = self._effective_inputs()
         try:
             self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None,
@@ -2852,7 +2852,7 @@ class MaterialSystemPanel(QWidget):
     def _generate(self):
         """生成 mmtr: 无 donor(版本预设 + 我们的材质 PS; 不接任何 master)。"""
         self._sync_asset()
-        tmpl = self.asset.template.get("pass_template") or "deferred_env"
+        tmpl = self.asset.template.get("pass_template") or "deferred_std"
         if not self.asset.is_ok():
             errs = "\n".join(m for lv, m in self.asset.validate() if lv == "error")
             if QMessageBox.question(self, "配置有误", errs + "\n\n仍要生成吗？") != QMessageBox.Yes:

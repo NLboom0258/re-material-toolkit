@@ -1,10 +1,9 @@
 // ============================================================================
-// RE mmtr pass 模板: Deferred —— **std · 默认光照(PBR 语义输出)** —— 系统部分, 勿改
-// 定位: 默认光照模式。材质只给 **PBR 语义**(表3a: BaseColor/Metallic/Roughness/Normal/
-//       Emissive/Occlusion/Translucency); **引擎光照/后处理外置** —— 模板把语义打包进 GBuffer,
-//       之后的曝光/tonemap/光照由引擎做。
-// 依据: `deferred_env` 的打包逻辑; 接口/骨架用**我们的标准接口**(无 donor)。
-// 与 deferred_std_custom 的区别: 后者直控 4 个原始 GBuffer RT(custom)。
+// RE mmtr pass 模板: Deferred —— **std · 自定义光照(直控 GBuffer)** —— 系统部分, 勿改
+// 定位: 自定义光照模式。材质**直控** 4 个原始 GBuffer RT(原始值), 不经“PBR 语义 → 打包”;
+//       最终输出前的后处理(曝光等)也由材质经 `mi.exposureScale` 控制。
+// 接口/骨架用**我们的标准接口**(无 donor)。
+// 与 deferred_std 的区别: 后者给 PBR 语义(默认光照, 打包+光照/后处理外置)。
 // 组装方式: 本文件 + 用户的 MaterialMain(插入到下方标记行处)。
 // ============================================================================
 
@@ -84,21 +83,21 @@ SamplerState AutomaticWrap                       : register(s0);
 // ---- 输入签名(寄存器 0..5) ----
 struct PSIn
 {
-    float4 svpos : SV_Position;   // reg0
+    float4 svpos : SV_Position;   // reg0  屏幕像素坐标
     float4 v1    : INTERPOLATOR0; // reg1  xyz=法线, w=UV0.x
     float4 v2    : INTERPOLATOR1; // reg2  x=UV0.y, yz=UV1, w=切线.x
     float4 v3    : INTERPOLATOR2; // reg3  xy=切线.yz, z=bitangent 符号, w=世界坐标.x
-    float4 v4    : INTERPOLATOR3; // reg4  xy=世界坐标.yz
+    float4 v4    : INTERPOLATOR3; // reg4  xy=世界坐标.yz, zw=速度项
     float4 v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)
 };
 
 // ---- 输出签名(4 张 GBuffer) ----
 struct PSOut
 {
-    float4 o0 : SV_Target0;
-    float4 o1 : SV_Target1;
-    float4 o2 : SV_Target2;
-    float4 o3 : SV_Target3;
+    float4 o0 : SV_Target0;   // 原始 GBuffer RT0
+    float4 o1 : SV_Target1;   // 原始 GBuffer RT1
+    float4 o2 : SV_Target2;   // 原始 GBuffer RT2
+    float4 o3 : SV_Target3;   // 原始 GBuffer RT3
 };
 
 // ---- 材质输入(供 MaterialMain 使用) ----
@@ -106,28 +105,31 @@ struct MaterialInput
 {
     float2 uv0;
     float2 uv1;
+    float3 positionWS;
+    float3 viewDir;
     float3 Normal;
     float3 Tangent;
     float3 Bitangent;
-    float3 positionWS;
     float3 camPos;
     float3 camDir;
     float3 camUp;
+    float2 velocity;       // 系统: 屏幕空间速度(RT3.yz 默认)
+    float  exposureScale;  // 系统: 1/(白点*曝光系数)(RT0 曝光用)
 };
 
-// ---- 材质输出(PBR 语义; 表3a; 打包/光照/后处理由模板+引擎做) ----
+// ---- 材质输出(直写原始 GBuffer; 由 MaterialMain 赋值) ----
 struct MaterialOutput
 {
-    float3 BaseColor;
-    float  Metallic;
-    float  Roughness;
-    float3 NormalTS;       // 切线空间法线
-    float3 Emissive;
-    float  Occlusion;
-    float  Translucency;   // >0 且 Metallic<=0 时为半透明
+    float4 RT0;
+    float4 RT1;
+    float4 RT2;
+    float4 RT3;
 };
 
-// 法线八面体编码(等价原版)
+// 曝光补偿常量(延迟 RT0 会被引擎再乘曝光+tonemap; 供材质直写 RT0 时抵消)
+#define BARE_RT0_EXPOSURE 100.0
+
+// 法线八面体编码(等价原版; 供材质调用)
 float3 OctEncodeNormal(float3 n)
 {
     float l1 = abs(n.x) + abs(n.y) + abs(n.z);
@@ -145,61 +147,41 @@ float3 OctEncodeNormal(float3 n)
 PSOut main(PSIn i)
 {
     // ---- 1. 输入解包 ----
-    float2 uv0 = float2(i.v1.w, i.v2.x);
-    float2 uv1 = i.v2.yz;
-
-    float3 N = normalize(i.v1.xyz).xzy;
-    float3 T = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
-    float3 B = cross(N, T);
-    B = (i.v3.z < 0.0) ? -B : B;
-    B = normalize(B);
-    float3 posWS = float3(i.v3.w, i.v4.x, i.v4.y);
-
-    float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    float2 vel = (i.v4.zw / i.v5.x) - ndc;
-
-    // ---- 2. 材质逻辑(给 PBR 语义) ----
     MaterialInput mi;
-    mi.uv0 = uv0;
-    mi.uv1 = uv1;
-    mi.Normal = N;
-    mi.Tangent = T;
-    mi.Bitangent = B;
-    mi.positionWS = posWS;
+    mi.uv0 = float2(i.v1.w, i.v2.x);
+    mi.uv1 = i.v2.yz;
+    mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);
+    mi.Normal = normalize(i.v1.xyz).xzy;
+    mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
+    mi.Bitangent = cross(mi.Normal, mi.Tangent);
+    mi.Bitangent = (i.v3.z < 0.0) ? -mi.Bitangent : mi.Bitangent;
+    mi.Bitangent = normalize(mi.Bitangent);
     mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
                        transposeViewInvMat[2].w);
     mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
                                  transposeViewInvMat[2].z));
     mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
                                  transposeViewInvMat[2].y));
+    mi.viewDir = normalize(mi.positionWS - mi.camPos);
+
+    // ---- 2. 系统量(速度 / 曝光) ----
+    float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    mi.velocity = (i.v4.zw / i.v5.x) - ndc;
+
+    float wp = asfloat(WhitePtSrv.Load(0));
+    wp = useAutoExposure ? wp : 1.0;
+    wp = wp * exposureAdjustment;
+    mi.exposureScale = 1.0 / max(wp, 0.0001);
+
+    // ---- 3. 材质逻辑(直写 4 个 GBuffer RT) ----
     MaterialOutput m;
     MaterialMain(mi, m);
 
-    // ---- 3. 打包进 GBuffer(引擎光照/后处理外置) ----
-    float metallic = saturate(m.Metallic * 1.02 - 0.02);
-    float translucency = m.Translucency;
-    bool opaque = (metallic > 0.0) || (translucency <= 0.0);
-    float o1w, darkFlag;
-    if (opaque)
-    {
-        o1w = max(metallic, 0.04);
-        darkFlag = 0.666667;
-    }
-    else
-    {
-        o1w = round(translucency * 15.49 + 0.5) * 0.0627451017 + 0.0313725509;
-        darkFlag = 0.0;
-    }
-
-    float3 nt = normalize(m.NormalTS);
-    float3 nrm = normalize(N * nt.z + T * nt.x + B * nt.y);
-    float2 encN = OctEncodeNormal(nrm).xy;
-
     PSOut o;
-    o.o0 = float4(m.Emissive, 0.0);
-    o.o1 = float4(m.BaseColor, o1w);
-    o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
-    o.o3 = float4(m.Occlusion, vel, 1.0);
+    o.o0 = m.RT0;
+    o.o1 = m.RT1;
+    o.o2 = m.RT2;
+    o.o3 = m.RT3;
 
     // ---- 4. 保活(死分支): 让标准/自定义接口资源留在 RDEF ----
     if (i.v1.w > 1e30) {

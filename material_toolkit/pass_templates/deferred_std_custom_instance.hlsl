@@ -1,9 +1,8 @@
 // ============================================================================
-// RE mmtr pass 模板: Deferred —— **std · 默认光照 · 逐实例(PBR 语义)** —— 系统部分, 勿改
-// 用途: 技术名带 `…Instancing2` 的槽(逐实例材质: 引擎绑 `UserMaterialInstances` 结构化缓冲,
-//       VS 多输出一个 NOINTERPOLATOR0 实例索引)。
-// 与 deferred_std 的差异: 材质参数走 `UserMaterialInstances`(按实例索引), 无 cb3; 纹理整体 +1;
-//       PSIn 多一个实例索引(reg6 = NOINTERPOLATOR0)。
+// RE mmtr pass 模板: Deferred —— **std · 自定义光照 · 逐实例(直控 GBuffer)** —— 系统部分, 勿改
+// 用途: `…Instancing2` 且自定义光照的槽(逐实例材质: 引擎绑 `UserMaterialInstances`)。
+// 与 deferred_std_custom 的差异: 材质参数走 `UserMaterialInstances`(按实例索引), 无 cb3;
+//       纹理整体 +1; PSIn 多一个实例索引(reg6 = NOINTERPOLATOR0)。
 // 接口块由 `material_iface.hlsl_of(style="instance")` 替换(调用方须传 iface)。
 // ============================================================================
 
@@ -38,26 +37,29 @@ struct MaterialInput
 {
     float2 uv0;
     float2 uv1;
+    float3 positionWS;
+    float3 viewDir;
     float3 Normal;
     float3 Tangent;
     float3 Bitangent;
-    float3 positionWS;
     float3 camPos;
     float3 camDir;
     float3 camUp;
+    float2 velocity;
+    float  exposureScale;
 };
 
-// ---- 材质输出(PBR 语义; 表3a) ----
+// ---- 材质输出(直写原始 GBuffer) ----
 struct MaterialOutput
 {
-    float3 BaseColor;
-    float  Metallic;
-    float  Roughness;
-    float3 NormalTS;
-    float3 Emissive;
-    float  Occlusion;
-    float  Translucency;
+    float4 RT0;
+    float4 RT1;
+    float4 RT2;
+    float4 RT3;
 };
+
+// 曝光补偿常量(延迟 RT0 会被引擎再乘曝光+tonemap; 供材质直写 RT0 时抵消)
+#define BARE_RT0_EXPOSURE 100.0
 
 float3 OctEncodeNormal(float3 n)
 {
@@ -75,65 +77,45 @@ float3 OctEncodeNormal(float3 n)
 
 PSOut main(PSIn i)
 {
-    // ---- 0. 载入 per-instance 材质参数(写入裸名全局) ----
+    // ---- 0. 载入 per-instance 材质参数 ----
     LoadMaterialParams(UserMaterialInstances[(uint)i.idx]);
 
     // ---- 1. 输入解包 ----
-    float2 uv0 = float2(i.v1.w, i.v2.x);
-    float2 uv1 = i.v2.yz;
-
-    float3 N = normalize(i.v1.xyz).xzy;
-    float3 T = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
-    float3 B = cross(N, T);
-    B = (i.v3.z < 0.0) ? -B : B;
-    B = normalize(B);
-    float3 posWS = float3(i.v3.w, i.v4.x, i.v4.y);
-
-    float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    float2 vel = (i.v4.zw / i.v5.x) - ndc;
-
-    // ---- 2. 材质逻辑(PBR 语义) ----
     MaterialInput mi;
-    mi.uv0 = uv0;
-    mi.uv1 = uv1;
-    mi.Normal = N;
-    mi.Tangent = T;
-    mi.Bitangent = B;
-    mi.positionWS = posWS;
+    mi.uv0 = float2(i.v1.w, i.v2.x);
+    mi.uv1 = i.v2.yz;
+    mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);
+    mi.Normal = normalize(i.v1.xyz).xzy;
+    mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
+    mi.Bitangent = cross(mi.Normal, mi.Tangent);
+    mi.Bitangent = (i.v3.z < 0.0) ? -mi.Bitangent : mi.Bitangent;
+    mi.Bitangent = normalize(mi.Bitangent);
     mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
                        transposeViewInvMat[2].w);
     mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
                                  transposeViewInvMat[2].z));
     mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
                                  transposeViewInvMat[2].y));
+    mi.viewDir = normalize(mi.positionWS - mi.camPos);
+
+    // ---- 2. 系统量(速度 / 曝光) ----
+    float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    mi.velocity = (i.v4.zw / i.v5.x) - ndc;
+
+    float wp = asfloat(WhitePtSrv.Load(0));
+    wp = useAutoExposure ? wp : 1.0;
+    wp = wp * exposureAdjustment;
+    mi.exposureScale = 1.0 / max(wp, 0.0001);
+
+    // ---- 3. 材质逻辑(直写 4 个 GBuffer RT) ----
     MaterialOutput m;
     MaterialMain(mi, m);
 
-    // ---- 3. 打包进 GBuffer ----
-    float metallic = saturate(m.Metallic * 1.02 - 0.02);
-    float translucency = m.Translucency;
-    bool opaque = (metallic > 0.0) || (translucency <= 0.0);
-    float o1w, darkFlag;
-    if (opaque)
-    {
-        o1w = max(metallic, 0.04);
-        darkFlag = 0.666667;
-    }
-    else
-    {
-        o1w = round(translucency * 15.49 + 0.5) * 0.0627451017 + 0.0313725509;
-        darkFlag = 0.0;
-    }
-
-    float3 nt = normalize(m.NormalTS);
-    float3 nrm = normalize(N * nt.z + T * nt.x + B * nt.y);
-    float2 encN = OctEncodeNormal(nrm).xy;
-
     PSOut o;
-    o.o0 = float4(m.Emissive, 0.0);
-    o.o1 = float4(m.BaseColor, o1w);
-    o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
-    o.o3 = float4(m.Occlusion, vel, 1.0);
+    o.o0 = m.RT0;
+    o.o1 = m.RT1;
+    o.o2 = m.RT2;
+    o.o3 = m.RT3;
 
     // ---- 4. 保活(死分支) ----
     if (i.v1.w > 1e30) {
