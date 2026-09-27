@@ -2611,25 +2611,32 @@ class MaterialSystemPanel(QWidget):
         src_of = {e["name"]: e.get("source", "") for e in minp.std()}
         iface = self._base_iface()
         if iface:
+            # 按类别分组: cbuffer / texture / sampler 各一个可展开分类(成员默认折叠)
+            grp = {}
+            for cat in ("cbuffer", "texture", "sampler"):
+                g = QTreeWidgetItem(["%s (%d)" % (cat, len(iface[cat + "s"])), "",
+                                     "标准接口 · 只读"])
+                root.addChild(g)
+                grp[cat] = g
             for cb in iface["cbuffers"]:
-                it = QTreeWidgetItem(["cbuffer: %s" % cb["name"], cb["reg"],
+                it = QTreeWidgetItem([cb["name"], cb["reg"],
                                       "%s · %d 成员"
                                       % (src_of.get(cb["name"], ""), len(cb["members"]))])
-                root.addChild(it)
+                grp["cbuffer"].addChild(it)
                 for m in cb["members"]:
                     cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
                     cm.setData(0, Qt.UserRole, ("copy", m["name"]))
                     it.addChild(cm)
             for t in iface["textures"]:
-                ti = QTreeWidgetItem(["texture: %s" % t["name"], t["fmt"],
+                ti = QTreeWidgetItem([t["name"], t["fmt"],
                                       "%s · %s" % (src_of.get(t["name"], ""), t["reg"])])
                 ti.setData(0, Qt.UserRole, ("copy", t["name"]))
-                root.addChild(ti)
+                grp["texture"].addChild(ti)
             for s in iface["samplers"]:
-                si = QTreeWidgetItem(["sampler: %s" % s["name"], "",
+                si = QTreeWidgetItem([s["name"], "",
                                       "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
                 si.setData(0, Qt.UserRole, ("copy", s["name"]))
-                root.addChild(si)
+                grp["sampler"].addChild(si)
         else:
             root.addChild(QTreeWidgetItem(
                 ["(缺少预设标准接口: 先跑 scripts/_gen_iface.py)", "", ""]))
@@ -2671,7 +2678,15 @@ class MaterialSystemPanel(QWidget):
             it = QTreeWidgetItem([n, kd, extra])
             it.setData(0, Qt.UserRole, ("engine", n))
             enode.addChild(it)
-        self.tree_inputs.expandAll()
+            # 引擎 cbuffer: 展开看成员(与固有输入一致的展示)
+            for m in (e.get("members") or []):
+                off = m.get("offset")
+                cm = QTreeWidgetItem([m.get("name", ""), m.get("type", ""),
+                                      ("@%d" % off) if off is not None else ""])
+                cm.setData(0, Qt.UserRole, ("copy", m.get("name", "")))
+                it.addChild(cm)
+        # 默认只展开到"分类"层(0=顶层, 1=分类); 资源项与 cbuffer 成员默认折叠
+        self.tree_inputs.expandToDepth(1)
         fit_columns(self.tree_inputs, (0, 1, 2))
 
     def _menu_inputs(self, item):
@@ -2941,8 +2956,16 @@ class EngineResDialog(QDialog):
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(0, Qt.Checked if e["name"] in selected else Qt.Unchecked)
                 root.addChild(it)
+                # 引擎 cbuffer: 展开看成员(勾选前先看清定义)
+                if kind == "cbuffer":
+                    for m in (e.get("members") or []):
+                        off = m.get("offset")
+                        mc = QTreeWidgetItem([m.get("name", ""), m.get("type", ""),
+                                              ("@%d" % off) if off is not None else ""])
+                        it.addChild(mc)
             self.tree.addTopLevelItem(root)
-        self.tree.expandAll()
+        # 默认只展开到分类层; 资源项(及其 cbuffer 成员)默认折叠
+        self.tree.expandToDepth(0)
         v.addWidget(self.tree, 1)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
