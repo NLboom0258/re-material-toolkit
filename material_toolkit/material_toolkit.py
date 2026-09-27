@@ -26,6 +26,7 @@
   python material_toolkit.py mat-rebuild <in.mmtr> -o <out.mmtr>
   python material_toolkit.py mat-self   <base.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_bare] [--pass Deferred]
   python material_toolkit.py mat-nogen  [material.hlsl] -o <out.mmtr> [--template deferred_std] [--pass Deferred]
+  python material_toolkit.py mat-inputs [--json <out.json>]
   python material_toolkit.py mmtr-assemble <template.mmtr> --spec <spec.json> -o <out.mmtr>
   python material_toolkit.py blob-list    <in.mmtr>
   python material_toolkit.py blob-extract <in.mmtr> <idx> -o <out.dxbc>
@@ -73,6 +74,7 @@ from lib import mmtr_synth as synth  # noqa: E402
 from lib import mmtr_tail as mtail  # noqa: E402
 from lib import mmtr_selfgen as selfgen  # noqa: E402
 from lib import mmtr_nogen as nogen  # noqa: E402
+from lib import material_inputs as minp  # noqa: E402
 
 
 def _selfcheck_mmtr(data: bytes):
@@ -331,6 +333,14 @@ def main():
         print(f"  接口贴图={rep['iface_tex'] or '无'}  "
               f"PT 未解析={len(rep['pt_miss'])} 未映射={len(rep['pt_nomap'])}")
         _selfcheck_mmtr(data)
+    elif cmd == "mat-inputs":
+        if "--json" in a:
+            out = a[a.index("--json") + 1]
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(minp.load(), f, ensure_ascii=False, indent=1)
+            print(f"OK: 输入清单 -> {out}")
+        else:
+            print(minp.catalog_text())
     elif cmd == "blob-list":
         data = open(a[0], "rb").read()
         m = MmtrModel(data)
