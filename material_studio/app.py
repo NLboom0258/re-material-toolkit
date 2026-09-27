@@ -54,6 +54,7 @@ from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
 from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
 from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
+from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
@@ -2350,10 +2351,17 @@ class MaterialSystemPanel(QWidget):
         w_mmtr = QWidget()
         w_mmtr.setLayout(row)
         self.ed_name = QLineEdit()
+        self.chk_nogen = QCheckBox("无 donor(凭空生成)")
+        self.chk_nogen.setToolTip(
+            "勾选后不需要基础 mmtr: 用版本预设 + 我们的材质 PS 直接生成(不接任何 master)。\n"
+            "注意: 材质贴图/参数要生效, 模板需用声明了完整标准资源集的 deferred_std(见 skill §三十四z)")
+        self.chk_nogen.stateChanged.connect(self._on_nogen_toggled)
+        self.ed_mmtr.setEnabled(True)
         form.addRow("光照模式", self.cmb_light)
         form.addRow("着色类型", self.cmb_shading)
         form.addRow("材质模板(pass)", self.cmb_tmpl)
         form.addRow("基础 mmtr", w_mmtr)
+        form.addRow("生成方式", self.chk_nogen)
         form.addRow("材质名", self.ed_name)
         left.addLayout(form)
 
@@ -2845,17 +2853,34 @@ class MaterialSystemPanel(QWidget):
     def _base_mmtr(self):
         return self.ed_mmtr.text().strip()
 
+    def _on_nogen_toggled(self, *_):
+        """切到「无 donor」时禁用基础 mmtr 输入(不再需要)。"""
+        self.ed_mmtr.setEnabled(not self.chk_nogen.isChecked())
+
     def _generate(self):
         self._sync_asset()
-        base = self._base_mmtr()
-        if not base or not os.path.isfile(base):
-            QMessageBox.warning(self, "缺少基础 mmtr", "请选择存在的模板 mmtr 文件")
-            return None, None
         tmpl = self.asset.template.get("pass_template") or "deferred_env"
         if not self.asset.is_ok():
             errs = "\n".join(m for lv, m in self.asset.validate() if lv == "error")
             if QMessageBox.question(self, "配置有误", errs + "\n\n仍要生成吗？") != QMessageBox.Yes:
                 return None, None
+        if self.chk_nogen.isChecked():
+            # 无 donor: 版本预设 + 我们的材质 PS(凭空生成; 不接任何 master)
+            try:
+                data, rp = nogen.build(self.asset.shading_source or None,
+                                       _pass_of_template(tmpl), tmpl)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "生成失败", str(e))
+                return None, None
+            self._last_mmtr_bytes = data
+            return data, {"replaced": [], "replaced_instance": [], "skipped": [],
+                          "bad": [], "issues": rp.get("issues", []),
+                          "ps_size": rp["ps_size"], "groups": rp["groups"],
+                          "records": rp["records"], "nogen": True}
+        base = self._base_mmtr()
+        if not base or not os.path.isfile(base):
+            QMessageBox.warning(self, "缺少基础 mmtr", "请选择存在的模板 mmtr 文件")
+            return None, None
         try:
             data, rep = mgen.generate(open(base, "rb").read(),
                                       self.asset.shading_source or None, tmpl,
@@ -2876,13 +2901,15 @@ class MaterialSystemPanel(QWidget):
         if not path:
             return
         open(path, "wb").write(data)
-        self.lbl_status.setText("已生成 %s (%dB) 替换=%s 实例=%s 跳过=%s"
-                                % (os.path.basename(path), len(data), rep["replaced"],
-                                   rep["replaced_instance"], rep["skipped"]))
+        tag = "无 donor" if rep.get("nogen") else "模板"
+        self.lbl_status.setText("已生成(%s) %s (%dB) 替换=%s 实例=%s 跳过=%s"
+                                % (tag, os.path.basename(path), len(data),
+                                   rep.get("replaced"), rep.get("replaced_instance"),
+                                   rep.get("skipped")))
         QMessageBox.information(self, "生成成功",
-                                "-> %s\n\n替换=%s\n实例=%s\n跳过=%s"
-                                % (path, rep["replaced"], rep["replaced_instance"],
-                                   rep["skipped"]))
+                                "-> %s\n\n方式=%s\n替换=%s\n实例=%s\n跳过=%s"
+                                % (path, tag, rep.get("replaced"),
+                                   rep.get("replaced_instance"), rep.get("skipped")))
 
     def export_instance(self):
         self._sync_asset()
