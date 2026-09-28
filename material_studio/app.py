@@ -31,7 +31,7 @@ if ROOT not in sys.path:
 
 from tools.material_toolkit.lib.binding import (  # noqa: E402
     add_texture_slot, group_summary,
-    name_vocabulary, rename_name_global,
+    name_vocabulary, rename_name_global, _blob_rdef_names,
 )
 from tools.material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
@@ -954,6 +954,14 @@ class MmtrPanel(QWidget):
         for b in (self.btn_open, self.btn_add, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
+        self.chk_pool_rdef = QCheckBox("仅按 RDEF 声明(视图)")
+        self.chk_pool_rdef.setChecked(True)
+        self.chk_pool_rdef.setToolTip(
+            "勾选: “贴图绑定”只显示该 blob 的 RDEF 真正声明的资源; “名称池”的引用 blob 也只按 RDEF 归因。\n"
+            "不勾选: 显示“记录引用的池”原样 —— 池常被记录共享/合并, 会把他人资源(如 VS 的\n"
+            "SkinningMatrices, 或与本 shader 无关的 ATOS)一并列出。")
+        self.chk_pool_rdef.stateChanged.connect(lambda *_: self._on_rdef_view_changed())
+        hb.addWidget(self.chk_pool_rdef)
 
         self.tree_blob = QTreeWidget()
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
@@ -1029,20 +1037,7 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
-        _pool_tab = QWidget()
-        _pv = QVBoxLayout(_pool_tab)
-        _pv.setContentsMargins(0, 0, 0, 0)
-        self.chk_pool_rdef = QCheckBox(
-            "仅按 RDEF 声明归因(推荐): 引用 blob = 真正声明该资源的 shader")
-        self.chk_pool_rdef.setChecked(True)
-        self.chk_pool_rdef.setToolTip(
-            "勾选: 名称池的“引用 blob”= 其 RDEF 声明了该资源的 blob(准确)。\n"
-            "不勾选: 按绑定组的池归因 —— 池常被记录共享/合并, 会把他人资源算到本 blob\n"
-            "(例: 把不采样 ATOS 的 pick PS 也算作 ATOS 的引用者)。")
-        self.chk_pool_rdef.stateChanged.connect(lambda *_: self.refresh_pool())
-        _pv.addWidget(self.chk_pool_rdef)
-        _pv.addWidget(self.tree_pool)
-        self.tabs.addTab(_pool_tab, "名称池")
+        self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
         self.tabs.addTab(self.tree_variant, "变体(材质)")
@@ -1215,14 +1210,19 @@ class MmtrPanel(QWidget):
         if idx is None or self.data is None:
             return
         vocab = self._vocab()
+        chk = getattr(self, "chk_pool_rdef", None)
+        rdef = self._cur_rdef_names() if (chk is not None and chk.isChecked()) else None
         for k, g in enumerate(group_summary(self.data, idx)):
-            names = [s["name"] for s in g["srvs"]]
+            names = [s["name"] for s in g["srvs"]]      # 组名用全量(便于识别该组)
+            srvs = g["srvs"] if rdef is None else [s for s in g["srvs"] if s["name"] in rdef]
+            hid = len(g["srvs"]) - len(srvs)
             top = QTreeWidgetItem([f"组{k} · {group_mode(names)}", "",
                                    f"desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
-                                   f"n_rec={g['n_rec']} srv={g['b8']}"])
+                                   f"n_rec={g['n_rec']} srv={g['b8']}"
+                                   + (f"  已隐藏 {hid} 项(非本 shader 声明)" if hid else "")])
             top.setData(0, Qt.UserRole, ("group", k))
             self.tree_grp.addTopLevelItem(top)
-            for s in g["srvs"]:
+            for s in srvs:
                 tyname = TYPENAME.get(s["type"], f"0x{s['type']:02x}")
                 child = QTreeWidgetItem([f"[{s['idx']}]", "",
                                          f"{tyname}  t{s['slot']}  hash=0x{s['hash']:08x}"])
@@ -1261,6 +1261,18 @@ class MmtrPanel(QWidget):
         if getattr(self, "_vocab_cache_rdef", None) is None:
             self._vocab_cache_rdef = name_vocabulary(self.data, declared_only=True)
         return self._vocab_cache_rdef
+
+    def _cur_rdef_names(self):
+        """当前 blob 的 RDEF 声明名集合(shader 真正能采样的资源)。"""
+        idx = self.cur_blob()
+        if idx is None or self.data is None:
+            return set()
+        return _blob_rdef_names(self.data, idx)
+
+    def _on_rdef_view_changed(self):
+        """切换“仅按 RDEF 声明”视图: 同时刷新贴图绑定页与名称池页。"""
+        self.refresh_groups()
+        self.refresh_pool()
 
     def refresh_pool(self):
         """名称池页: 列出该文件用到的所有贴图名 + 引用统计。
