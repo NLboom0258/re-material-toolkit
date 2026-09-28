@@ -235,9 +235,10 @@ def member_desc(cbuffer, member):
 
 _ENGINE_RE = re.compile(r"^\s*//!\s*engine\s+(\w+)\s*$")
 _REG_PRE = {"cbuffer": "b", "texture": "t", "sampler": "s"}
-# GetDimensions 参数个数(保活用)
-_DIM_ARITY = {"2d": 2, "2dms": 2, "2darray": 3, "2dmsarray": 3, "1d": 2,
-              "1darray": 3, "3d": 3, "cube": 3, "cubearray": 4, "buffer": 1}
+# GetDimensions 输出参数个数(保活用)。必须匹配 HLSL 内建的**无 mipLevel 重载**:
+#   1d=1, 1darray=2, 2d=2, 2darray=3, 3d=3, cube=2, cubearray=3, 2dms=3, 2dmsarray=4。
+_DIM_ARITY = {"1d": 1, "1darray": 2, "2d": 2, "2darray": 3, "3d": 3,
+              "cube": 2, "cubearray": 3, "2dms": 3, "2dmsarray": 4, "buffer": 1}
 
 
 def path():
@@ -385,15 +386,12 @@ def _add_engine(iface, e, reg):
 
 # ---------------------------------------------------------------- 保活
 def _member_ref(t, name):
-    """给一个成员构造"安全标量引用"(用于保活)。"""
-    if "[" in name:                       # 数组
-        return "%s[0]" % name
+    """给一个成员构造"安全标量引用"(用于保活 `_ka += float(ref)`)。"""
+    if "[" in name:                       # 数组: 取首元素(剥掉声明里的长度)
+        name = "%s[0]" % name.split("[", 1)[0]
     if t in ("float", "int", "uint", "bool", "half"):
-        return "%s" % name
-    if t in ("float2", "float3", "float4", "int2", "int3", "int4",
-             "uint2", "uint3", "uint4"):
-        return "%s.x" % name
-    if "x" in t:                          # 矩阵
+        return name
+    if "[" not in name and "x" in t:      # 矩阵(如 float4x4)
         return "%s[0][0]" % name
     return "%s.x" % name
 
@@ -404,12 +402,16 @@ def keepalive_hlsl(items):
     items: [{"kind":"texture|cbuffer|sampler","name":..,"reg":..,"entry":catalog,..}]
     sampler 无法单独"使用"⇒ 略过(其存活取决于是否被采样)。
     """
+    from . import material_iface as MI
     lines, k = [], 0
     for it in items:
         kd, nm = it["kind"], it["name"]
         if kd == "texture":
-            fmt = (it.get("entry") or {}).get("fmt")
-            dim = (it.get("entry") or {}).get("dim") or "2d"
+            entry = it.get("entry") or {}
+            if MI.decl_skipped(entry):     # struct/未知 fmt/dim 无法声明 ⇒ 跳过(否则引用未定义名)
+                continue
+            fmt = entry.get("fmt")
+            dim = entry.get("dim") or "2d"
             if fmt == "byte":
                 lines.append("%s.GetDimensions(_k0); _ka += float(_k0);" % nm)
             else:

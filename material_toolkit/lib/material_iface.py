@@ -191,6 +191,16 @@ def _texture_decl(t, reg=None):
     return "%s<%s> %s : register(%s);" % (base, elem, t["name"], reg)
 
 
+def decl_skipped(t):
+    """该纹理资源是否**无法自动声明**(struct/未知 fmt/dim) —— 与 `_texture_decl` 的跳过条件一致。
+
+    用于保活: 被跳过的资源不能生成引用(否则未声明标识符编译失败)。
+    """
+    if t.get("fmt") == "byte":
+        return False
+    return _ELEM.get(t.get("fmt")) is None or _DIMTYPE.get(t.get("dim") or "2d") is None
+
+
 def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
             struct_name="UMParams", buffer_name="UserMaterialInstances",
             load_fn="LoadMaterialParams"):
