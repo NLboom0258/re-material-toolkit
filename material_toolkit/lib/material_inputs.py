@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """材质"输入体系": 允许清单(固有标准集 / 材质参数 / 引擎候选) + 声明/保活生成。
 
-数据来自预设 `presets/v01100004/inputs.json`(由 `scripts/_gen_inputs.py` 生成;
+数据来自预设 `presets/v01100004/inputs.json`(由 `scripts/gen_inputs.py` 生成;
 缺文件时退化为只从 iface.json 取标准集)。
 
 用法:
     INP.std()        # 固有(标准接口): [{name,kind,type,reg,source}]
-    INP.params()     # 材质参数(UserMaterial 成员): [{name,type,offset,source}]
+    INP.params()     # 材质参数(UserMaterial 成员; 预设默认空, 每材质自由): [{name,type,offset,source}]
     INP.candidates() # 引擎候选(自定义可选; 带 members/size 或 fmt/dim)
     INP.by_kind("texture", include_std=False)   # 按类别过滤
     INP.build_iface_and_keepalive(src, base)    # 声明+保活(供 nogen / GUI 共用)
@@ -121,30 +121,6 @@ MEMBER_DESC = {
         "AASubPixel": "AA 子像素",
         "ResponsiveAARate": "响应式 AA 速率",
     },
-    "UserMaterial": {
-        "VAR_LimLight_Color": "边缘光颜色",
-        "VAR_BaseColor": "基础色",
-        "VAR_LimLight_Intensity": "边缘光强度",
-        "VAR_LimLight_Pow": "边缘光幂",
-        "VAR_LimLight_Invert": "边缘光反转",
-        "VAR_OcclusionMap_UseSecondaryUV": "遮蔽图用第二套 UV",
-        "VAR_Metallic": "金属度",
-        "VAR_Roughness": "粗糙度",
-        "VAR_TranslucencyIntensity": "半透明强度",
-        "VAR_AlbedoOffsetIntensity": "反照率偏移强度",
-        "VAR_OcclusionIntensity": "遮蔽强度",
-        "VAR_SpecularReflectance": "镜面反射率",
-        "VAR_Use_SpecularReflectanceMap": "是否用镜面反射率贴图",
-        "VAR_SSS_Channel": "次表面散射通道",
-        "VAR_UseAlphaMap": "是否用 alpha 贴图",
-        "VAR_AlphaTestRef": "Alpha 测试阈值",
-        "VAR_DissolveControl": "消融控制",
-        "VAR_AlphaValue": "Alpha 值",
-        "VAR_DissolveOffset": "消融偏移",
-        "CAPCOM_MATERIAL_RESERVE0": "引擎保留",
-        "CAPCOM_MATERIAL_RESERVE1": "引擎保留",
-        "CAPCOM_MATERIAL_RESERVE2": "引擎保留",
-    },
     "RootConstant": {"constant32Bits": "通用 32bit 常量"},
     "cbCSSkinning": {
         "cVertexCount": "顶点数",
@@ -246,27 +222,12 @@ def path():
 
 
 def _fallback():
-    """无 inputs.json: 只用 iface.json 的标准集(候选为空)。"""
-    iface = P.std_iface()
-    if not iface:
-        return {"std": [], "params": [], "candidates": []}
-    std, params = [], []
-    for c in iface["cbuffers"]:
-        is_mat = c["name"] == "UserMaterial"
-        std.append({"name": c["name"], "kind": "cbuffer", "type": "cbuffer",
-                    "reg": c["reg"], "source": "material" if is_mat else "engine"})
-        if is_mat:
-            params += [{"name": m["name"], "type": m["type"],
-                        "offset": m["offset"], "source": "material"}
-                       for m in c["members"]]
-    for t in iface["textures"]:
-        std.append({"name": t["name"], "kind": "texture",
-                    "type": t.get("fmt") or "float4", "reg": t["reg"],
-                    "source": "engine" if t["name"] == "WhitePtSrv" else "material"})
-    for s in iface["samplers"]:
-        std.append({"name": s["name"], "kind": "sampler", "type": "sampler",
-                    "reg": s["reg"], "source": "engine"})
-    return {"std": std, "params": params, "candidates": []}
+    """无 inputs.json: 退化为**空清单**(宁可少展示, 也不展示过时/错误的项)。
+
+    真实清单以 `inputs.json` 为准(由 `scripts/gen_inputs.py` 生成)。以前这里会照搬
+    iface.json 的"整份标准接口"(含 UserMaterial 的固化成员等), 与最小化后的设计不符, 故改为空。
+    """
+    return {"std": [], "params": [], "candidates": []}
 
 
 def load():
@@ -328,7 +289,7 @@ def catalog_text():
     for e in d["std"]:
         lines.append("  [%-7s] %-32s %-8s %-6s %s"
                      % (e["kind"], e["name"], e["type"], e["reg"], e["source"]))
-    lines.append("材质参数(UserMaterial 标准成员) %d 项:" % len(d["params"]))
+    lines.append("材质参数(每材质自由声明; 预设不固化) %d 项:" % len(d["params"]))
     lines.append("  " + ", ".join("%s(%s)" % (p["name"], p["type"])
                                   for p in d["params"]))
     lines.append("引擎候选(自定义可选) %d 项:" % len(d["candidates"]))

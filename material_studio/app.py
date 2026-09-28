@@ -2661,7 +2661,7 @@ class MaterialSystemPanel(QWidget):
             root = QTreeWidgetItem(["固有输入", "", ""])
             self.tree_inputs.addTopLevelItem(root)
             root.addChild(QTreeWidgetItem(
-                ["(缺少预设标准接口: 先跑 scripts/_gen_iface.py)", "", ""]))
+                ["(缺少预设标准接口: 先跑 scripts/gen_iface.py)", "", ""]))
         else:
             for gkey, gtitle, gdesc in (
                     ("engine", "固有输入 (引擎, 只读)", "引擎提供值; 材质无需声明"),
