@@ -283,8 +283,9 @@ def build_iface_and_keepalive(material_src, base_iface):
     params, textures = MG.parse_decls(material_src)
     eng_names = parse_engine_decls(material_src)
     report = {"engine": [], "params": [], "textures": [], "regs": {}}
-    if not params and not textures and not eng_names:
-        return None, "", report
+    # 无 `//!` 声明: 接口仍返回 None(让上层回退到模板 IFACE), 但**仍要**按
+    # "源码引用了哪些标准资源"生成 t0 前缀保活(否则单张/缺口会出错)。
+    bare = not params and not textures and not eng_names
 
     if base_iface is None:
         base_iface = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
@@ -344,4 +345,4 @@ def build_iface_and_keepalive(material_src, base_iface):
             have.add(t["name"])
 
     ka = keepalive_hlsl(items)
-    return iface, ka, report
+    return (None if bare else iface), ka, report

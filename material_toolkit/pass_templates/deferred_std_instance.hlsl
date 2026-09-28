@@ -137,14 +137,8 @@ PSOut main(PSIn i)
     o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
     o.o3 = float4(m.Occlusion, vel, 1.0);
 
-    // ---- 4. 保活(死分支) ----
+    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器按需注入(无则不注入) ----
     if (i.v1.w > 1e30) {
-        o.o0.rgb += NormalRoughnessMap.Sample(AutomaticWrap, i.v2.xx).rgb;
-        o.o0.rgb += AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, i.v2.yy).rgb;
-        o.o0.rgb += BaseMetalMap.Sample(AutomaticWrap, i.v2.zz).rgb;
-        o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
-        o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
-                  + exposureAdjustment.xxx + VAR_BaseColor.rgb;
         //__KEEPALIVE__
     }
     return o;

@@ -1,7 +1,7 @@
 // ============================================================================
 // RE mmtr pass 模板: Deferred —— **std · 自定义光照(直控 GBuffer)** —— 系统部分, 勿改
 // 定位: 自定义光照模式。材质**直控** 4 个原始 GBuffer RT(原始值), 不经“PBR 语义 → 打包”;
-//       最终输出前的后处理(曝光等)也由材质经 `mi.exposureScale` 控制。
+//       曝光/tonemap 由**引擎后处理**做(材质直写 RT0 时可用常量 BARE_RT0_EXPOSURE 近似抵消)。
 // 接口/骨架用**我们的标准接口**(无 donor)。
 // 与 deferred_std 的区别: 后者给 PBR 语义(默认光照, 打包+光照/后处理外置)。
 // 组装方式: 本文件 + 用户的 MaterialMain(插入到下方标记行处)。
@@ -117,7 +117,6 @@ struct MaterialInput
     float3 camDir;
     float3 camUp;
     float2 velocity;       // 系统: 屏幕空间速度(RT3.yz 默认)
-    float  exposureScale;  // 系统: 1/(白点*曝光系数)(RT0 曝光用)
 };
 
 // ---- 材质输出(直写原始 GBuffer; 由 MaterialMain 赋值) ----
@@ -168,14 +167,9 @@ PSOut main(PSIn i)
                                  transposeViewInvMat[2].y));
     mi.viewDir = normalize(mi.positionWS - mi.camPos);
 
-    // ---- 2. 系统量(速度 / 曝光) ----
+    // ---- 2. 系统量(速度; 曝光由引擎后处理做, 不再在此补偿) ----
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     mi.velocity = (i.v4.zw / i.v5.x) - ndc;
-
-    float wp = asfloat(WhitePtSrv.Load(0));
-    wp = useAutoExposure ? wp : 1.0;
-    wp = wp * exposureAdjustment;
-    mi.exposureScale = 1.0 / max(wp, 0.0001);
 
     // ---- 3. 材质逻辑(直写 4 个 GBuffer RT) ----
     MaterialOutput m;
@@ -187,16 +181,8 @@ PSOut main(PSIn i)
     o.o2 = m.RT2;
     o.o3 = m.RT3;
 
-    // ---- 4. 保活(死分支): 让标准/自定义接口资源留在 RDEF ----
+    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器按需注入(无则不注入) ----
     if (i.v1.w > 1e30) {
-        o.o0.rgb += NormalRoughnessMap.Sample(AutomaticWrap, i.v2.xx).rgb;
-        o.o0.rgb += AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, i.v2.yy).rgb;
-        o.o0.rgb += BaseMetalMap.Sample(AutomaticWrap, i.v2.zz).rgb;
-        o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
-        o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
-                  + gbufferTypeReserve0.xxx + gbufferTypeReserve1.xxx
-                  + gbufferTypeReserve2.xxx
-                  + exposureAdjustment.xxx + VAR_BaseColor.rgb;
         //__KEEPALIVE__
     }
     return o;

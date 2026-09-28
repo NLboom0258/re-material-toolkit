@@ -47,7 +47,6 @@ struct MaterialInput
     float3 camDir;
     float3 camUp;
     float2 velocity;
-    float  exposureScale;
 };
 
 // ---- 材质输出(直写原始 GBuffer) ----
@@ -100,14 +99,9 @@ PSOut main(PSIn i)
                                  transposeViewInvMat[2].y));
     mi.viewDir = normalize(mi.positionWS - mi.camPos);
 
-    // ---- 2. 系统量(速度 / 曝光) ----
+    // ---- 2. 系统量(速度; 曝光由引擎后处理做, 不再在此补偿) ----
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     mi.velocity = (i.v4.zw / i.v5.x) - ndc;
-
-    float wp = asfloat(WhitePtSrv.Load(0));
-    wp = useAutoExposure ? wp : 1.0;
-    wp = wp * exposureAdjustment;
-    mi.exposureScale = 1.0 / max(wp, 0.0001);
 
     // ---- 3. 材质逻辑(直写 4 个 GBuffer RT) ----
     MaterialOutput m;
@@ -119,14 +113,8 @@ PSOut main(PSIn i)
     o.o2 = m.RT2;
     o.o3 = m.RT3;
 
-    // ---- 4. 保活(死分支) ----
+    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器按需注入(无则不注入) ----
     if (i.v1.w > 1e30) {
-        o.o0.rgb += NormalRoughnessMap.Sample(AutomaticWrap, i.v2.xx).rgb;
-        o.o0.rgb += AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, i.v2.yy).rgb;
-        o.o0.rgb += BaseMetalMap.Sample(AutomaticWrap, i.v2.zz).rgb;
-        o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
-        o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
-                  + exposureAdjustment.xxx + VAR_BaseColor.rgb;
         //__KEEPALIVE__
     }
     return o;
