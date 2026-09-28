@@ -2364,21 +2364,15 @@ class MaterialSystemPanel(QWidget):
         self.cmb_shading = NoWheelComboBox()
         for label, val in (("延迟", "deferred"), ("前向", "forward")):
             self.cmb_shading.addItem(label, val)
-        self.cmb_tmpl = NoWheelComboBox()
-        for t in _pass_template_names(self.cmb_shading.currentData(),
-                                      self.cmb_light.currentData()):
-            self.cmb_tmpl.addItem(t, t)
         self.ed_mmtr = QLineEdit()
         self.ed_mmtr.setPlaceholderText("导出 mdf2 时的 MasterMaterial 路径(可留空)")
         self.ed_name = QLineEdit()
         form.addRow("光照模式", self.cmb_light)
         form.addRow("着色类型", self.cmb_shading)
-        form.addRow("材质模板(pass)", self.cmb_tmpl)
         form.addRow("材质路径(mdf2 用)", self.ed_mmtr)
         form.addRow("材质名", self.ed_name)
         left.addLayout(form)
 
-        self.cmb_tmpl.currentIndexChanged.connect(self._on_option_changed)
         self.cmb_light.currentIndexChanged.connect(self._on_mode_changed)
         self.cmb_shading.currentIndexChanged.connect(self._on_mode_changed)
         self.ed_name.textChanged.connect(self._on_name_changed)
@@ -2438,7 +2432,9 @@ class MaterialSystemPanel(QWidget):
     def _sync_asset(self):
         self.asset.lighting_mode = self.cmb_light.currentData()
         self.asset.shading_type = self.cmb_shading.currentData()
-        self.asset.template["pass_template"] = self.cmb_tmpl.currentData()
+        self.asset.template["pass_template"] = (
+            _default_template(self.cmb_shading.currentData(),
+                              self.cmb_light.currentData()) or "deferred_std")
         self.asset.template["mmtr"] = self.ed_mmtr.text().strip()
         self.asset.name = self.ed_name.text().strip() or "NewMaterial"
         self.asset.shading_source = self.ed_src.toPlainText()
@@ -2452,9 +2448,6 @@ class MaterialSystemPanel(QWidget):
                 if i >= 0:
                     cmb.setCurrentIndex(i)
             self._repopulate_templates()
-            i = self.cmb_tmpl.findData(self.asset.template.get("pass_template"))
-            if i >= 0:
-                self.cmb_tmpl.setCurrentIndex(i)
             self.ed_mmtr.setText(self.asset.template.get("mmtr", ""))
             self.ed_name.setText(self.asset.name)
             if self.ed_src.toPlainText() != self.asset.shading_source:
@@ -2469,19 +2462,10 @@ class MaterialSystemPanel(QWidget):
         self.refresh_info()
 
     def _repopulate_templates(self):
-        """按 (着色类型, 光照模式) 过滤模板下拉; 当前项不在新列表时用该组合默认模板。"""
-        cur = self.cmb_tmpl.currentData()
-        shading = self.cmb_shading.currentData()
-        lighting = self.cmb_light.currentData()
-        self.cmb_tmpl.blockSignals(True)
-        self.cmb_tmpl.clear()
-        for t in _pass_template_names(shading, lighting):
-            self.cmb_tmpl.addItem(t, t)
-        i = self.cmb_tmpl.findData(cur)
-        if i < 0:
-            i = self.cmb_tmpl.findData(_default_template(shading, lighting))
-        self.cmb_tmpl.setCurrentIndex(i if i >= 0 else 0)
-        self.cmb_tmpl.blockSignals(False)
+        """无模板选择: 按 (着色类型, 光照模式) 取默认模板作为"空材质基准"。"""
+        self.asset.template["pass_template"] = (
+            _default_template(self.cmb_shading.currentData(),
+                              self.cmb_light.currentData()) or "deferred_std")
 
     def _on_mode_changed(self, *_):
         if self._loading:
@@ -2500,8 +2484,6 @@ class MaterialSystemPanel(QWidget):
         root = QTreeWidgetItem(["配置", "", ""])
         root.addChild(QTreeWidgetItem(["光照模式", self.asset.lighting_mode, ""]))
         root.addChild(QTreeWidgetItem(["着色类型", self.asset.shading_type, ""]))
-        root.addChild(QTreeWidgetItem(["材质模板(pass)",
-                                       self.asset.template.get("pass_template", ""), ""]))
         for lv, msg in self.asset.validate():
             it = QTreeWidgetItem(["校验: " + lv, msg, ""])
             it.setForeground(0, QColor("#c0392b") if lv == "error" else QColor("#b8791a"))
@@ -2674,15 +2656,8 @@ class MaterialSystemPanel(QWidget):
                                           "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
                     si.setData(0, Qt.UserRole, ("copy", s["name"]))
                     grp["sampler"].addChild(si)
-        # 2) 系统预制输入(模板 MaterialInput; 材质里用 mi.xxx)
-        tmpl = self.cmb_tmpl.currentData() or "deferred_std"
-        pre = QTreeWidgetItem(["系统预制输入: %s" % tmpl, "", "材质里用 mi.<名> 引用"])
-        self.tree_inputs.addTopLevelItem(pre)
-        for typ, nm, desc in _template_struct_fields(tmpl, "MaterialInput"):
-            it = QTreeWidgetItem(["mi." + nm, typ, desc])
-            it.setData(0, Qt.UserRole, ("copy", "mi." + nm))
-            pre.addChild(it)
-        # 3) 自定义输入(参数/贴图; 会写进 mmtr)
+        # 2) 系统预制输入已移除(最小化): 默认空材质只用插值输入; 模板体系待后续重构
+        # 3) 自定义输入(参数/贴图/引擎资源; 会写进 mmtr)
         self._load_decls_from_src()
         cust = QTreeWidgetItem(["自定义输入 (参数/贴图)", "", "写进 mmtr 参数表/绑定"])
         self.tree_inputs.addTopLevelItem(cust)
@@ -2814,7 +2789,7 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 操作 ----
     def _load_default_material(self):
-        tmpl = self.cmb_tmpl.currentData() or "deferred_std"
+        tmpl = self.asset.template.get("pass_template") or "deferred_std"
         try:
             src = mpass.default_material(tmpl)
         except Exception as e:  # noqa: BLE001
