@@ -123,6 +123,13 @@ def extend(iface, cbuffer="UserMaterial", params=(), textures=()):
     out = copy.deepcopy(iface)
     added = []
     cb = next((c for c in out["cbuffers"] if c["name"] == cbuffer), None)
+    if cb is None and params:              # 基础接口未含 UserMaterial 时按需创建
+        used_b = {_regnum(c.get("reg", "b0")) for c in out["cbuffers"]}
+        n = 0
+        while n in used_b:
+            n += 1
+        cb = {"name": cbuffer, "reg": "b%d" % n, "members": []}
+        out["cbuffers"].append(cb)
     if cb is not None:
         for name, typ in params:
             size = TYPE_SIZE.get(typ, 4)

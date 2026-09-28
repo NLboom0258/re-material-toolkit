@@ -37,50 +37,6 @@ cbuffer GBufferType : register(b1)
     float  gbufferTypeReserve2;
 };
 
-cbuffer Tonemap : register(b2)
-{
-    float exposureAdjustment;
-    float tonemapRange;
-    float sharpness;
-    float preTonemapRange;
-    int   useAutoExposure;
-    float echoBlend;
-    float AABlend;
-    float AASubPixel;
-    float ResponsiveAARate;
-};
-
-cbuffer UserMaterial : register(b3)
-{
-    float4 VAR_LimLight_Color;
-    float4 VAR_BaseColor;
-    float  VAR_LimLight_Intensity;
-    float  VAR_LimLight_Pow;
-    float  VAR_LimLight_Invert;
-    float  VAR_OcclusionMap_UseSecondaryUV;
-    float  VAR_Metallic;
-    float  VAR_Roughness;
-    float  VAR_TranslucencyIntensity;
-    float  VAR_AlbedoOffsetIntensity;
-    float  VAR_OcclusionIntensity;
-    float  VAR_SpecularReflectance;
-    float  VAR_Use_SpecularReflectanceMap;
-    float  VAR_SSS_Channel;
-    float  VAR_UseAlphaMap;
-    float  VAR_AlphaTestRef;
-    float  VAR_DissolveControl;
-    float  VAR_AlphaValue;
-    float  VAR_DissolveOffset;
-    float  CAPCOM_MATERIAL_RESERVE0;
-    float  CAPCOM_MATERIAL_RESERVE1;
-    float  CAPCOM_MATERIAL_RESERVE2;
-};
-
-ByteAddressBuffer WhitePtSrv                     : register(t0);
-Texture2D<float4> BaseMetalMap                   : register(t1);
-Texture2D<float4> NormalRoughnessMap             : register(t2);
-Texture2D<float4> AlphaTranslucentOcclusionSSSMap: register(t3);
-SamplerState AutomaticWrap                       : register(s0);
 //__IFACE_END__
 
 // ---- 输入签名(寄存器 0..5) ----
@@ -205,16 +161,8 @@ PSOut main(PSIn i)
     o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
     o.o3 = float4(m.Occlusion, vel, 1.0);
 
-    // ---- 4. 保活(死分支): 让标准/自定义接口资源留在 RDEF ----
+    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器在此注入(无则不注入) ----
     if (i.v1.w > 1e30) {
-        o.o0.rgb += NormalRoughnessMap.Sample(AutomaticWrap, i.v2.xx).rgb;
-        o.o0.rgb += AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, i.v2.yy).rgb;
-        o.o0.rgb += BaseMetalMap.Sample(AutomaticWrap, i.v2.zz).rgb;
-        o.o0.rgb += float(WhitePtSrv.Load(0)).xxx;
-        o.o0.rgb += viewProjMat[0][0].xxx + gbufferTypeFlag.xxx
-                  + gbufferTypeReserve0.xxx + gbufferTypeReserve1.xxx
-                  + gbufferTypeReserve2.xxx
-                  + exposureAdjustment.xxx + VAR_BaseColor.rgb;
         //__KEEPALIVE__
     }
     return o;
