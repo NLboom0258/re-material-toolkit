@@ -273,5 +273,24 @@ def build_iface_and_keepalive(material_src, base_iface):
                       "entry": tmap.get(nm)})
     for nm, ty in params:
         items.append({"kind": "param", "name": nm, "type": ty})
+
+    # 贴图寄存器布局: 材质贴图 SRV 必须"从 t0 起、连续、无缺口"(2026-09-28 实测;
+    #   100% 原版 Deferred PS 如此; 缺口在 DX12 会 GPU 崩 0x887a0006)。⇒ 只要材质用到任一贴图
+    #   (标准/自定义/引擎), 就把 t0..最高用到的寄存器 之间的贴图**全部保活**, 令 RDEF 的纹理
+    #   寄存器构成"从 t0 起的连续段"(WhitePtSrv@t0 恒保留)。
+    have = {it["name"] for it in items}
+    used = set(textures)                       # 自定义 `//! tex`
+    for t in iface["textures"]:                # 源码直接引用 / 已保活的贴图
+        if t["name"] in have or re.search(
+                r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(t["name"]),
+                material_src or ""):
+            used.add(t["name"])
+    regs_used = [_num(t["reg"]) for t in iface["textures"] if t["name"] in used]
+    tmax = max(regs_used) if regs_used else -1
+    for t in sorted(iface["textures"], key=lambda x: _num(x["reg"])):
+        if _num(t["reg"]) <= tmax and t["name"] not in have:
+            items.append({"kind": "texture", "name": t["name"], "entry": t})
+            have.add(t["name"])
+
     ka = keepalive_hlsl(items)
     return iface, ka, report

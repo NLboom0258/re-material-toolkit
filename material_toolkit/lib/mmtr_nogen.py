@@ -419,11 +419,19 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                 _SG.input_signature(s["ps"]), _SG.output_signature(s["vs"])):
             boundary.append((s["slot"], _n, _sem, _pm, _vm))
 
+    # 8c) 纹理寄存器布局校验: 材质贴图 SRV 应"从 t0 起、连续、无缺口"
+    #     (DX12 有缺口会 GPU 崩 0x887a0006; 100% 原版 Deferred PS 如此)
+    _srv_skip = (0, 3) + _UAV_TYPES        # cbuffer/sampler/UAV 不算 SRV
+    tex_regs = sorted({bp for (_n, _t, bp, _d, _r)
+                       in (R.rdef_bind_info(ps_blob) or []) if _t not in _srv_skip})
+    tex_gap = [i for i in range(len(tex_regs)) if tex_regs[i] != i]
+
     return out, {
         "size": len(out), "blob_start": blob_start, "n_blobs": len(off_of),
         "ps_size": len(ps_blob), "records": len(slots),
         "groups": len(order), "str10": info.get("str10"),
         "pt_miss": pt_miss, "pt_nomap": pt_nomap,
         "boundary": boundary, "boundary_pairs": len(_seen),
+        "tex_regs": tex_regs, "tex_gap": tex_gap,
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
     }

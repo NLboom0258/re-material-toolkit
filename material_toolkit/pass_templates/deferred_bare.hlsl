@@ -96,5 +96,11 @@ PSOut main(PSIn i)
     o.o1 = m.RT1;
     o.o2 = m.RT2;
     o.o3 = m.RT3;
+
+    // ---- 4. 保活(死分支): 让接口资源留在 RDEF —— 材质贴图寄存器须"从 t0 起连续"
+    //      (用到贴图时由生成器注入对被引用资源的 GetDimensions/引用; 未用到则为空) ----
+    if (i.v1.w > 1e30) {
+        //__KEEPALIVE__
+    }
     return o;
 }
