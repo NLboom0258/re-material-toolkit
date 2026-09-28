@@ -1,8 +1,8 @@
 // ============================================================================
 // RE mmtr pass 模板: Deferred —— **std · 默认光照(PBR 语义输出)** —— 系统部分, 勿改
 // 定位: 默认光照模式。材质只给 **PBR 语义**(表3a: BaseColor/Metallic/Roughness/Normal/
-//       Emissive/Occlusion/Translucency); **引擎光照/后处理外置** —— 模板把语义打包进 GBuffer,
-//       之后的曝光/tonemap/光照由引擎做。
+//       Emissive/Occlusion/Translucency); 光照/后处理由引擎做 —— 模板把语义打包进 GBuffer。
+//       曝光(白点*曝光系数)由模板在 RT 输出前**自动**抵消, 材质无需感知(固有输入: Tonemap/WhitePtSrv)。
 // 依据: `deferred_env` 的打包逻辑; 接口/骨架用**我们的标准接口**(无 donor)。
 // 与 deferred_std_custom 的区别: 后者直控 4 个原始 GBuffer RT(custom)。
 // 组装方式: 本文件 + 用户的 MaterialMain(插入到下方标记行处)。
@@ -37,6 +37,20 @@ cbuffer GBufferType : register(b1)
     float  gbufferTypeReserve2;
 };
 
+cbuffer Tonemap : register(b2)
+{
+    float exposureAdjustment;
+    float tonemapRange;
+    float sharpness;
+    float preTonemapRange;
+    int   useAutoExposure;
+    float echoBlend;
+    float AABlend;
+    float AASubPixel;
+    float ResponsiveAARate;
+};
+
+ByteAddressBuffer WhitePtSrv : register(t0);
 //__IFACE_END__
 
 // ---- 输入签名(寄存器 0..5) ----
@@ -69,9 +83,6 @@ struct MaterialInput
     float3 Tangent;        // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 Bitangent;      // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 positionWS;
-    float3 camPos;
-    float3 camDir;
-    float3 camUp;
 };
 
 // ---- 材质输出(PBR 语义; 表3a; 打包/光照/后处理由模板+引擎做) ----
@@ -126,12 +137,6 @@ PSOut main(PSIn i)
     mi.Tangent = T;
     mi.Bitangent = B;
     mi.positionWS = posWS;
-    mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
-                       transposeViewInvMat[2].w);
-    mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
-                                 transposeViewInvMat[2].z));
-    mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
-                                 transposeViewInvMat[2].y));
     MaterialOutput m;
     MaterialMain(mi, m);
 
@@ -161,9 +166,13 @@ PSOut main(PSIn i)
     o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
     o.o3 = float4(m.Occlusion, vel, 1.0);
 
-    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器在此注入(无则不注入) ----
-    if (i.v1.w > 1e30) {
-        //__KEEPALIVE__
-    }
+    // ---- 4. 曝光(固有输入; 材质不感知): 引擎会对 RT0 再乘 <白点*曝光> ⇒ 这里自动抵消 ----
+    float _wp = asfloat(WhitePtSrv.Load(0));
+    _wp = (useAutoExposure != 0) ? _wp : 1.0;
+    _wp = _wp * exposureAdjustment;
+    o.o0.rgb *= 1.0 / max(_wp, 0.0001);
+
+    // ---- 5. 保活(引擎资源/材质贴图; 由生成器按需注入, 自带死分支) ----
+    //__KEEPALIVE__
     return o;
 }

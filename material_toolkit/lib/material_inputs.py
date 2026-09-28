@@ -256,9 +256,11 @@ def keepalive_hlsl(items):
             lines.append("_ka += float(%s);" % _member_ref(it.get("type", "float"), nm))
     if not lines:
         return ""
-    head = "        uint _k0, _k1, _k2, _k3; float _ka = 0.0;"
+    head = ("// 保活(死分支): 引擎资源/材质贴图 防被编译器剔除\n"
+            "    if (i.v1.w > 1e30) {\n"
+            "        uint _k0, _k1, _k2, _k3; float _ka = 0.0;")
     body = ["        " + s for s in lines]
-    tail = "        o.o0.x += _ka;"
+    tail = "        o.o0.x += _ka;\n    }"
     return "\n".join([head] + body + [tail])
 
 

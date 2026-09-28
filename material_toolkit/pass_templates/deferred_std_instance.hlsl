@@ -43,9 +43,6 @@ struct MaterialInput
     float3 Tangent;        // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 Bitangent;      // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
     float3 positionWS;
-    float3 camPos;
-    float3 camDir;
-    float3 camUp;
 };
 
 // ---- 材质输出(PBR 语义; 表3a) ----
@@ -102,12 +99,6 @@ PSOut main(PSIn i)
     mi.Tangent = T;
     mi.Bitangent = B;
     mi.positionWS = posWS;
-    mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,
-                       transposeViewInvMat[2].w);
-    mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,
-                                 transposeViewInvMat[2].z));
-    mi.camUp  = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y,
-                                 transposeViewInvMat[2].y));
     MaterialOutput m;
     MaterialMain(mi, m);
 
@@ -137,9 +128,13 @@ PSOut main(PSIn i)
     o.o2 = float4(encN, m.Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
     o.o3 = float4(m.Occlusion, vel, 1.0);
 
-    // ---- 4. 保活(死分支): 引擎资源/材质贴图 由生成器按需注入(无则不注入) ----
-    if (i.v1.w > 1e30) {
-        //__KEEPALIVE__
-    }
+    // ---- 4. 曝光(固有输入; 材质不感知): 引擎会对 RT0 再乘 <白点*曝光> ⇒ 这里自动抵消 ----
+    float _wp = asfloat(WhitePtSrv.Load(0));
+    _wp = (useAutoExposure != 0) ? _wp : 1.0;
+    _wp = _wp * exposureAdjustment;
+    o.o0.rgb *= 1.0 / max(_wp, 0.0001);
+
+    // ---- 5. 保活(引擎资源/材质贴图; 由生成器按需注入, 自带死分支) ----
+    //__KEEPALIVE__
     return o;
 }
