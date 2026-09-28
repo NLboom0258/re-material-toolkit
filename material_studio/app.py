@@ -2362,7 +2362,8 @@ class MaterialSystemPanel(QWidget):
         for label, val in (("默认光照", "default"), ("自定义光照", "custom")):
             self.cmb_light.addItem(label, val)
         self.cmb_shading = NoWheelComboBox()
-        for label, val in (("延迟", "deferred"), ("前向", "forward")):
+        # 前向暂去掉(模板已归档; 之后重构再加回)
+        for label, val in (("延迟", "deferred"),):
             self.cmb_shading.addItem(label, val)
         self.ed_mmtr = QLineEdit()
         self.ed_mmtr.setPlaceholderText("导出 mdf2 时的 MasterMaterial 路径(可留空)")

@@ -73,18 +73,6 @@ struct PSOut
     float4 o3 : SV_Target3;
 };
 
-// ---- 材质输入(供 MaterialMain 使用) ----
-struct MaterialInput
-{
-    float2 uv0;
-    float2 uv1;
-    float3 Normal;         // ⚠ GBuffer/插值约定(已 .xzy); 光照请用 NormalWS
-    float3 NormalWS;       // 世界(光照)空间法线(= Normal.xzy) —— 与光方向同空间, 做 N·L 用它
-    float3 Tangent;        // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
-    float3 Bitangent;      // ⚠ 同 Normal 的约定(已 .xzy); 世界空间计算请 .xzy
-    float3 positionWS;
-};
-
 // ---- 材质输出(PBR 语义; 表3a; 打包/光照/后处理由模板+引擎做) ----
 struct MaterialOutput
 {
@@ -114,31 +102,19 @@ float3 OctEncodeNormal(float3 n)
 
 PSOut main(PSIn i)
 {
-    // ---- 1. 输入解包 ----
-    float2 uv0 = float2(i.v1.w, i.v2.x);
-    float2 uv1 = i.v2.yz;
-
+    // ---- 1. 法线基(供 GBuffer 打包; 材质请直接从 PSIn i 取值) ----
     float3 N = normalize(i.v1.xyz).xzy;
     float3 T = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     float3 B = cross(N, T);
     B = (i.v3.z < 0.0) ? -B : B;
     B = normalize(B);
-    float3 posWS = float3(i.v3.w, i.v4.x, i.v4.y);
 
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float2 vel = (i.v4.zw / i.v5.x) - ndc;
 
-    // ---- 2. 材质逻辑(给 PBR 语义) ----
-    MaterialInput mi;
-    mi.uv0 = uv0;
-    mi.uv1 = uv1;
-    mi.Normal = N;
-    mi.NormalWS = mi.Normal.xzy;   // 世界(光照)空间; 做 N·L 用这个
-    mi.Tangent = T;
-    mi.Bitangent = B;
-    mi.positionWS = posWS;
+    // ---- 2. 材质逻辑(PBR 语义; 入参 = PSIn 直通) ----
     MaterialOutput m;
-    MaterialMain(mi, m);
+    MaterialMain(i, m);
 
     // ---- 3. 打包进 GBuffer(引擎光照/后处理外置) ----
     float metallic = saturate(m.Metallic * 1.02 - 0.02);
@@ -172,7 +148,6 @@ PSOut main(PSIn i)
     _wp = _wp * exposureAdjustment;
     o.o0.rgb *= 1.0 / max(_wp, 0.0001);
 
-    // ---- 5. 保活(引擎资源/材质贴图; 由生成器按需注入, 自带死分支) ----
     //__KEEPALIVE__
     return o;
 }
