@@ -55,7 +55,6 @@ from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E40
 from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
 from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
 from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
-from tools.material_toolkit.lib import mmtr_presets as presets  # noqa: E402
 from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
@@ -2642,11 +2641,13 @@ class MaterialSystemPanel(QWidget):
                     grp[cat] = g
                 for cb in sub["cbuffer"]:
                     it = QTreeWidgetItem([cb["name"], cb["reg"],
-                                          "%s · %d 成员"
-                                          % (src_of.get(cb["name"], ""), len(cb["members"]))])
+                                          minp.desc_of(cb["name"])])
+                    it.setToolTip(2, "%s · %d 成员"
+                                  % (src_of.get(cb["name"], ""), len(cb["members"])))
                     grp["cbuffer"].addChild(it)
                     for m in cb["members"]:
-                        cm = QTreeWidgetItem([m["name"], m["type"], "@%d" % m["offset"]])
+                        cm = QTreeWidgetItem([m["name"], m["type"],
+                                              minp.member_desc(cb["name"], m["name"])])
                         cm.setData(0, Qt.UserRole, ("copy", m["name"]))
                         it.addChild(cm)
                 for t in sub["texture"]:
@@ -2694,10 +2695,9 @@ class MaterialSystemPanel(QWidget):
             enode.addChild(it)
             # 引擎 cbuffer: 展开看成员(与固有输入一致的展示)
             for m in (e.get("members") or []):
-                off = m.get("offset")
-                cm = QTreeWidgetItem([m.get("name", ""), m.get("type", ""),
-                                      ("@%d" % off) if off is not None else ""])
-                cm.setData(0, Qt.UserRole, ("copy", m.get("name", "")))
+                mn = m.get("name", "")
+                cm = QTreeWidgetItem([mn, m.get("type", ""), minp.member_desc(n, mn)])
+                cm.setData(0, Qt.UserRole, ("copy", mn))
                 it.addChild(cm)
         # 默认只展开到"分类"层(0=顶层, 1=分类); 资源项与 cbuffer 成员默认折叠
         self.tree_inputs.expandToDepth(1)
@@ -2978,9 +2978,11 @@ class EngineResDialog(QDialog):
                 # 引擎 cbuffer: 展开看成员(勾选前先看清定义)
                 if kind == "cbuffer":
                     for m in (e.get("members") or []):
+                        mn = m.get("name", "")
                         off = m.get("offset")
-                        mc = QTreeWidgetItem([m.get("name", ""), m.get("type", ""),
-                                              ("@%d" % off) if off is not None else ""])
+                        mc = QTreeWidgetItem([mn, m.get("type", ""),
+                                              ("@%d" % off) if off is not None else "",
+                                              minp.member_desc(e["name"], mn)])
                         it.addChild(mc)
             self.tree.addTopLevelItem(root)
         # 默认只展开到分类层; 资源项(及其 cbuffer 成员)默认折叠

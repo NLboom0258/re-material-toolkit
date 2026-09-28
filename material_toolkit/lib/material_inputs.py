@@ -31,22 +31,23 @@ except ImportError:  # 允许脚本直接 import
 
 KINDS = ("cbuffer", "texture", "sampler", "param")
 
-# 引擎资源用途说明(供"引擎资源添加页"人读)。名字 -> 一句话; 不确定的标"(推测)"。
+# 引擎资源用途说明(供"引擎资源添加页"/输入页人读)。名 -> **一句话(总体定位)**。
+# cbuffer 这里只写"整体定位"; 其**成员**各自的说明见 MEMBER_DESC。不确定的标"(推测)"。
 RESOURCE_DESC = {
-    "SceneInfo": "场景/相机: 视图投影矩阵、近远平面、屏幕尺寸/倒数、视锥、裁剪面。",
-    "GBufferType": "GBuffer 类型标志: 写 o2.w 供下游判定 GBuffer 类型。",
-    "Tonemap": "色调映射/曝光: 曝光值、tonemap 范围、自动曝光开关、AA 参数。",
-    "UserMaterial": "材质参数(mdf2 传入): VAR_* 成员表(颜色/金属/粗糙/SSS 等)。",
-    "RootConstant": "根常量(DX12 root constants, 32bit): 常用于 CS 分发/索引等少量参数。",
-    "cbCSSkinning": "计算着色器蒙皮参数: 顶点/UV 数、各属性字节偏移。",
-    "ShadowCastInfo": "阴影投射偏差: 深度/斜率偏置(阴影贴图渲染用)。",
-    "EnvironmentInfo": "环境/帧信息: 时间(ms)、帧计数、奇偶帧、全局参数、破坏PBR参数。",
-    "CheckerBoardInfo": "棋盘格渲染(Checkerboard)参数: 缩放/偏置/开关(交错渲染/上采样)。(推测)",
-    "World": "世界矩阵: worldMat/prevWorldMat/关节偏移(蒙皮/实例用)。",
-    "OutdoorLightProbeParam": "室外光照探针网格: 网格 offset/scale/depth/min/max。",
-    "ShadowSamplingRotation": "阴影采样旋转: ShadowSamplePoints[8](阴影滤波采样点)。",
-    "DirectionalLightParameter": "方向光: 方向/颜色/视投影/SDSM/级联(cascade)参数。",
-    "PickState": "拾取(鼠标)状态: 写地址、拾取位置、可选标签。",
+    "SceneInfo": "场景/相机信息(矩阵、屏幕尺寸、近远平面、视锥等)。",
+    "GBufferType": "GBuffer 类型标志(写 o2.w 供下游判定 GBuffer 类型)。",
+    "Tonemap": "色调映射/曝光/AA 参数(屏幕后处理用)。",
+    "UserMaterial": "材质参数(mdf2 传入): VAR_* 成员表。",
+    "RootConstant": "通用根常量(DX12 root constants, 32bit)。",
+    "cbCSSkinning": "计算着色器蒙皮(CS skinning)参数。",
+    "ShadowCastInfo": "阴影投射偏差(阴影贴图渲染)。",
+    "EnvironmentInfo": "环境/帧信息(时间、帧号、全局参数、破坏PBR参数)。",
+    "CheckerBoardInfo": "棋盘格(Checkerboard)渲染参数。(推测)",
+    "World": "世界矩阵(当前/上一帧)与关节偏移。",
+    "OutdoorLightProbeParam": "室外光照探针网格参数。",
+    "ShadowSamplingRotation": "阴影采样旋转(滤波采样点)。",
+    "DirectionalLightParameter": "方向光参数(方向/颜色/级联/阴影)。",
+    "PickState": "拾取(鼠标)状态。",
     "WhitePtSrv": "引擎白点 raw buffer(ByteAddressBuffer): 曝光/白点基准值; 只能 .Load()。",
     "InstanceWorldInfo": "实例世界信息(struct buffer): 每实例世界相关数据。",
     "InputByteBuffer": "输入字节缓冲: 原始字节数据(按偏移解析)。",
@@ -79,8 +80,158 @@ RESOURCE_DESC = {
 
 
 def desc_of(name):
-    """引擎资源的一句话说明(未知返回空串)。"""
+    """引擎资源的一句话说明(总体定位; 未知返回空串)。"""
     return RESOURCE_DESC.get(name, "")
+
+
+# cbuffer 成员说明: cbuffer名 -> {成员名: 一句话}。供输入页/引擎资源选择器逐成员展示。
+MEMBER_DESC = {
+    "SceneInfo": {
+        "viewProjMat": "视图投影矩阵(世界→裁剪)",
+        "transposeViewMat": "视图矩阵(转置 3x4)",
+        "transposeViewInvMat": "视图逆矩阵(转置 3x4; 可提相机世界位置/朝向)",
+        "projElement[2]": "投影矩阵元素(斜切/近平面处理)",
+        "projInvElements[2]": "投影逆矩阵元素",
+        "viewProjInvMat": "视图投影逆矩阵(裁剪→世界)",
+        "prevViewProjMat": "上一帧视图投影(速度/运动矢量)",
+        "ZToLinear": "深度(Z)→线性深度参数",
+        "subdivisionLevel": "曲面细分级别",
+        "screenSize": "屏幕尺寸(像素)",
+        "screenInverseSize": "屏幕尺寸倒数(NDC 反算)",
+        "cullingHelper": "剔除辅助参数",
+        "cameraNearPlane": "相机近平面",
+        "cameraFarPlane": "相机远平面",
+        "viewFrustum[6]": "视锥 6 平面",
+        "clipplane": "裁剪平面",
+    },
+    "GBufferType": {
+        "gbufferTypeFlag": "GBuffer 类型标志(写 o2.w)",
+        "gbufferTypeReserve0": "保留",
+        "gbufferTypeReserve1": "保留",
+        "gbufferTypeReserve2": "保留",
+    },
+    "Tonemap": {
+        "exposureAdjustment": "曝光调整",
+        "tonemapRange": "色调映射范围",
+        "sharpness": "锐化强度",
+        "preTonemapRange": "前置 tonemap 范围",
+        "useAutoExposure": "是否自动曝光",
+        "echoBlend": "残影/回声混合",
+        "AABlend": "AA 混合",
+        "AASubPixel": "AA 子像素",
+        "ResponsiveAARate": "响应式 AA 速率",
+    },
+    "UserMaterial": {
+        "VAR_LimLight_Color": "边缘光颜色",
+        "VAR_BaseColor": "基础色",
+        "VAR_LimLight_Intensity": "边缘光强度",
+        "VAR_LimLight_Pow": "边缘光幂",
+        "VAR_LimLight_Invert": "边缘光反转",
+        "VAR_OcclusionMap_UseSecondaryUV": "遮蔽图用第二套 UV",
+        "VAR_Metallic": "金属度",
+        "VAR_Roughness": "粗糙度",
+        "VAR_TranslucencyIntensity": "半透明强度",
+        "VAR_AlbedoOffsetIntensity": "反照率偏移强度",
+        "VAR_OcclusionIntensity": "遮蔽强度",
+        "VAR_SpecularReflectance": "镜面反射率",
+        "VAR_Use_SpecularReflectanceMap": "是否用镜面反射率贴图",
+        "VAR_SSS_Channel": "次表面散射通道",
+        "VAR_UseAlphaMap": "是否用 alpha 贴图",
+        "VAR_AlphaTestRef": "Alpha 测试阈值",
+        "VAR_DissolveControl": "消融控制",
+        "VAR_AlphaValue": "Alpha 值",
+        "VAR_DissolveOffset": "消融偏移",
+        "CAPCOM_MATERIAL_RESERVE0": "引擎保留",
+        "CAPCOM_MATERIAL_RESERVE1": "引擎保留",
+        "CAPCOM_MATERIAL_RESERVE2": "引擎保留",
+    },
+    "RootConstant": {"constant32Bits": "通用 32bit 常量"},
+    "cbCSSkinning": {
+        "cVertexCount": "顶点数",
+        "cUVCount": "UV 套数",
+        "reserved": "保留",
+        "cVertexPositionByteOffset": "源-位置 字节偏移",
+        "cVertexNormalByteOffset": "源-法线 字节偏移",
+        "cVertexTexcoordByteOffset": "源-UV0 字节偏移",
+        "cVertexTexcoord2ByteOffset": "源-UV1 字节偏移",
+        "cVertexSkinWeightByteOffset": "源-蒙皮权重 字节偏移",
+        "cDstVertexPositionByteOffset": "目标-位置 字节偏移",
+        "cDstVertexPrevPositionByteOffset": "目标-上一帧位置 字节偏移",
+        "cDstVertexNormalByteOffset": "目标-法线 字节偏移",
+    },
+    "ShadowCastInfo": {
+        "shadowCastDepthBias": "阴影深度偏置",
+        "shadowCastSlopeBias": "阴影斜率偏置",
+        "shadowCastReserve": "保留",
+    },
+    "EnvironmentInfo": {
+        "timeMillisecond": "时间(毫秒)",
+        "frameCount": "帧计数",
+        "isOddFrame": "奇偶帧标志",
+        "reserveEnvironmentInfo": "保留",
+        "userGlobalParams": "用户全局参数(4x4)",
+        "breakingPBRSpecularIntensity": "破坏PBR-镜面强度",
+        "breakingPBRIBLReflectanceBias": "破坏PBR-IBL反射偏移",
+        "breakingPBRIBLIntensity": "破坏PBR-IBL强度",
+        "breakingPBR_Reserved": "保留",
+    },
+    "CheckerBoardInfo": {
+        "cbr": "棋盘缩放/偏置",
+        "cbr_bias": "棋盘偏置",
+        "cbr_using": "是否启用棋盘渲染",
+    },
+    "World": {
+        "worldMat": "世界矩阵",
+        "prevWorldMat": "上一帧世界矩阵",
+        "jointOffset": "关节偏移",
+        "prevJoinOffset": "上一帧关节偏移",
+        "reserveWorld": "保留",
+    },
+    "OutdoorLightProbeParam": {
+        "GridOffset": "探针网格偏移",
+        "GridScale": "探针网格缩放",
+        "OutdoorGridOffset": "室外网格偏移",
+        "GridDepth": "网格深度",
+        "OutdoorGridScale": "室外网格缩放",
+        "_OutdoorLightProbeParam3": "保留",
+        "OutdoorGridMin": "室外网格最小",
+        "OutdoorGridMax": "室外网格最大",
+    },
+    "ShadowSamplingRotation": {"ShadowSamplePoints[8]": "阴影滤波采样点(8)"},
+    "DirectionalLightParameter": {
+        "DL_Direction": "方向光方向",
+        "DL_Enable": "方向光启用",
+        "DL_Color": "方向光颜色",
+        "DL_MinAlpha": "最小 alpha",
+        "DL_ViewProjection": "方向光视投影矩阵",
+        "DL_Variance": "阴影方差",
+        "DL_ArrayIndex": "阴影数组索引",
+        "DL_MipIndex": "阴影 mip 索引",
+        "DL_Bias": "阴影偏置",
+        "Cascade_Translate1": "级联1-平移",
+        "Cascade_Bias1": "级联1-偏置",
+        "Cascade_Translate2": "级联2-平移",
+        "Cascade_Bias2": "级联2-偏置",
+        "Cascade_Translate3": "级联3-平移",
+        "Cascade_Bias3": "级联3-偏置",
+        "Cascade_Scale1": "级联1-缩放",
+        "Cascade_Scale2": "级联2-缩放",
+        "Cascade_Scale3": "级联3-缩放",
+        "SDSMEnable": "SDSM 启用",
+        "SDSMDebugDraw": "SDSM 调试绘制",
+        "CascadeDistance": "级联距离",
+    },
+    "PickState": {
+        "WriteAddress": "写地址",
+        "PickPosition": "拾取位置",
+        "OptionalTag": "可选标签",
+    },
+}
+
+
+def member_desc(cbuffer, member):
+    """cbuffer 某成员的一句话说明(未知返回空串)。"""
+    return (MEMBER_DESC.get(cbuffer) or {}).get(member, "")
 
 _ENGINE_RE = re.compile(r"^\s*//!\s*engine\s+(\w+)\s*$")
 _REG_PRE = {"cbuffer": "b", "texture": "t", "sampler": "s"}
