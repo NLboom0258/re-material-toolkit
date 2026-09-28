@@ -1,49 +1,62 @@
 {
-  "format": "semantic_inputs/1",
-  "_note": "预设(语义)输入目录: 一个语义名 -> 依赖的引擎资源 + MaterialInput 字段 + 构造实现。人工维护(非从 mmtr 抽取)。",
-  "presets": [
+  "format": "semantic_inputs/2",
+  "_note": "预设(语义)输入目录: 每个条目 = 一个可**单独添加**的语义输入项(name -> 依赖的引擎资源 + MaterialInput 字段 + 构造实现)。group 仅用于界面分组显示(不是可添加的一整类)。人工维护(非从 mmtr 抽取)。",
+  "entries": [
     {
-      "name": "UV0",
-      "desc": "第一套 UV(来自插值 v1.w/v2.x)",
+      "name": "uv0",
+      "group": "UV",
+      "desc": "第一套 UV(插值 v1.w/v2.x)",
       "depends": [],
-      "fields": [{"name": "uv0", "type": "float2"}],
+      "field": {"name": "uv0", "type": "float2"},
       "impl": ["mi.uv0 = float2(i.v1.w, i.v2.x);"]
     },
     {
-      "name": "UV1",
-      "desc": "第二套 UV(来自插值 v2.yz)",
+      "name": "uv1",
+      "group": "UV",
+      "desc": "第二套 UV(插值 v2.yz)",
       "depends": [],
-      "fields": [{"name": "uv1", "type": "float2"}],
+      "field": {"name": "uv1", "type": "float2"},
       "impl": ["mi.uv1 = i.v2.yz;"]
     },
     {
       "name": "NormalWS",
+      "group": "几何",
       "desc": "世界(光照)空间法线; 做 N·L 用它(与光方向同空间)",
       "depends": [],
-      "fields": [{"name": "NormalWS", "type": "float3"}],
+      "field": {"name": "NormalWS", "type": "float3"},
       "impl": ["mi.NormalWS = normalize(i.v1.xyz);"]
     },
     {
-      "name": "PositionWS",
-      "desc": "世界坐标(来自插值 v3.w/v4.xy)",
+      "name": "positionWS",
+      "group": "几何",
+      "desc": "世界坐标(插值 v3.w/v4.xy)",
       "depends": [],
-      "fields": [{"name": "positionWS", "type": "float3"}],
+      "field": {"name": "positionWS", "type": "float3"},
       "impl": ["mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);"]
     },
     {
-      "name": "Camera",
-      "desc": "相机位置/朝向/上方向(依赖 SceneInfo.transposeViewInvMat)",
+      "name": "camPos",
+      "group": "相机",
+      "desc": "相机世界位置(依赖 SceneInfo.transposeViewInvMat)",
       "depends": ["SceneInfo"],
-      "fields": [
-        {"name": "camPos", "type": "float3"},
-        {"name": "camDir", "type": "float3"},
-        {"name": "camUp", "type": "float3"}
-      ],
-      "impl": [
-        "mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w, transposeViewInvMat[2].w);",
-        "mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z, transposeViewInvMat[2].z));",
-        "mi.camUp = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y, transposeViewInvMat[2].y));"
-      ]
+      "field": {"name": "camPos", "type": "float3"},
+      "impl": ["mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w, transposeViewInvMat[2].w);"]
+    },
+    {
+      "name": "camDir",
+      "group": "相机",
+      "desc": "相机前方向(依赖 SceneInfo.transposeViewInvMat)",
+      "depends": ["SceneInfo"],
+      "field": {"name": "camDir", "type": "float3"},
+      "impl": ["mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z, transposeViewInvMat[2].z));"]
+    },
+    {
+      "name": "camUp",
+      "group": "相机",
+      "desc": "相机上方向(依赖 SceneInfo.transposeViewInvMat)",
+      "depends": ["SceneInfo"],
+      "field": {"name": "camUp", "type": "float3"},
+      "impl": ["mi.camUp = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y, transposeViewInvMat[2].y));"]
     }
   ]
 }

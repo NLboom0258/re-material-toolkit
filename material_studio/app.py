@@ -2754,15 +2754,27 @@ class MaterialSystemPanel(QWidget):
         self.tree_inputs.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(self._presets)])
         cust.addChild(pre)
-        for n in self._presets:
-            e = sinp.find(n) or {}
-            deps = e.get("depends") or []
-            d = e.get("desc", "")
-            if deps:
-                d = ("%s | 依赖: %s" % (d, ", ".join(deps))).strip(" |")
-            it = QTreeWidgetItem([n, "", d])
-            it.setData(0, Qt.UserRole, ("preset", n))
-            pre.addChild(it)
+        _sel = set(self._presets)
+        for g in sinp.groups():                      # 按分组列已添加的项(单项粒度)
+            _items = [e for e in g["items"] if e["name"] in _sel]
+            if not _items:
+                continue
+            gnode = QTreeWidgetItem([g["group"], "", ""])
+            pre.addChild(gnode)
+            for e in _items:
+                deps = e.get("depends") or []
+                d = e.get("desc", "")
+                if deps:
+                    d = ("%s | 依赖: %s" % (d, ", ".join(deps))).strip(" |")
+                it = QTreeWidgetItem([e["name"],
+                                      (e.get("field") or {}).get("type", ""), d])
+                it.setData(0, Qt.UserRole, ("preset", e["name"]))
+                gnode.addChild(it)
+        for n in self._presets:              # 目录里没有的(旧/手写)也列出, 便于删除
+            if sinp.find(n) is None:
+                it = QTreeWidgetItem([n, "", "(未知语义输入项)"])
+                it.setData(0, Qt.UserRole, ("preset", n))
+                pre.addChild(it)
         pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(self._params)])
         cust.addChild(pnode)
         for n, t in self._params:
@@ -3138,29 +3150,37 @@ class EngineResDialog(QDialog):
 
 
 class PresetDialog(QDialog):
-    """预设(语义)输入选择器: 挑语义输入; 其依赖的引擎资源会自动加入并锁定。"""
+    """语义输入选择器: **按分组列出、可单独勾选**每一项; 其依赖的引擎资源自动加入并锁定。
+
+    分组(见目录的 `group`)仅用于界面归类显示; 添加单位始终是**单个语义输入项**(如 `camPos`),
+    不提供"添加一整类"。
+    """
 
     def __init__(self, parent=None, selected=()):
         super().__init__(parent)
         self.setWindowTitle("添加预设输入")
-        self.resize(840, 480)
+        self.resize(900, 520)
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("选择语义输入; 勾选后其依赖的引擎资源会自动加入(并锁定)。"))
+        v.addWidget(QLabel("按分组挑选语义输入项(可单独添加); 勾选后其依赖的引擎资源会自动加入(并锁定)。"))
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["预设输入", "依赖的引擎资源", "说明 / 字段"])
-        self.tree.setColumnWidth(0, 170)
-        self.tree.setColumnWidth(1, 210)
-        self.tree.setColumnWidth(2, 440)
-        for e in sinp.catalog():
-            it = QTreeWidgetItem([e["name"], ", ".join(e.get("depends") or []) or "(无)",
-                                  e.get("desc", "")])
-            it.setToolTip(2, e.get("desc", ""))
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(0, Qt.Checked if e["name"] in selected else Qt.Unchecked)
-            for f in (e.get("fields") or []):
-                it.addChild(QTreeWidgetItem(["", f["name"], f.get("type", "")]))
-            self.tree.addTopLevelItem(it)
-        self.tree.expandToDepth(0)
+        self.tree.setHeaderLabels(["预设输入", "类型", "依赖的引擎资源", "说明"])
+        for col, w in ((0, 190), (1, 90), (2, 200), (3, 380)):
+            self.tree.setColumnWidth(col, w)
+        sel = set(selected)
+        for g in sinp.groups():
+            gnode = QTreeWidgetItem([g["group"], "", "", ""])
+            gnode.setFlags(gnode.flags() & ~Qt.ItemIsUserCheckable)
+            for e in g["items"]:
+                f = e.get("field") or {}
+                it = QTreeWidgetItem([e["name"], f.get("type", ""),
+                                      ", ".join(e.get("depends") or []) or "(无)",
+                                      e.get("desc", "")])
+                it.setToolTip(3, e.get("desc", ""))
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(0, Qt.Checked if e["name"] in sel else Qt.Unchecked)
+                gnode.addChild(it)
+            self.tree.addTopLevelItem(gnode)
+        self.tree.expandAll()
         v.addWidget(self.tree, 1)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
@@ -3170,9 +3190,11 @@ class PresetDialog(QDialog):
     def selected_names(self):
         out = []
         for i in range(self.tree.topLevelItemCount()):
-            c = self.tree.topLevelItem(i)
-            if c.checkState(0) == Qt.Checked:
-                out.append(c.text(0))
+            g = self.tree.topLevelItem(i)
+            for j in range(g.childCount()):
+                c = g.child(j)
+                if c.checkState(0) == Qt.Checked:
+                    out.append(c.text(0))
         return out
 
 

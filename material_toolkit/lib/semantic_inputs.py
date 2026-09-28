@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""预设(语义)输入目录: 一个语义名 -> 依赖的引擎资源 + MaterialInput 字段 + 构造实现。
+"""预设(语义)输入目录: 每个条目 = 一个可**单独添加**的语义输入项。
 
 数据来自 `presets/<ver>/semantic_inputs.json`(人工维护的"内容"文件, 非从 mmtr 抽取)。
+每个条目: `{name, group?, desc?, depends[], field{name,type}, impl[]}`。
+`group` 仅用于界面分组显示 —— **添加单位是单个条目**(如 `camPos`), 不是一整类。
 
-设计(2026-09-29):
-- 材质源码顶部用 `//! preset <Name>` 声明"已添加的预设输入";
-- 组装时**动态生成** `struct MaterialInput`(字段 = 所有预设提供的字段)与 main 内的
-  构造代码(每预设的 impl); **依赖的引擎资源**按 `//! engine` 同样路径加入接口(自动分配
+设计(2026-09-29 v2):
+- 材质源码顶部用 `//! preset <Name>` 声明"已添加的语义输入项"(一行一项);
+- 组装时**动态生成** `struct MaterialInput`(字段 = 所有已添加项提供的字段)与 main 内的
+  构造代码(每项的 impl); **依赖的引擎资源**按 `//! engine` 同样路径加入接口(自动分配
   寄存器 + 保活);
 - 本模块**不 import material_inputs**(避免循环); 依赖判定由调用方传入 `existing_names`。
 
 用法:
-    SI.catalog()                         # 全部预设 [{name,desc,depends,fields,impl}]
+    SI.catalog()                         # 全部条目 [{name,group,desc,depends,field,impl}]
+    SI.groups()                          # 按 group 聚合(界面用): [{group, items:[...]}]
     SI.find(name)                        # 单个(无则 None)
     SI.parse_preset_decls(src)           # 源码里的 `//! preset` 名(按序去重)
     SI.resolve(names, existing_names)    # 解析 -> deps/engine/fields/impl/def/build
@@ -29,6 +32,7 @@ except ImportError:  # 允许脚本直接 import
     import mmtr_presets as P
 
 _PRESET_RE = re.compile(r"^\s*//!\s*preset\s+(\w+)\s*$")
+_GROUP_NONE = "(未分组)"
 
 
 def path():
@@ -36,12 +40,13 @@ def path():
 
 
 def catalog():
-    """全部预设(列表)。无文件返回 []。"""
+    """全部条目(列表)。无文件返回 []。"""
     p = path()
     if not os.path.exists(p):
         return []
     with open(p, encoding="utf-8") as f:
-        return json.load(f).get("presets", [])
+        d = json.load(f)
+    return d.get("entries", d.get("presets", []))
 
 
 def find(name):
@@ -49,6 +54,21 @@ def find(name):
         if e["name"] == name:
             return e
     return None
+
+
+def groups():
+    """按 `group` 聚合(保持首次出现顺序); 无 group 的归入 "(未分组)"。
+
+    返回 [{group, items:[条目...]}]。仅供界面分组显示, 不改变"单项添加"的语义。
+    """
+    out, idx = [], {}
+    for e in catalog():
+        g = e.get("group") or _GROUP_NONE
+        if g not in idx:
+            idx[g] = len(out)
+            out.append({"group": g, "items": []})
+        out[idx[g]]["items"].append(e)
+    return out
 
 
 def parse_preset_decls(material_src):
@@ -69,26 +89,26 @@ def _dedup(seq):
     return out
 
 
-def resolve(preset_names, existing_names=frozenset()):
-    """按"已添加的预设名"解析出: 依赖资源 + MaterialInput 字段 + 构造实现 + 文本。
+def resolve(item_names, existing_names=frozenset()):
+    """按"已添加的语义输入项名"解析出: 依赖资源 + MaterialInput 字段 + 构造实现 + 文本。
 
     参数:
-      preset_names   : `//! preset` 名列表(可含未知名)。
+      item_names     : `//! preset` 名列表(可含未知名); 每名 = 一个单独项。
       existing_names : 基础接口里**已有**的资源名集合(这些依赖不再重复添加)。
 
     返回 dict:
-      presets : 有效预设名(按序去重)
-      unknown : 不在目录里的预设名
+      presets : 有效项名(按序去重)
+      unknown : 不在目录里的项名
       deps    : 全部依赖资源名(按序去重)
       engine  : 需要新增的依赖(不在 existing_names)
-      lock    : {依赖名: [引入它的预设名, ...]}
+      lock    : {依赖名: [引入它的项名, ...]}
       fields  : [{"name","type"}] (按序去重, 同名取首个)
       impl    : ["mi.xxx = ...;", ...] (按序)
       def     : struct MaterialInput 定义文本(空则含占位成员)
       build   : main 内构造代码(已缩进 4 空格; 空则含占位赋值)
     """
     names, unknown = [], []
-    for n in _dedup(list(preset_names)):
+    for n in _dedup(list(item_names)):
         (names if find(n) else unknown).append(n)
 
     deps, lock = [], {}
@@ -102,14 +122,13 @@ def resolve(preset_names, existing_names=frozenset()):
     existing = set(existing_names or ())
     engine = [d for d in deps if d not in existing]
 
-    fields, seen_f = [], set()
-    impl = []
+    fields, seen_f, impl = [], set(), []
     for n in names:
         e = find(n)
-        for f in (e.get("fields") or []):
-            if f["name"] not in seen_f:
-                seen_f.add(f["name"])
-                fields.append({"name": f["name"], "type": f.get("type", "float")})
+        f = e.get("field")
+        if f and f["name"] not in seen_f:
+            seen_f.add(f["name"])
+            fields.append({"name": f["name"], "type": f.get("type", "float")})
         impl.extend(e.get("impl") or [])
 
     return {"presets": names, "unknown": unknown, "deps": deps, "engine": engine,
@@ -124,7 +143,7 @@ def struct_text(fields):
         for f in fields:
             lines.append("    %s %s;" % (f["type"], f["name"]))
     else:
-        lines.append("    float _reserved;   // 空: 未添加任何预设输入")
+        lines.append("    float _reserved;   // 空: 未添加任何语义输入")
     lines.append("};")
     return "\n".join(lines)
 
@@ -141,7 +160,7 @@ def minput_from_src(material_src, existing_names=frozenset()):
 
 
 def empty_texts():
-    """没有任何预设时的 def/build(供 build_source 的兜底默认)。"""
+    """没有任何语义输入时的 def/build(供 build_source 的兜底默认)。"""
     return {"def": struct_text([]), "build": build_text([], [])}
 
 
