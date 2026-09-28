@@ -68,6 +68,27 @@ def _iface_from_decls(material_src):
     return iface
 
 
+# 极简"深度/阴影态 PS"(对齐原版 env_sea#5: `ps_5_0/dcl_globalFlags/ret`, 仅 SV_POSITION
+# 输入, RDEF 零绑定)。用途: depth/cutout 族槽(`ps_kind==cutout_ps`)不再用银行的"带
+# alpha/dissolve"深度 PS, 而用此极简 PS ⇒ 记录/池/计数/desc 由 `derive_group(VS, 此 PS)`
+# 自动派生成"VS-only"干净形态(ATOS/UserMaterial/环境参数不再出现)。
+# 依据: 自编译产物与 env_sea#5 逐字节同构(408B, 同反汇编/同签名); 实测产物渲染/穿模不崩。
+_MIN_DEPTH_PS_SRC = "void main(in float4 p : SV_POSITION) {}\n"
+_min_depth_ps = None
+
+
+def minimal_depth_ps():
+    """返回极简深度 PS 的 DXBC 字节(首次编译后缓存)。"""
+    global _min_depth_ps
+    if _min_depth_ps is None:
+        ps, err = B.compile_hlsl(_MIN_DEPTH_PS_SRC, "main", "ps_5_0",
+                                 name="mindepth.hlsl")
+        if err:
+            raise ValueError("极简深度 PS 编译失败:\n%s" % err)
+        _min_depth_ps = ps
+    return _min_depth_ps
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
@@ -122,6 +143,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         cs = bank_blob("%s|%s|%s" % (r["cs_kind"], pre, tech)) if r.get("cs_kind") else None
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
+        elif r.get("ps_kind") == "cutout_ps":
+            # 深度/阴影族: 用极简深度 PS(去 alpha-cutout/dissolve) ⇒ 绑定派生成 VS-only 干净形态
+            ps = minimal_depth_ps()
         elif r.get("ps_kind"):
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:
@@ -435,4 +459,5 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "boundary": boundary, "boundary_pairs": len(_seen),
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
+        "depth_ps": "minimal",
     }
