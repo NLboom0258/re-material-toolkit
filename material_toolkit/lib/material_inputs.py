@@ -332,6 +332,18 @@ def assign_regs(sel, base_iface):
     return out
 
 
+def _iface_names(iface):
+    """接口里已声明的资源名集合(cbuffer/texture/sampler)。供预设依赖判定。"""
+    out = set()
+    for c in (iface or {}).get("cbuffers", []):
+        out.add(c["name"])
+    for t in (iface or {}).get("textures", []):
+        out.add(t["name"])
+    for s in (iface or {}).get("samplers", []):
+        out.add(s["name"])
+    return out
+
+
 def _add_engine(iface, e, reg):
     """把引擎候选加成标准接口形状(cbuffer/texture/sampler)。"""
     if e["kind"] == "cbuffer":
@@ -415,15 +427,27 @@ def build_iface_and_keepalive(material_src, base_iface):
     import copy
     params, textures = MG.parse_decls(material_src)
     eng_names = parse_engine_decls(material_src)
-    report = {"engine": [], "params": [], "textures": [], "regs": {}}
-    # 无 `//!` 声明: 接口仍返回 None(让上层回退到模板 IFACE), 但**仍要**按
-    # "源码引用了哪些标准资源"生成 t0 前缀保活(否则单张/缺口会出错)。
-    bare = not params and not textures and not eng_names
+    report = {"engine": [], "params": [], "textures": [], "regs": {},
+              "presets": [], "preset_unknown": [], "lock": {}, "minput": None}
 
     if base_iface is None:
         base_iface = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
                       "textures": [],
                       "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
+
+    # 预设(语义)输入: 解析 `//! preset` -> 依赖的引擎资源(并入 eng_names, 走同一"声明即保活"
+    #   路径) + 动态生成 MaterialInput 定义/构造文本(供 build_source 注入)。
+    from . import semantic_inputs as SI
+    _si = SI.minput_from_src(material_src, _iface_names(base_iface))
+    eng_names = list(eng_names) + list(_si["engine"])
+    report["presets"] = _si["presets"]
+    report["preset_unknown"] = _si["unknown"]
+    report["lock"] = _si["lock"]
+    report["minput"] = {"def": _si["def"], "build": _si["build"]}
+
+    # 无 `//!` 声明: 接口仍返回 None(让上层回退到模板 IFACE), 但**仍要**按
+    # "源码引用了哪些标准资源"生成 t0 前缀保活(否则单张/缺口会出错)。
+    bare = not params and not textures and not eng_names
     known_p = {m["name"] for c in base_iface["cbuffers"] for m in c["members"]}
     known_t = {t["name"] for t in base_iface["textures"]}
     params = [(n, t) for (n, t) in params if n not in known_p]

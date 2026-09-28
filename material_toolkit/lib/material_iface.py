@@ -235,10 +235,13 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
     if mc is not None:
         out.append("struct %s" % struct_name)
         out.append("{")
-        for m in mc["members"]:
-            out.append("    %s %s;" % (m["type"], m["name"]))
+        if mc["members"]:
+            for m in mc["members"]:
+                out.append("    %s %s;" % (m["type"], m["name"]))
+        else:
+            # 空 UserMaterial(如仅 `//! engine UserMaterial` 无参数): struct 不能为空
+            out.append("    float _reserved;   // 空: UserMaterial 无成员")
         out.append("};")
-        out.append("")
         out.append("StructuredBuffer<%s> %s : register(%s);"
                    % (struct_name, buffer_name, struct_reg))
         out.append("")

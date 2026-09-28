@@ -115,7 +115,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         iface, ka, _rep = INP.build_iface_and_keepalive(material_src, INP.default_iface())
     else:
         _if, ka, _rep = INP.build_iface_and_keepalive(material_src, iface)
-    ps_blob, err = MP.compile_shading(material_src, template, iface=iface, keepalive=ka)
+    minput = _rep.get("minput")
+    ps_blob, err = MP.compile_shading(material_src, template, iface=iface,
+                                      keepalive=ka, minput=minput)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
 
@@ -131,7 +133,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     if (inst_slots and has_um
             and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl"))):
         ps_inst, err_inst = MP.compile_shading(material_src, inst_tpl, iface=iface,
-                                               style="instance", keepalive=ka)
+                                               style="instance", keepalive=ka,
+                                               minput=minput)
         if err_inst:
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
@@ -460,4 +463,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
         "depth_ps": "minimal",
+        "presets": _rep.get("presets") or [],
+        "preset_unknown": _rep.get("preset_unknown") or [],
+        "lock": _rep.get("lock") or {},
     }

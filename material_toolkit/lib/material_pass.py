@@ -11,6 +11,9 @@ MARKER = "//__MATERIAL_MAIN__"
 IFACE_BEGIN = "//__IFACE_BEGIN__"
 IFACE_END = "//__IFACE_END__"
 KEEPALIVE = "//__KEEPALIVE__"
+# 预设(语义)输入动态生成的两块: 结构定义(文件域) + main 内构造代码
+MINPUT_DEF = "//__MINPUT_DEF__"
+MINPUT_BUILD = "//__MINPUT_BUILD__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
 
@@ -40,13 +43,15 @@ def material_line_offset(template="deferred_env"):
 
 
 def build_source(material_src=None, template="deferred_env", iface=None,
-                 style="cbuffer", keepalive=None):
+                 style="cbuffer", keepalive=None, minput=None):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
     接口声明(否则用模板自带的写死声明, 便于单独编译/测试)。
     keepalive: 非 None 时替换模板里 //__KEEPALIVE__ 标记(自定义输入的“保活”语句,
                引用资源防被编译器剔除); 模板无该标记则忽略。
+    minput: {"def":..., "build":...} 预设(语义)输入动态生成的 MaterialInput 定义/构造;
+               None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
     style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
     """
     tpl = _read(template + ".hlsl")
@@ -57,6 +62,13 @@ def build_source(material_src=None, template="deferred_env", iface=None,
         i0 = tpl.index(IFACE_BEGIN) + len(IFACE_BEGIN)
         i1 = tpl.index(IFACE_END)
         tpl = tpl[:i0] + "\n" + MI.hlsl_of(iface, style=style) + tpl[i1:]
+    if minput is None:
+        from . import semantic_inputs as SI
+        minput = SI.empty_texts()
+    if MINPUT_DEF in tpl:
+        tpl = tpl.replace(MINPUT_DEF, minput["def"])
+    if MINPUT_BUILD in tpl:
+        tpl = tpl.replace(MINPUT_BUILD, minput["build"])
     if keepalive is not None and KEEPALIVE in tpl:
         tpl = tpl.replace(KEEPALIVE, keepalive)
     src = material_src if material_src is not None else default_material(template)
@@ -65,7 +77,7 @@ def build_source(material_src=None, template="deferred_env", iface=None,
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None, graft=False):
+                    keepalive=None, minput=None, graft=False):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
 
     注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
@@ -73,7 +85,8 @@ def compile_shading(material_src=None, template="deferred_env",
     声明成 `float4` 而 VS 只输出 `.x`); 模板改成标量后, 我们自编译的元数据本身就合法,
     **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
     """
-    dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style, keepalive),
+    dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style,
+                                            keepalive, minput),
                                entry, target, name="%s.hlsl" % template)
     if err or not graft:
         return dxbc, err

@@ -45,6 +45,9 @@ struct MaterialOutput
     float  Translucency;
 };
 
+// ---- 材质输入(由已添加的预设输入决定; 生成器注入) ----
+//__MINPUT_DEF__
+
 float3 OctEncodeNormal(float3 n)
 {
     float l1 = abs(n.x) + abs(n.y) + abs(n.z);
@@ -64,7 +67,7 @@ PSOut main(PSIn i)
     // ---- 0. 载入 per-instance 材质参数(写入裸名全局) ----
     LoadMaterialParams(UserMaterialInstances[(uint)i.idx]);
 
-    // ---- 1. 法线基(供 GBuffer 打包; 材质请直接从 PSIn i 取值) ----
+    // ---- 1. 法线基(供 GBuffer 打包) ----
     float3 N = normalize(i.v1.xyz).xzy;
     float3 T = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     float3 B = cross(N, T);
@@ -74,9 +77,10 @@ PSOut main(PSIn i)
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float2 vel = (i.v4.zw / i.v5.x) - ndc;
 
-    // ---- 2. 材质逻辑(PBR 语义; 入参 = PSIn 直通) ----
+    // ---- 2. 材质逻辑(PBR 语义; 入参 = 动态生成的 MaterialInput) ----
+    //__MINPUT_BUILD__
     MaterialOutput m;
-    MaterialMain(i, m);
+    MaterialMain(mi, m);
 
     // ---- 3. 打包进 GBuffer ----
     float metallic = saturate(m.Metallic * 1.02 - 0.02);

@@ -3,6 +3,7 @@
 // 定位: 默认光照模式。材质只给 **PBR 语义**(表3a: BaseColor/Metallic/Roughness/Normal/
 //       Emissive/Occlusion/Translucency); 光照/后处理由引擎做 —— 模板把语义打包进 GBuffer。
 //       曝光(白点*曝光系数)由模板在 RT 输出前**自动**抵消, 材质无需感知(固有输入: Tonemap/WhitePtSrv)。
+// 材质输入: `MaterialInput mi` —— **字段与构造由已添加的预设输入动态生成**(见 lib/semantic_inputs)。
 // 依据: `deferred_env` 的打包逻辑; 接口/骨架用**我们的标准接口**(无 donor)。
 // 与 deferred_std_custom 的区别: 后者直控 4 个原始 GBuffer RT(custom)。
 // 组装方式: 本文件 + 用户的 MaterialMain(插入到下方标记行处)。
@@ -85,6 +86,9 @@ struct MaterialOutput
     float  Translucency;   // >0 且 Metallic<=0 时为半透明
 };
 
+// ---- 材质输入(由已添加的预设输入决定; 生成器注入) ----
+//__MINPUT_DEF__
+
 // 法线八面体编码(等价原版)
 float3 OctEncodeNormal(float3 n)
 {
@@ -102,7 +106,7 @@ float3 OctEncodeNormal(float3 n)
 
 PSOut main(PSIn i)
 {
-    // ---- 1. 法线基(供 GBuffer 打包; 材质请直接从 PSIn i 取值) ----
+    // ---- 1. 法线基(供 GBuffer 打包) ----
     float3 N = normalize(i.v1.xyz).xzy;
     float3 T = normalize(float3(i.v2.w, i.v3.y, i.v3.x));
     float3 B = cross(N, T);
@@ -112,9 +116,10 @@ PSOut main(PSIn i)
     float2 ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float2 vel = (i.v4.zw / i.v5.x) - ndc;
 
-    // ---- 2. 材质逻辑(PBR 语义; 入参 = PSIn 直通) ----
+    // ---- 2. 材质逻辑(PBR 语义; 入参 = 动态生成的 MaterialInput) ----
+    //__MINPUT_BUILD__
     MaterialOutput m;
-    MaterialMain(i, m);
+    MaterialMain(mi, m);
 
     // ---- 3. 打包进 GBuffer(引擎光照/后处理外置) ----
     float metallic = saturate(m.Metallic * 1.02 - 0.02);

@@ -178,11 +178,16 @@ def generate(template, material_src=None, template_name="deferred_env",
         if os.path.exists(os.path.join(MP._TDIR, cand + ".hlsl")):
             instance_template = cand
 
+    # 预设(语义)输入 -> MaterialInput 定义/构造(与无 donor 路径一致)
+    from . import semantic_inputs as _SI
+    minput = (_SI.minput_from_src(material_src, _SI.names_in(iface))
+              if material_src else None)
+
     # 先编译“我们的 PS”(cbuffer / instance), 以它作分类与兼容性参照。
     # 不用“基础 PS”作参照: 同一 pass 各变体的原生绑定可能不一致(如前向),
     # 只有“我们的 PS”才是真正要跑的程序。
     ps, err = MP.compile_shading(material_src, template_name, target=target,
-                                 iface=iface, style="cbuffer")
+                                 iface=iface, style="cbuffer", minput=minput)
     if err:
         raise ValueError("HLSL 编译失败(cbuffer):\n%s" % err)
     ours_cb = analyze(ps)
@@ -190,7 +195,7 @@ def generate(template, material_src=None, template_name="deferred_env",
     if inst_present and instance_template:
         ps_inst, err2 = MP.compile_shading(material_src, instance_template,
                                            target=target, iface=iface,
-                                           style="instance")
+                                           style="instance", minput=minput)
         if err2:
             raise ValueError("HLSL 编译失败(instance):\n%s" % err2)
         ours_inst = analyze(ps_inst)

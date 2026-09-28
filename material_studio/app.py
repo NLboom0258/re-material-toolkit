@@ -56,6 +56,7 @@ from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
 from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
 from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
 from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
+from tools.material_toolkit.lib import semantic_inputs as sinp  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
@@ -2464,7 +2465,8 @@ class MaterialSystemPanel(QWidget):
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
         self.tabs.addTab(self.tree_info, "语义输出 / 校验")
         root.addWidget(self.tabs, 1)
-        # 自定义输入(参数/贴图/引擎资源)状态: 与源码 `//!` 声明同步
+        # 自定义输入(预设/参数/贴图/引擎资源)状态: 与源码 `//!` 声明同步
+        self._presets = []
         self._params = []
         self._textures = []
         self._engine = []
@@ -2582,12 +2584,12 @@ class MaterialSystemPanel(QWidget):
         return self._iface_min
 
     def _effective_inputs(self):
-        """基础接口 + 自定义输入(参数/贴图/引擎资源) + 保活; 返回 (iface, keepalive)。"""
-        iface, ka, _rep = minp.build_iface_and_keepalive(
+        """基础接口 + 自定义输入(预设/参数/贴图/引擎资源); 返回 (iface, keepalive, minput)。"""
+        iface, ka, rep = minp.build_iface_and_keepalive(
             self.ed_src.toPlainText(), self._base_iface())
         if iface is None:
             iface = self._base_iface()
-        return iface, ka
+        return iface, ka, (rep or {}).get("minput")
 
     def _effective_iface(self):
         return self._effective_inputs()[0]
@@ -2601,8 +2603,8 @@ class MaterialSystemPanel(QWidget):
         self.tree_inputs.setHeaderLabels(["类别 / 名", "类型", "说明"])
         v.addWidget(self.tree_inputs, 1)
         bar = QHBoxLayout()
-        for text, cb in (("＋参数", self._add_param), ("＋贴图", self._add_tex),
-                         ("＋引擎资源", self._add_engine),
+        for text, cb in (("＋预设输入", self._add_presets), ("＋参数", self._add_param),
+                         ("＋贴图", self._add_tex), ("＋引擎资源", self._add_engine),
                          ("删除选中", self._del_custom),
                          ("从源码重载声明", self._reload_decls_from_src)):
             b = QPushButton(text)
@@ -2614,15 +2616,41 @@ class MaterialSystemPanel(QWidget):
         return w
 
     def _load_decls_from_src(self):
+        self._presets = sinp.parse_preset_decls(self.ed_src.toPlainText())
         self._params, self._textures = mgen.parse_decls(self.ed_src.toPlainText())
         self._engine = minp.parse_engine_decls(self.ed_src.toPlainText())
 
+    def _locked_names(self):
+        """被锁定(禁止删除)的引擎资源名 -> [来源...]: 预设依赖 + 参数所需 UserMaterial。"""
+        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface()))
+        lock = {k: list(v) for k, v in res["lock"].items()}
+        if self._params:
+            lock.setdefault("UserMaterial", [])
+            if "材质参数" not in lock["UserMaterial"]:
+                lock["UserMaterial"].append("材质参数")
+        return lock
+
+    def normalize_inputs(self):
+        """补齐(幂等): 预设依赖的资源 / 参数所需的 UserMaterial 必须在 _engine 里(锁定)。
+
+        仅改**内存列表**, 不写源码 —— 由 `_rewrite_decls()` 落盘。删除锁定资源会被此步补回。
+        """
+        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface()))
+        for nm in res["engine"]:
+            if nm not in self._engine:
+                self._engine.append(nm)
+        if self._params and "UserMaterial" not in self._engine:
+            self._engine.append("UserMaterial")
+        return res
+
     def _rewrite_decls(self):
         """把自定义输入写成源码顶部的 `//!` 声明区(先删旧声明行)。"""
+        self.normalize_inputs()          # 落盘前补齐锁定依赖
         src = self.ed_src.toPlainText()
         body = "\n".join(l for l in src.splitlines()
                          if not l.lstrip().startswith("//!")).lstrip("\n")
-        lines = ["//! param %s %s" % (t, n) for n, t in self._params]
+        lines = ["//! preset %s" % n for n in self._presets]
+        lines += ["//! param %s %s" % (t, n) for n, t in self._params]
         lines += ["//! tex %s" % n for n in self._textures]
         lines += ["//! engine %s" % n for n in self._engine]
         head = ("\n".join(lines) + "\n\n") if lines else ""
@@ -2631,16 +2659,32 @@ class MaterialSystemPanel(QWidget):
 
     def _reload_decls_from_src(self):
         self._load_decls_from_src()
+        self.normalize_inputs()
         self.refresh_inputs()
+
+    def _ensure_inputs(self):
+        """从源码重载 + 补齐锁定依赖并写回。载入/编译/生成等关键处调用(防手改源码绕过锁)。"""
+        self._load_decls_from_src()
+        self._rewrite_decls()
+
+    def _add_presets(self):
+        """从预设(语义)输入目录挑选; 依赖的引擎资源会自动加入并锁定。"""
+        self._load_decls_from_src()
+        d = PresetDialog(self, selected=set(self._presets))
+        if d.exec() != QDialog.Accepted:
+            return
+        self._presets = d.selected_names()
+        self._rewrite_decls()
 
     def _add_engine(self):
         """从允许清单挑选引擎资源(cbuffer/texture/sampler); 声明即保活。"""
         self._load_decls_from_src()
-        d = EngineResDialog(self, selected=set(self._engine))
+        lock = self._locked_names()
+        d = EngineResDialog(self, selected=set(self._engine), locked=set(lock))
         if d.exec() != QDialog.Accepted:
             return
         self._engine = d.selected_names()
-        self._rewrite_decls()
+        self._rewrite_decls()          # normalize 会补回锁定项
 
     def _on_src_changed(self):
         # 源码变动 -> 旧诊断(行号)失效; 防抖后再清(不在 textChanged 内同步 rehighlight,
@@ -2702,10 +2746,23 @@ class MaterialSystemPanel(QWidget):
                     si.setData(0, Qt.UserRole, ("copy", s["name"]))
                     grp["sampler"].addChild(si)
         # 2) 系统预制输入已移除(最小化): 默认空材质只用插值输入; 模板体系待后续重构
-        # 3) 自定义输入(参数/贴图/引擎资源; 会写进 mmtr)
+        # 3) 自定义输入(预设/参数/贴图/引擎资源; 会写进 mmtr)
         self._load_decls_from_src()
-        cust = QTreeWidgetItem(["自定义输入 (参数/贴图)", "", "写进 mmtr 参数表/绑定"])
+        self.normalize_inputs()
+        lock = self._locked_names()
+        cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
         self.tree_inputs.addTopLevelItem(cust)
+        pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(self._presets)])
+        cust.addChild(pre)
+        for n in self._presets:
+            e = sinp.find(n) or {}
+            deps = e.get("depends") or []
+            d = e.get("desc", "")
+            if deps:
+                d = ("%s | 依赖: %s" % (d, ", ".join(deps))).strip(" |")
+            it = QTreeWidgetItem([n, "", d])
+            it.setData(0, Qt.UserRole, ("preset", n))
+            pre.addChild(it)
         pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(self._params)])
         cust.addChild(pnode)
         for n, t in self._params:
@@ -2730,16 +2787,27 @@ class MaterialSystemPanel(QWidget):
             else:
                 extra = ""
             desc = minp.desc_of(n)
+            if n in lock:
+                extra = ("锁定: 由 %s 依赖" % " / ".join(lock[n])).strip()
             it = QTreeWidgetItem([n, kd, desc])
             it.setToolTip(2, ("%s\n%s" % (extra, desc)).strip())
+            if n in lock:
+                it.setForeground(0, QColor("#b8791a"))
             it.setData(0, Qt.UserRole, ("engine", n))
             enode.addChild(it)
-            # 引擎 cbuffer: 展开看成员(与固有输入一致的展示)
-            for m in (e.get("members") or []):
-                mn = m.get("name", "")
-                cm = QTreeWidgetItem([mn, m.get("type", ""), minp.member_desc(n, mn)])
-                cm.setData(0, Qt.UserRole, ("copy", mn))
-                it.addChild(cm)
+            if n == "UserMaterial":
+                # UserMaterial 的成员 = 自定义材质参数(单独声明在 //! param)
+                for pn, pt in self._params:
+                    cm = QTreeWidgetItem([pn, pt, "(材质参数)"])
+                    cm.setData(0, Qt.UserRole, ("param", pn))
+                    it.addChild(cm)
+            else:
+                for m in (e.get("members") or []):
+                    mn = m.get("name", "")
+                    cm = QTreeWidgetItem([mn, m.get("type", ""),
+                                         minp.member_desc(n, mn)])
+                    cm.setData(0, Qt.UserRole, ("copy", mn))
+                    it.addChild(cm)
         # 默认只展开到"分类"层(0=顶层, 1=分类); 资源项与 cbuffer 成员默认折叠
         self.tree_inputs.expandToDepth(1)
         fit_columns(self.tree_inputs, (0, 1, 2))
@@ -2751,6 +2819,8 @@ class MaterialSystemPanel(QWidget):
         acts = []
         if kind[0] in ("param", "tex"):
             acts.append(("改名", lambda: self._rename_custom(kind)))
+            acts.append(("删除", self._del_custom))
+        elif kind[0] == "preset":
             acts.append(("删除", self._del_custom))
         elif kind[0] == "engine":
             acts.append(("删除", self._del_custom))
@@ -2809,7 +2879,16 @@ class MaterialSystemPanel(QWidget):
             return
         cat, name = kind
         self._load_decls_from_src()
-        if cat == "param":
+        lock = self._locked_names()
+        if cat == "engine" and name in lock:
+            QMessageBox.information(
+                self, "已锁定",
+                "%s 由 %s 依赖, 不能删除。\n如需删除, 请先移除依赖它的预设输入。"
+                % (name, " / ".join(lock[name])))
+            return
+        if cat == "preset":
+            self._presets = [n for n in self._presets if n != name]
+        elif cat == "param":
             self._params = [(n, t) for n, t in self._params if n != name]
         elif cat == "engine":
             self._engine = [n for n in self._engine if n != name]
@@ -2868,6 +2947,7 @@ class MaterialSystemPanel(QWidget):
             return
         self._last_mmtr_bytes = None
         self._apply_asset()
+        self._ensure_inputs()
         self.lbl_status.setText("已打开 %s" % os.path.basename(path))
 
     def save_asset(self):
@@ -2885,12 +2965,14 @@ class MaterialSystemPanel(QWidget):
         self.lbl_status.setText("已保存 %s" % os.path.basename(path))
 
     def compile_check(self):
+        self._ensure_inputs()
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
-        iface, ka = self._effective_inputs()
+        iface, ka, minput = self._effective_inputs()
         try:
             self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None,
-                                                         tmpl, iface=iface, keepalive=ka))
+                                                         tmpl, iface=iface, keepalive=ka,
+                                                         minput=minput))
         except Exception as e:  # noqa: BLE001
             self.ed_full.setPlainText(";; 组装失败: %s" % e)
             self._src_hl.set_diagnostics([])
@@ -2898,7 +2980,7 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
         dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl,
-                                          iface=iface, keepalive=ka)
+                                          iface=iface, keepalive=ka, minput=minput)
         if err:
             diags = self._err_diags(err, tmpl)
             self._src_hl.set_diagnostics(diags)
@@ -2921,6 +3003,7 @@ class MaterialSystemPanel(QWidget):
 
     def _generate(self):
         """生成 mmtr: 无 donor(版本预设 + 我们的材质 PS; 不接任何 master)。"""
+        self._ensure_inputs()
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
         if not self.asset.is_ok():
@@ -2988,12 +3071,14 @@ class MaterialSystemPanel(QWidget):
 class EngineResDialog(QDialog):
     """引擎资源选择器: 从允许清单挑 cbuffer/texture/sampler(声明即保活)。"""
 
-    def __init__(self, parent=None, selected=()):
+    def __init__(self, parent=None, selected=(), locked=()):
         super().__init__(parent)
         self.setWindowTitle("添加引擎资源")
         self.resize(920, 560)
+        locked_set = set(locked)
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("从允许清单挑选引擎已有资源; 勾选后加入自定义输入(寄存器自动分配)。"))
+        v.addWidget(QLabel("从允许清单挑选引擎已有资源; 勾选后加入自定义输入(寄存器自动分配)。\n"
+                           "带 [锁定] 标记的是预设输入/材质参数依赖的资源, 不可取消。"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["资源", "类型/定义", "参考寄存器(仅参考)", "说明"])
         self.tree.setColumnWidth(0, 230)
@@ -3011,10 +3096,17 @@ class EngineResDialog(QDialog):
                 else:
                     extra = "compare" if e.get("cmp") else ""
                 desc = minp.desc_of(e["name"])
+                is_lock = e["name"] in locked_set
+                if is_lock:
+                    desc = "[锁定: 由预设/参数依赖] %s" % desc
                 it = QTreeWidgetItem([e["name"], extra, e.get("reg_ref", ""), desc])
                 it.setToolTip(3, desc)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                it.setCheckState(0, Qt.Checked if e["name"] in selected else Qt.Unchecked)
+                it.setCheckState(0, Qt.Checked if (is_lock or e["name"] in selected)
+                                 else Qt.Unchecked)
+                if is_lock:
+                    it.setFlags(it.flags() & ~Qt.ItemIsUserCheckable)   # 不可取消
+                    it.setForeground(0, QColor("#b8791a"))
                 root.addChild(it)
                 # 引擎 cbuffer: 展开看成员(勾选前先看清定义)
                 if kind == "cbuffer":
@@ -3042,6 +3134,45 @@ class EngineResDialog(QDialog):
                 c = root.child(j)
                 if c.checkState(0) == Qt.Checked:
                     out.append(c.text(0))
+        return out
+
+
+class PresetDialog(QDialog):
+    """预设(语义)输入选择器: 挑语义输入; 其依赖的引擎资源会自动加入并锁定。"""
+
+    def __init__(self, parent=None, selected=()):
+        super().__init__(parent)
+        self.setWindowTitle("添加预设输入")
+        self.resize(840, 480)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("选择语义输入; 勾选后其依赖的引擎资源会自动加入(并锁定)。"))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["预设输入", "依赖的引擎资源", "说明 / 字段"])
+        self.tree.setColumnWidth(0, 170)
+        self.tree.setColumnWidth(1, 210)
+        self.tree.setColumnWidth(2, 440)
+        for e in sinp.catalog():
+            it = QTreeWidgetItem([e["name"], ", ".join(e.get("depends") or []) or "(无)",
+                                  e.get("desc", "")])
+            it.setToolTip(2, e.get("desc", ""))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.Checked if e["name"] in selected else Qt.Unchecked)
+            for f in (e.get("fields") or []):
+                it.addChild(QTreeWidgetItem(["", f["name"], f.get("type", "")]))
+            self.tree.addTopLevelItem(it)
+        self.tree.expandToDepth(0)
+        v.addWidget(self.tree, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def selected_names(self):
+        out = []
+        for i in range(self.tree.topLevelItemCount()):
+            c = self.tree.topLevelItem(i)
+            if c.checkState(0) == Qt.Checked:
+                out.append(c.text(0))
         return out
 
 
