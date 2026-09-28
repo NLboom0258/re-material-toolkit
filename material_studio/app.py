@@ -2684,7 +2684,9 @@ class MaterialSystemPanel(QWidget):
                 extra = "%s/%s" % (e.get("fmt"), e.get("dim"))
             else:
                 extra = ""
-            it = QTreeWidgetItem([n, kd, extra])
+            desc = minp.desc_of(n)
+            it = QTreeWidgetItem([n, kd, desc])
+            it.setToolTip(2, ("%s\n%s" % (extra, desc)).strip())
             it.setData(0, Qt.UserRole, ("engine", n))
             enode.addChild(it)
             # 引擎 cbuffer: 展开看成员(与固有输入一致的展示)
@@ -2945,14 +2947,17 @@ class EngineResDialog(QDialog):
     def __init__(self, parent=None, selected=()):
         super().__init__(parent)
         self.setWindowTitle("添加引擎资源")
-        self.resize(600, 540)
+        self.resize(920, 560)
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("从允许清单挑选引擎已有资源; 勾选后加入自定义输入(寄存器自动分配。"))
+        v.addWidget(QLabel("从允许清单挑选引擎已有资源; 勾选后加入自定义输入(寄存器自动分配)。"))
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["资源", "类型/定义", "参考寄存器(仅参考)"])
-        self.tree.setColumnWidth(0, 320)
+        self.tree.setHeaderLabels(["资源", "类型/定义", "参考寄存器(仅参考)", "说明"])
+        self.tree.setColumnWidth(0, 230)
+        self.tree.setColumnWidth(1, 110)
+        self.tree.setColumnWidth(2, 120)
+        self.tree.setColumnWidth(3, 520)
         for kind in ("cbuffer", "texture", "sampler"):
-            root = QTreeWidgetItem([kind, "", ""])
+            root = QTreeWidgetItem([kind, "", "", ""])
             root.setFlags(root.flags() & ~Qt.ItemIsSelectable)
             for e in minp.by_kind(kind, include_std=False):
                 if kind == "cbuffer":
@@ -2961,7 +2966,9 @@ class EngineResDialog(QDialog):
                     extra = "%s/%s" % (e.get("fmt"), e.get("dim"))
                 else:
                     extra = "compare" if e.get("cmp") else ""
-                it = QTreeWidgetItem([e["name"], extra, e.get("reg_ref", "")])
+                desc = minp.desc_of(e["name"])
+                it = QTreeWidgetItem([e["name"], extra, e.get("reg_ref", ""), desc])
+                it.setToolTip(3, desc)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(0, Qt.Checked if e["name"] in selected else Qt.Unchecked)
                 root.addChild(it)

@@ -31,6 +31,57 @@ except ImportError:  # 允许脚本直接 import
 
 KINDS = ("cbuffer", "texture", "sampler", "param")
 
+# 引擎资源用途说明(供"引擎资源添加页"人读)。名字 -> 一句话; 不确定的标"(推测)"。
+RESOURCE_DESC = {
+    "SceneInfo": "场景/相机: 视图投影矩阵、近远平面、屏幕尺寸/倒数、视锥、裁剪面。",
+    "GBufferType": "GBuffer 类型标志: 写 o2.w 供下游判定 GBuffer 类型。",
+    "Tonemap": "色调映射/曝光: 曝光值、tonemap 范围、自动曝光开关、AA 参数。",
+    "UserMaterial": "材质参数(mdf2 传入): VAR_* 成员表(颜色/金属/粗糙/SSS 等)。",
+    "RootConstant": "根常量(DX12 root constants, 32bit): 常用于 CS 分发/索引等少量参数。",
+    "cbCSSkinning": "计算着色器蒙皮参数: 顶点/UV 数、各属性字节偏移。",
+    "ShadowCastInfo": "阴影投射偏差: 深度/斜率偏置(阴影贴图渲染用)。",
+    "EnvironmentInfo": "环境/帧信息: 时间(ms)、帧计数、奇偶帧、全局参数、破坏PBR参数。",
+    "CheckerBoardInfo": "棋盘格渲染(Checkerboard)参数: 缩放/偏置/开关(交错渲染/上采样)。(推测)",
+    "World": "世界矩阵: worldMat/prevWorldMat/关节偏移(蒙皮/实例用)。",
+    "OutdoorLightProbeParam": "室外光照探针网格: 网格 offset/scale/depth/min/max。",
+    "ShadowSamplingRotation": "阴影采样旋转: ShadowSamplePoints[8](阴影滤波采样点)。",
+    "DirectionalLightParameter": "方向光: 方向/颜色/视投影/SDSM/级联(cascade)参数。",
+    "PickState": "拾取(鼠标)状态: 写地址、拾取位置、可选标签。",
+    "WhitePtSrv": "引擎白点 raw buffer(ByteAddressBuffer): 曝光/白点基准值; 只能 .Load()。",
+    "InstanceWorldInfo": "实例世界信息(struct buffer): 每实例世界相关数据。",
+    "InputByteBuffer": "输入字节缓冲: 原始字节数据(按偏移解析)。",
+    "bDestPosVB": "目标位置顶点缓冲(CS 蒙皮输出)。",
+    "SkinningMatrices": "蒙皮矩阵缓冲(骨骼矩阵)。",
+    "IndirectIndicesBuffer": "间接索引缓冲(间接绘制/多实例)。",
+    "WorldInstances": "世界实例数据(struct buffer): 每实例世界矩阵等。",
+    "UserMaterialInstances": "材质参数 per-instance 结构化缓冲(用于 …Instancing2 槽)。",
+    "LightCullingVolumeSRV": "光照剔除体(cluster/体素)。",
+    "LightCullingListSRV": "光照剔除列表: 每簇内的光源索引。",
+    "OutdoorProbesSRV": "室外光照探针数据。",
+    "IBLCubemapArrayList2SRV": "IBL 立方图数组列表。",
+    "LightParameterSRV": "光源参数数组(位置/颜色/范围等)。",
+    "ShadowParameterSRV": "阴影参数数组。",
+    "AreaLightParameterSRV": "面光源参数数组。",
+    "IBLCubemapBVHSRV": "IBL 立方图 BVH(加速结构, 探针查找)。",
+    "IBLCubemap2DArraySRV": "IBL 立方图(以 2D 数组形式, 便于采样)。",
+    "CubemapSRV": "立方图(scene cube)。",
+    "IESLightTableSRV": "IES 光源分布表(光度曲线)。",
+    "ShadowMapSRV": "阴影贴图(2D 数组, 含级联)。",
+    "SSAOResult": "SSAO 结果纹理(屏幕空间环境光遮蔽)。",
+    "PickAddressListCount": "拾取地址列表计数。",
+    "PickAddressList": "拾取地址列表。",
+    "AutomaticWrap": "环绕(Wrap)采样器: 引擎自动选寻址。(推测)",
+    "BilinearClamp": "双线性 + 钳制(Clamp)。",
+    "BilinearMirror": "双线性 + 镜像(Mirror)。",
+    "TrilinearMirror": "三线性 + 镜像(Mirror, 含 mip)。",
+    "LinearCompare": "线性比较采样器(阴影 PCF 用)。",
+}
+
+
+def desc_of(name):
+    """引擎资源的一句话说明(未知返回空串)。"""
+    return RESOURCE_DESC.get(name, "")
+
 _ENGINE_RE = re.compile(r"^\s*//!\s*engine\s+(\w+)\s*$")
 _REG_PRE = {"cbuffer": "b", "texture": "t", "sampler": "s"}
 # GetDimensions 参数个数(保活用)
