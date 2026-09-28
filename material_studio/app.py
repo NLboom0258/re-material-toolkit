@@ -2436,7 +2436,7 @@ class MaterialSystemPanel(QWidget):
         self.asset.template["pass_template"] = (
             _default_template(self.cmb_shading.currentData(),
                               self.cmb_light.currentData()) or "deferred_std")
-        self.asset.template["mmtr"] = self.ed_mmtr.text().strip()
+        self.asset.template["mmtr_path"] = self.ed_mmtr.text().strip()
         self.asset.name = self.ed_name.text().strip() or "NewMaterial"
         self.asset.shading_source = self.ed_src.toPlainText()
 
@@ -2449,7 +2449,7 @@ class MaterialSystemPanel(QWidget):
                 if i >= 0:
                     cmb.setCurrentIndex(i)
             self._repopulate_templates()
-            self.ed_mmtr.setText(self.asset.template.get("mmtr", ""))
+            self.ed_mmtr.setText(self.asset.template.get("mmtr_path", ""))
             self.ed_name.setText(self.asset.name)
             if self.ed_src.toPlainText() != self.asset.shading_source:
                 self.ed_src.setPlainText(self.asset.shading_source)

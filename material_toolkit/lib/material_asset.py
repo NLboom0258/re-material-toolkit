@@ -87,14 +87,14 @@ class MaterialAsset(object):
         self.name = name
         self.lighting_mode = lighting_mode
         self.shading_type = shading_type
-        self.template = template or {}          # {"mmtr": "xxx.mmtr.1808168797"}
+        self.template = template or {}          # {"pass_template": "deferred_std", "mmtr_path": "MasterMaterial/..."}
         self.parameters = list(parameters or [])
         self.textures = list(textures or [])
         self.shading_source = shading_source   # 用户写的材质函数(HLSL)
 
     @classmethod
-    def new_default(cls, template=None, name="NewMaterial"):
-        return cls(name=name, template={"mmtr": template} if template else {})
+    def new_default(cls, name="NewMaterial"):
+        return cls(name=name)
 
     # ---- 选项 ----
     def combo(self):
@@ -122,8 +122,6 @@ class MaterialAsset(object):
             out.append(("error", "未知 lighting_mode: %r" % self.lighting_mode))
         if self.shading_type not in SHADING_TYPES:
             out.append(("error", "未知 shading_type: %r" % self.shading_type))
-        if not self.template.get("mmtr"):
-            out.append(("warn", "未指定模板 mmtr(生成时需要)"))
         for p in self.parameters:
             if p.type not in PARAM_TYPES:
                 out.append(("error", "参数 %s 类型未知: %r" % (p.name, p.type)))
