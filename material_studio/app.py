@@ -2534,18 +2534,11 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setStyleSheet("color:#1a7f37")
 
     def _base_iface(self):
-        """材质接口基座 = 固有输入(以默认光照模式为准):
-        SceneInfo + GBufferType + Tonemap(曝光) + WhitePtSrv(白点); 其余按需在“引擎资源”里添加。
+        """材质接口基座 = 固有输入(**单一真源**: `minp.default_iface()`)。
+        GUI 与生成器共用, 避免两条路径基座不一致(重复声明/寄存器错配)。
         """
         if not hasattr(self, "_iface_min"):
-            full = presets.std_iface() or {"cbuffers": [], "textures": [], "samplers": []}
-            kb = {"SceneInfo", "GBufferType", "Tonemap"}
-            kt = {"WhitePtSrv"}
-            self._iface_min = {
-                "cbuffers": [c for c in full.get("cbuffers", []) if c["name"] in kb],
-                "textures": [t for t in full.get("textures", []) if t["name"] in kt],
-                "samplers": [],
-            }
+            self._iface_min = minp.default_iface()
         return self._iface_min
 
     def _effective_inputs(self):

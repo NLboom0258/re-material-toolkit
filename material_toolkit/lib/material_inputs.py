@@ -152,6 +152,24 @@ def find(name):
     return None
 
 
+def default_iface():
+    """默认(空材质)接口基座 = 固有输入(**单一真源**): 名字取自 `inputs.json` 的 `std`,
+    定义/成员取自标准接口 `iface.json`。
+
+    GUI 与生成器**都必须**用它, 避免"两条路径基座不一致"导致的重复声明 / 寄存器错配。
+    """
+    full = P.std_iface() or {"cbuffers": [], "textures": [], "samplers": []}
+    s = load()["std"]
+    kb = {e["name"] for e in s if e["kind"] == "cbuffer"}
+    kt = {e["name"] for e in s if e["kind"] == "texture"}
+    ks = {e["name"] for e in s if e["kind"] == "sampler"}
+    return {
+        "cbuffers": [c for c in full.get("cbuffers", []) if c["name"] in kb],
+        "textures": [t for t in full.get("textures", []) if t["name"] in kt],
+        "samplers": [x for x in full.get("samplers", []) if x["name"] in ks],
+    }
+
+
 def catalog_text():
     d = load()
     lines = ["固有输入(标准接口, 只读) %d 项:" % len(d["std"])]
@@ -302,11 +320,17 @@ def build_iface_and_keepalive(material_src, base_iface):
         report["params"] = [n for n, _ in params]
         report["textures"] = list(textures)
 
-    # 引擎资源(去重: 已在标准集里的跳过)
+    # 引擎资源(去重: 已在该接口里的, **按 名字+种类** 跳过 —— cbuffer/texture/sampler 都要查;
+    #   只查 param 名/纹理名会漏掉 sampler/cbuffer ⇒ 同一名字被追加两次 ⇒ "redefinition")
+    known_of = {
+        "cbuffer": {c["name"] for c in iface["cbuffers"]},
+        "texture": {t["name"] for t in iface["textures"]},
+        "sampler": {s["name"] for s in iface["samplers"]},
+    }
     eng = []
     for nm in eng_names:
         e = find(nm)
-        if e is None or nm in known_p or nm in known_t:
+        if e is None or nm in known_of.get(e["kind"], set()):
             continue
         if any(x["name"] == nm for x in eng):
             continue

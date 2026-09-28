@@ -60,11 +60,11 @@ def _variant_name(r):
 def _iface_from_decls(material_src):
     """按材质源码里的 `//! param/tex/engine` 声明生成接口(**规范发射**)。
 
-    委托 `material_inputs.build_iface_and_keepalive`(基础 = 预设**标准材质接口**);
+    委托 `material_inputs.build_iface_and_keepalive`(基础 = **默认基座**(固有输入));
     无声明时返回 None。保活由 build 单独取(此处忽略)。
     """
     from . import material_inputs as INP
-    iface, _ka, _rep = INP.build_iface_and_keepalive(material_src, P.std_iface())
+    iface, _ka, _rep = INP.build_iface_and_keepalive(material_src, INP.default_iface())
     return iface
 
 
@@ -91,7 +91,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     from . import material_inputs as INP
     ka = ""
     if iface is None:
-        iface, ka, _rep = INP.build_iface_and_keepalive(material_src, P.std_iface())
+        iface, ka, _rep = INP.build_iface_and_keepalive(material_src, INP.default_iface())
     else:
         _if, ka, _rep = INP.build_iface_and_keepalive(material_src, iface)
     ps_blob, err = MP.compile_shading(material_src, template, iface=iface, keepalive=ka)
@@ -101,14 +101,15 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 1b) 逐实例材质("…Instancing2")槽: 引擎绑 UserMaterialInstances(结构化), 与 cbuffer 风格
     #     主 PS 不自洽 ⇒ 用 **instance 风格 PS**(读 UserMaterialInstances, 纹理 +1,
     #     实例索引 NOINTERPOLATOR0)。判定按**预设里该槽 PS 是否用 UMI**(records.ps_inst)。
-    #     仅当模板有 `<template>_instance` 对应件时才另编(如 deferred_std); 零声明模板(deferred_bare)
-    #     本就不读资源, 实例化也用同一份主 PS。
+    #     instance PS 的意义就是读 UMI(=UserMaterial) ⇒ **仅当材质确有 UserMaterial(声明了参数)
+    #     且模板有 `<template>_instance` 对应件时才另编**; 否则该槽复用主 PS。
     inst_tpl = template + "_instance"
     inst_slots = [r for r in recs if r.get("ps_inst")]
+    has_um = any(c["name"] == "UserMaterial" for c in (iface or {}).get("cbuffers", []))
     ps_inst = None
-    if inst_slots and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl")):
-        inst_iface = iface if iface is not None else P.std_iface()
-        ps_inst, err_inst = MP.compile_shading(material_src, inst_tpl, iface=inst_iface,
+    if (inst_slots and has_um
+            and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl"))):
+        ps_inst, err_inst = MP.compile_shading(material_src, inst_tpl, iface=iface,
                                                style="instance", keepalive=ka)
         if err_inst:
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
