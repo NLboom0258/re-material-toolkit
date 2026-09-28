@@ -345,15 +345,38 @@ def _all_groups(data, blobs=None):
         yield idx, key[1], key[2], p
 
 
-def name_vocabulary(data):
+def _blob_rdef_names(data, blob_idx):
+    """该 blob 的 RDEF 声明的资源名集合(即该 shader 真正能采样的资源)。"""
+    from . import mmtr_blobs as _MB
+    from . import rdef as _R
+    try:
+        blob = _MB.extract_blob(data, blob_idx)
+        return {nm for (nm, _t, _bp, _d, _r) in (_R.rdef_bind_info(blob) or [])}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def name_vocabulary(data, declared_only=False):
     """文件内所有绑定组用到的 SRV 名字 -> {name: {"groups": 组数, "blobs": set(blob_idx)}}。
 
     绑定键=池名 ⇒ 这个名字表就是“该材质用到的所有贴图类型”。单遍枚举(见 _all_groups)。
+
+    declared_only=True: 只把名字归因到“**其 RDEF 真正声明**该资源”的 blob。
+    —— 池常按记录**共享/合并**(一个 PS 记录的池会夹带 VS 的资源), 只按池归因会把
+    他人资源算到本 blob(GUI 曾因此把不使用 ATOS 的 blob43 也算作 ATOS 的引用者)。
     """
     vocab = {}
+    rcache = {}
     for idx, _desc, pool, rec0 in _all_groups(data):
         n = _u32(data, rec0 + 0xCC)
+        rn = None
+        if declared_only:
+            if idx not in rcache:
+                rcache[idx] = _blob_rdef_names(data, idx)
+            rn = rcache[idx]
         for nm, _h in _pool_entries(data, pool, n):
+            if declared_only and nm not in rn:
+                continue
             d = vocab.setdefault(nm, {"groups": 0, "blobs": set()})
             d["groups"] += 1
             d["blobs"].add(idx)

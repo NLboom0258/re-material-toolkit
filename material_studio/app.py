@@ -1029,7 +1029,20 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "贴图绑定")
-        self.tabs.addTab(self.tree_pool, "名称池")
+        _pool_tab = QWidget()
+        _pv = QVBoxLayout(_pool_tab)
+        _pv.setContentsMargins(0, 0, 0, 0)
+        self.chk_pool_rdef = QCheckBox(
+            "仅按 RDEF 声明归因(推荐): 引用 blob = 真正声明该资源的 shader")
+        self.chk_pool_rdef.setChecked(True)
+        self.chk_pool_rdef.setToolTip(
+            "勾选: 名称池的“引用 blob”= 其 RDEF 声明了该资源的 blob(准确)。\n"
+            "不勾选: 按绑定组的池归因 —— 池常被记录共享/合并, 会把他人资源算到本 blob\n"
+            "(例: 把不采样 ATOS 的 pick PS 也算作 ATOS 的引用者)。")
+        self.chk_pool_rdef.stateChanged.connect(lambda *_: self.refresh_pool())
+        _pv.addWidget(self.chk_pool_rdef)
+        _pv.addWidget(self.tree_pool)
+        self.tabs.addTab(_pool_tab, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
         self.tabs.addTab(self.tree_variant, "变体(材质)")
@@ -1080,6 +1093,7 @@ class MmtrPanel(QWidget):
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
         self._vocab_cache = None
+        self._vocab_cache_rdef = None
         self._asm_cache = {}
         self.ed_asm.clear()
         self._edit_blob = None
@@ -1242,10 +1256,23 @@ class MmtrPanel(QWidget):
         """名称池词汇表(去重名字, 排序)。"""
         return sorted(self._vocab_map())
 
+    def _vocab_declared(self):
+        """名称池(仅按 RDEF 声明归因)缓存: 引用 blob = 真正声明该资源的 shader。"""
+        if getattr(self, "_vocab_cache_rdef", None) is None:
+            self._vocab_cache_rdef = name_vocabulary(self.data, declared_only=True)
+        return self._vocab_cache_rdef
+
     def refresh_pool(self):
-        """名称池页: 列出该文件用到的所有贴图名 + 引用统计。"""
+        """名称池页: 列出该文件用到的所有贴图名 + 引用统计。
+
+        默认按“RDEF 声明”归因(避免共享池把他人资源算到本 blob); 可取消勾选看“按池”口径。
+        """
         self.tree_pool.clear()
-        vocab = self._vocab_map()
+        if self.data is None:
+            return
+        chk = getattr(self, "chk_pool_rdef", None)
+        vocab = (self._vocab_declared() if (chk is not None and chk.isChecked())
+                 else self._vocab_map())
         for nm in sorted(vocab, key=lambda n: (-vocab[n]["groups"], n)):
             d = vocab[nm]
             it = QTreeWidgetItem([nm, str(d["groups"]), str(len(d["blobs"]))])
@@ -1258,6 +1285,7 @@ class MmtrPanel(QWidget):
         self.mmtr = Mmtr.from_bytes(self.data)
         self._um = self.mmtr.cbuffer_members("UserMaterial")
         self._vocab_cache = None
+        self._vocab_cache_rdef = None
         if full:
             self.refresh_blobs()
         self.refresh_detail()
@@ -1266,6 +1294,7 @@ class MmtrPanel(QWidget):
     def _reload_after_rename(self):
         """改名(不动参数/blob 结构)后的轻量刷新: 只刷绑定页与名称池(免整表重解析卡顿)。"""
         self._vocab_cache = None
+        self._vocab_cache_rdef = None
         self.refresh_groups()
         self.refresh_pool()
 
