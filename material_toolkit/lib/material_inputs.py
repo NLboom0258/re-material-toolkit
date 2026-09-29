@@ -76,6 +76,27 @@ RESOURCE_DESC = {
     "BilinearMirror": "双线性 + 镜像(Mirror)。",
     "TrilinearMirror": "三线性 + 镜像(Mirror, 含 mip)。",
     "LinearCompare": "线性比较采样器(阴影 PCF 用)。",
+    # ---- 2026-09-30 语料扫描新增(定义取自原版 blob; 说明含推测) ----
+    "FogParam": "雾参数(内散射色/密度/高度衰减/最大不透明)。",
+    "WindInfo": "风信息(风数量)。",
+    "PrimitiveMeshConstant": "图元网格常量(程序化网格)。",
+    "cbHeightField": "高度场(地形/水面高度)。(推测)",
+    "cbHeightFieldPartial": "高度场(局部)。(推测)",
+    "cbWaterSurfaceDeferred": "水面延迟着色参数(混合色/法线/自发光)。",
+    "LightInfo": "光源计数(点光/面光、前向/总数)。",
+    "BSPTree": "BSP 树缓冲(透明排序/加速结构)。(推测)",
+    "TetraCoordinate": "四面体坐标缓冲(光照探针插值坐标)。",
+    "IndirectProbe": "间接光照探针缓冲。",
+    "ReadonlyDepth": "只读深度缓冲(场景深度)。",
+    "PivotBuffer": "枢轴缓冲(风/摆动形变)。(推测)",
+    "WindParams": "风参数缓冲。",
+    "PrimitiveMeshCBInstances": "图元网格实例缓冲。",
+    "BilinearWrap": "双线性 + 环绕(Wrap)采样器。",
+    "PointWrap": "点采样 + 环绕(Wrap)。",
+    "BilinearBorder": "双线性 + Border。",
+    "TrilinearBorder": "三线性 + Border(含 mip)。",
+    "TrilinearWrap": "三线性 + 环绕(Wrap)。",
+    "PointClamp": "点采样 + 钳制(Clamp)。",
 }
 
 
