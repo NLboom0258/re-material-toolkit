@@ -2913,8 +2913,11 @@ class MaterialSystemPanel(QWidget):
         self._rewrite_decls()
 
     # ---- 编译诊断 ----
-    def _err_diags(self, err_text, tmpl):
-        """把 D3DCompile 报错行(组装文行号)映射回用户源码行。返回 [(行1基,start,end,msg)]。"""
+    def _err_diags(self, err_text, tmpl, lmap=None):
+        """把 D3DCompile 报错行(组装文行号)映射回用户源码行。返回 [(行1基,start,end,msg)]。
+
+        lmap: 用户编译源(可能已剥离某钩子)行号 -> 编辑器源码(ed_src)行号 的映射。
+        """
         off = mpass.material_line_offset(tmpl)
         out = []
         for line in (err_text or "").splitlines():
@@ -2924,7 +2927,10 @@ class MaterialSystemPanel(QWidget):
             aln = int(m.group(1))
             if aln <= off:
                 continue   # 模板内的错(非用户源码)
-            out.append((aln - off, max(0, int(m.group(2)) - 1), 10 ** 6,
+            uln = aln - off
+            if lmap is not None:
+                uln = lmap(uln)
+            out.append((uln, max(0, int(m.group(2)) - 1), 10 ** 6,
                         "%s %s: %s" % (m.group(4), m.group(5), m.group(6))))
         return out
 
@@ -2988,7 +2994,8 @@ class MaterialSystemPanel(QWidget):
         src = self.asset.shading_source or None
         has_d = nogen.has_depth_hook(src or "")
         # ---- 主 pass(剥掉 MaterialDepth: 未调用函数里的资源引用会污染主 PS 的 RDEF) ----
-        m_src = nogen._strip_hlsl_fn(src or "", "MaterialDepth") if has_d else src
+        m_src, m_map = (nogen.strip_line_map(src or "", "MaterialDepth") if has_d
+                        else (src, None))
         try:
             self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
                                                          keepalive=ka, minput=minput))
@@ -3003,7 +3010,7 @@ class MaterialSystemPanel(QWidget):
         # ---- 深度 pass(有 MaterialDepth 钩子才编; 剥掉 MaterialMain) ----
         d_dxbc, d_err = None, None
         if has_d:
-            d_src = nogen._strip_hlsl_fn(src or "", "MaterialMain")
+            d_src, d_map = nogen.strip_line_map(src or "", "MaterialMain")
             try:
                 self.ed_full_depth.setPlainText(
                     mpass.build_source(d_src, "deferred_depth", iface=iface,
@@ -3018,7 +3025,7 @@ class MaterialSystemPanel(QWidget):
                 ";; (ps_5_0 / dcl_globalFlags / ret, 输入仅 SV_POSITION, RDEF 零绑定)")
         # ---- 报错(优先主 pass) ----
         if m_err:
-            diags = self._err_diags(m_err, tmpl)
+            diags = self._err_diags(m_err, tmpl, m_map)
             self._src_hl.set_diagnostics(diags)
             self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
             first = diags[0][3] if diags else (m_err.strip().splitlines()[0] if m_err.strip() else "?")
@@ -3030,10 +3037,14 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setToolTip(m_err[:4000])
             return
         if d_err:
-            self._src_hl.set_diagnostics([])
-            self.tabs.setCurrentWidget(self.ed_full_depth)
-            first = d_err.strip().splitlines()[0] if d_err.strip() else "?"
-            self.lbl_status.setText("[深度 pass 编译失败] %s" % first[:90])
+            diags = self._err_diags(d_err, "deferred_depth", d_map)
+            self._src_hl.set_diagnostics(diags)
+            self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
+            first = diags[0][3] if diags else (d_err.strip().splitlines()[0] if d_err.strip() else "?")
+            self.lbl_status.setText("[深度 pass 编译失败] %d 处%s: %s"
+                                    % (len(diags),
+                                       ("(第%d行)" % diags[0][0]) if diags else "",
+                                       first[:90]))
             self.lbl_status.setStyleSheet("color:#c0392b")
             self.lbl_status.setToolTip(d_err[:4000])
             return

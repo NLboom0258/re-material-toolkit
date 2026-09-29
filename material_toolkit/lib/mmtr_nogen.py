@@ -137,6 +137,26 @@ def _strip_hlsl_fn(src, name):
     return src if not sp else (src[:sp[0]] + src[sp[1]:])
 
 
+def strip_line_map(src, name):
+    """删除 `void name(...) {...}` 并返回 (新源, 行映射函数)。
+
+    行映射: 新源第 L 行(1基) -> 原源行号(被删段之后的行整体上移, 映射时加回)。
+    未含该函数时返回 (src, 恒等)。供 GUI 把编译错误行号映射回编辑器源码。
+    """
+    sp = _hlsl_fn_span(src, name)
+    if not sp:
+        return src, (lambda ln: ln)
+    start_line = src.count("\n", 0, sp[0]) + 1
+    end_line = src.count("\n", 0, sp[1]) + 1
+    deleted = end_line - start_line
+    stripped = src[:sp[0]] + src[sp[1]:]
+
+    def _m(ln):
+        return ln + deleted if ln >= start_line else ln
+
+    return stripped, _m
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
