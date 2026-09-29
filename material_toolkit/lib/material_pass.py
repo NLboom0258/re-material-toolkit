@@ -4,6 +4,7 @@
 HLSL, 再用 d3dcompiler 编译成 ps_5_0。模板负责输入解包 / 法线基 / GBuffer 打包。
 """
 import os
+import re
 
 from . import mmtr_blobs as B
 
@@ -20,6 +21,20 @@ DEPTH_UV0_DI = "//__DEPTH_UV0_DI__"
 DEPTH_UV0_BUILD = "//__DEPTH_UV0_BUILD__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
+
+# ---- 寄存器模式 ----
+# "explicit": 在 HLSL 里显式写 `register(bN/tN/sN)`; 因为 d3dcompiler 会剔除"整段未被引用"
+#   的资源, 而引擎是按"RDEF 顺序连续"绑定的 ⇒ 必须**保活**防止寄存器出现空洞。
+# "auto": **不写 register**, 由 d3dcompiler **自动紧凑分配**(寄存器号 ≡ RDEF 位置)
+#   ⇒ 结构上不可能出现空洞(2026-09-30 实机验证: 5 例 AC_* 均正常)。
+# 切 "auto" 时必须同时不注入保活(`build_source` 内部已处理)。
+REGISTER_MODE = "explicit"
+_REG_RE = re.compile(r"\s*:\s*register\([^)]*\)")
+
+
+def _bare_registers(bare_registers):
+    """是否用"自动紧凑"(不写 register)。None = 取模块默认 REGISTER_MODE。"""
+    return (REGISTER_MODE == "auto") if bare_registers is None else bool(bare_registers)
 
 
 def _read(fname):
@@ -47,7 +62,8 @@ def material_line_offset(template="deferred_env"):
 
 
 def build_source(material_src=None, template="deferred_env", iface=None,
-                 style="cbuffer", keepalive=None, minput=None, subs=None):
+                 style="cbuffer", keepalive=None, minput=None, subs=None,
+                 bare_registers=None):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
@@ -58,7 +74,9 @@ def build_source(material_src=None, template="deferred_env", iface=None,
                None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
     style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
     subs: 额外标记替换 {标记: 文本}(如深度模板的 `//__DEPTH_UV0_*__`, 按需声明插值)。
+    bare_registers: True = 去掉所有 `register(...)`(交给编译器自动紧凑) + 不注入保活。
     """
+    _bare = _bare_registers(bare_registers)
     tpl = _read(template + ".hlsl")
     if subs:
         for k, v in subs.items():
@@ -88,15 +106,18 @@ def build_source(material_src=None, template="deferred_env", iface=None,
         tpl = tpl.replace(MINPUT_DEF, minput["def"])
     if MINPUT_BUILD in tpl:
         tpl = tpl.replace(MINPUT_BUILD, minput["build"])
-    if keepalive is not None and KEEPALIVE in tpl:
+    if not _bare and keepalive is not None and KEEPALIVE in tpl:
         tpl = tpl.replace(KEEPALIVE, keepalive)
     src = material_src if material_src is not None else default_material(template)
-    return tpl.replace(MARKER, src)
+    out = tpl.replace(MARKER, src)
+    # auto 模式: 剥掉所有 `register(...)` ⇒ 编译器自动紧凑(寄存器号 ≡ RDEF 位置, 无空洞)。
+    return _REG_RE.sub("", out) if _bare else out
 
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None, minput=None, graft=False, subs=None):
+                    keepalive=None, minput=None, graft=False, subs=None,
+                    bare_registers=None):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
 
     注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
@@ -105,7 +126,8 @@ def compile_shading(material_src=None, template="deferred_env",
     **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
     """
     dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style,
-                                            keepalive, minput, subs),
+                                            keepalive, minput, subs,
+                                            bare_registers),
                                entry, target, name="%s.hlsl" % template)
     if err or not graft:
         return dxbc, err
