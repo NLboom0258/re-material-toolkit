@@ -2377,6 +2377,17 @@ def _default_template(shading, lighting):
     return names[0] if names else None
 
 
+_DEPTH_HOOK_SKELETON = """// ---- 深度 pass 钩子: MaterialDepth ----
+// 存在该函数 = 定制深度/阴影族(自生深度 PS); 缺失 = 极简深度 PS(默认最小)。
+// 已自动加入声明: //! tex AlphaTranslucentOcclusionSSSMap + //! engine AutomaticWrap
+void MaterialDepth(DepthInput di, inout bool discardPixel)
+{
+    float a = AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, di.uv0).r;
+    discardPixel = (a < 0.5);   // 例: 镂空; 近距渐隐需 UserMaterial 的 dissolve 参数
+}
+"""
+
+
 class MaterialSystemPanel(QWidget):
     """材质系统页: 语义级“材质资产”编辑(选项 + 材质函数 HLSL) -> 生成 mmtr。
 
@@ -2437,6 +2448,14 @@ class MaterialSystemPanel(QWidget):
             b.clicked.connect(cb)
             btns2.addWidget(b)
         left.addLayout(btns2)
+
+        btns3 = QHBoxLayout()
+        b = QPushButton("＋ 深度钩子 (MaterialDepth)")
+        b.setToolTip("在材质源插入 MaterialDepth 默认空实现骨架"
+                     "(并自动补 ATOS/AutomaticWrap 声明); 默认空材质不含它")
+        b.clicked.connect(self._add_depth_hook)
+        btns3.addWidget(b)
+        left.addLayout(btns3)
 
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setWordWrap(True)
@@ -2945,6 +2964,35 @@ class MaterialSystemPanel(QWidget):
         self.ed_src.setPlainText(src)
         self.asset.shading_source = src
         self.refresh_info()
+
+    def _add_depth_hook(self):
+        """插入 MaterialDepth 默认空实现骨架(并自动补 ATOS/AutomaticWrap 声明)。
+
+        默认材质源**不含** MaterialDepth(保持"最小空材质、产物逐字节不变"); 深度族
+        定制由用户**显式添加** —— 存在该函数 ⇒ 深度族用本钩子自生, 缺失 ⇒ 极简深度 PS。
+        """
+        self._load_decls_from_src()
+        if nogen.has_depth_hook(self.ed_src.toPlainText()):
+            self.tabs.setCurrentWidget(self.ed_full_depth)
+            QMessageBox.information(self, "已有深度钩子",
+                                    "材质源已包含 MaterialDepth 函数。\n"
+                                    "见「组装·深度 pass」Tab 与「编译校验」。")
+            return
+        added = []
+        if "AlphaTranslucentOcclusionSSSMap" not in self._textures:
+            self._textures.append("AlphaTranslucentOcclusionSSSMap")
+            added.append("//! tex AlphaTranslucentOcclusionSSSMap")
+        if "AutomaticWrap" not in self._engine:
+            self._engine.append("AutomaticWrap")
+            added.append("//! engine AutomaticWrap")
+        self._rewrite_decls()                      # 写回声明区(尚未含函数)
+        self.ed_src.setPlainText(self.ed_src.toPlainText().rstrip()
+                                 + "\n\n" + _DEPTH_HOOK_SKELETON)
+        self.refresh_info()
+        self.tabs.setCurrentIndex(0)               # 切到材质源看新函数
+        self.lbl_status.setText("已添加深度钩子骨架(可编辑); 已补声明: %s"
+                                % (", ".join(added) or "无"))
+        self.lbl_status.setStyleSheet("color:#1a7f37")
 
     def _new_asset(self):
         sh = self.cmb_shading.currentData()
