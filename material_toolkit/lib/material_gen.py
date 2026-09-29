@@ -115,17 +115,18 @@ def pick_iface_ps(data, pass_name="Deferred"):
 
 
 _DECL_RE = re.compile(r"^\s*//!\s*(\w+)\s+(.+?)\s*$")
+_PASS_TAG_RE = re.compile(r"\s+@[A-Za-z_]\w*\s*$")
 
 
 def parse_decls(material_src):
     """解析材质源码里的声明行: `//! param <type> <name>` / `//! tex <name>`。
 
-    返回 (params=[(name,type)], textures=[name])。
+    行尾可带 `@<pass>` 归属标签(此处忽略)。返回 (params=[(name,type)], textures=[name])。
     """
     from . import material_iface as MI
     params, textures = [], []
     for line in (material_src or "").splitlines():
-        m = _DECL_RE.match(line)
+        m = _DECL_RE.match(_PASS_TAG_RE.sub("", line))
         if not m:
             continue
         kind, rest = m.group(1).lower(), m.group(2).split()

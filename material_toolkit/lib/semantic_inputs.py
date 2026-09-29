@@ -32,6 +32,7 @@ except ImportError:  # 允许脚本直接 import
     import mmtr_presets as P
 
 _PRESET_RE = re.compile(r"^\s*//!\s*preset\s+(\w+)\s*$")
+_PASS_TAG_RE = re.compile(r"\s+@[A-Za-z_]\w*\s*$")
 _GROUP_NONE = "(未分组)"
 
 
@@ -72,10 +73,10 @@ def groups():
 
 
 def parse_preset_decls(material_src):
-    """材质源码里的 `//! preset <Name>` 声明(按序去重)。"""
+    """材质源码里的 `//! preset <Name>` 声明(按序去重)。行尾可带 `@<pass>` 标签(忽略)。"""
     out = []
     for line in (material_src or "").splitlines():
-        m = _PRESET_RE.match(line)
+        m = _PRESET_RE.match(_PASS_TAG_RE.sub("", line))
         if m and m.group(1) not in out:
             out.append(m.group(1))
     return out

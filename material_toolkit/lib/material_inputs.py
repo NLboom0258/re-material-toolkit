@@ -419,7 +419,7 @@ def keepalive_hlsl(items):
 def parse_engine_decls(material_src):
     out = []
     for line in (material_src or "").splitlines():
-        m = _ENGINE_RE.match(line)
+        m = _ENGINE_RE.match(_PASS_TAG_RE.sub("", line))
         if m:
             out.append(m.group(1))
     return out
