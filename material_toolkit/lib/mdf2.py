@@ -383,6 +383,9 @@ class Mdf2:
                 pr.name = read_utf16(data, pr.name_offset)
                 vbase = mat.prop_data_offset + pr.data_offset
                 pr.values = [_f32(data, vbase + i * 4) for i in range(pr.param_count)]
+                # 保留原始值区偏移: 记为 cb_offset, save() 按它定位(而非"顺序累加")。
+                #   否则"导入→导出"会把带空洞的参数整体前移 ⇒ 引擎按 mmtr offset 读到 0(黑)。
+                pr.cb_offset = pr.data_offset
                 mat.properties.append(pr)
         return m
 
