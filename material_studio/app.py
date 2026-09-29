@@ -2872,7 +2872,11 @@ class MaterialSystemPanel(QWidget):
         pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(params)])
         cust.addChild(pnode)
         for n, t in params:
-            it = QTreeWidgetItem([n, t, ""])
+            # 此处显示/编辑的是**裸名**(= mdf2 / mmtr 参数表名); RDEF 名(带 `VAR_`) 只在
+            # UserMaterial 处展示 —— 避免误改到自动生成的 `VAR_` 前缀。
+            base = mgen.param_base_name(n)
+            rdef_hint = ("RDEF 成员: %s" % n) if n.startswith(mgen.PARAM_PREFIX) else ""
+            it = QTreeWidgetItem([base, t, rdef_hint])
             it.setData(0, Qt.UserRole, ("param", n))
             pnode.addChild(it)
         tnode = QTreeWidgetItem(["贴图 (//! tex)", "", "%d" % len(textures)])
@@ -2938,27 +2942,41 @@ class MaterialSystemPanel(QWidget):
         _copy_to_clipboard(token)
         self.lbl_status.setText("已复制: %s" % token)
 
-    def _add_param(self):
-        # 输入"裸名" + 是否自动加 `VAR_` 前缀(= RDEF/cbuffer 成员名, 材质代码里用它引用)。默认勾选。
+    def _param_dialog(self, title, base0, pre0):
+        """参数名对话框: 编辑**裸名** + 是否加 `VAR_` 前缀(RDEF 成员名)。返回 (裸名, 带前缀) 或 None。
+
+        `VAR_` 前缀由勾选**自动生成、不可直接编辑**; 裸名 = mdf2 / mmtr 参数表名。
+        """
         dlg = QDialog(self)
-        dlg.setWindowTitle("新增参数")
+        dlg.setWindowTitle(title)
         form = QFormLayout(dlg)
-        ed_name = QLineEdit("NewParam")
+        ed_name = QLineEdit(base0)
         form.addRow("参数名(裸名):", ed_name)
-        chk = QCheckBox("自动加 VAR_ 前缀 (RDEF 成员名; 建议勾选)")
-        chk.setChecked(True)
+        chk = QCheckBox("加 VAR_ 前缀 (RDEF 成员名; 材质代码里就用它引用)")
+        chk.setChecked(pre0)
         form.addRow("", chk)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
         form.addRow(bb)
         if dlg.exec() != QDialog.Accepted:
-            return
+            return None
         base = ed_name.text().strip()
         if not base:
+            return None
+        # 裸名不能以 `VAR_` 开头(否则"不带前缀"时会与"裸名本身带 VAR_"混淆)。
+        if not chk.isChecked() and base.startswith(mgen.PARAM_PREFIX):
+            QMessageBox.warning(self, "非法名",
+                                "裸名不能以 `VAR_` 开头。\n请改名, 或勾选「加 VAR_ 前缀」。")
+            return None
+        return base, chk.isChecked()
+
+    def _add_param(self):
+        got = self._param_dialog("新增参数", "NewParam", True)
+        if got is None:
             return
-        # RDEF 成员名 = 勾选 => `VAR_<裸名>`; 否则与裸名相同。
-        name = ("VAR_" + base) if chk.isChecked() else base
+        base, pre = got
+        name = mgen.param_rdef_name(base, pre)
         typ = pick_type(self, "参数类型", "float4")
         if typ is None:
             return
@@ -2987,14 +3005,31 @@ class MaterialSystemPanel(QWidget):
 
     def _rename_custom(self, kind):
         cat, name = kind
-        new, ok = QInputDialog.getText(self, "改名", "新名字:", text=name)
-        if not ok or not new.strip() or new.strip() == name:
-            return
-        new = new.strip()
         self._load_decls_from_src()
         if cat == "param":
+            # 改名: 编辑**裸名** + 是否带 `VAR_` 前缀; RDEF 名自动 = 前缀 + 裸名。
+            got = self._param_dialog("改名参数", mgen.param_base_name(name),
+                                     name.startswith(mgen.PARAM_PREFIX))
+            if got is None:
+                return
+            base, pre = got
+            new = mgen.param_rdef_name(base, pre)
+            if new == name:
+                return
+            confl = mgen.param_name_conflicts(
+                [(new if n == name else n, t) for n, t in self._params])
+            if confl:
+                QMessageBox.warning(self, "命名冲突", "\n".join(confl))
+                return
             self._params = [(new if n == name else n, t) for n, t in self._params]
         else:
+            new, ok = QInputDialog.getText(self, "改名", "新名字:", text=name)
+            if not ok or not new.strip() or new.strip() == name:
+                return
+            new = new.strip()
+            if new in self._textures:
+                QMessageBox.warning(self, "重复", "贴图已存在: %s" % new)
+                return
             self._textures = [new if n == name else n for n in self._textures]
         self._tags[(cat, new)] = self._tags.pop((cat, name), None)
         self._rewrite_decls()

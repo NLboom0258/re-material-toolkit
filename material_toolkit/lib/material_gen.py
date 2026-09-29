@@ -152,6 +152,11 @@ def param_base_name(name):
     return name[len(PARAM_PREFIX):] if name.startswith(PARAM_PREFIX) else name
 
 
+def param_rdef_name(base, prefixed=True):
+    """裸名 + 是否带前缀 -> RDEF cbuffer 成员名(`VAR_<裸名>` / `<裸名>`)。"""
+    return (PARAM_PREFIX + base) if prefixed else base
+
+
 def param_name_conflicts(params):
     """材质参数命名校验: 返回冲突说明列表([] = 无冲突)。params = [(name, type)]。
 
