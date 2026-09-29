@@ -81,6 +81,11 @@ def parse_preset_decls(material_src):
     return out
 
 
+def _is_interp(name):
+    """是否插值输入(INTERPOLATORn): 非引擎资源, 仅作依赖/锁定。"""
+    return (name or "").startswith("INTERPOLATOR")
+
+
 def _dedup(seq):
     out = []
     for x in seq:
@@ -111,7 +116,7 @@ def resolve(item_names, existing_names=frozenset()):
     for n in _dedup(list(item_names)):
         (names if find(n) else unknown).append(n)
 
-    deps, lock = [], {}
+    deps, lock, interp = [], {}, []
     for n in names:
         for d in (find(n).get("depends") or []):
             if d not in deps:
@@ -119,8 +124,11 @@ def resolve(item_names, existing_names=frozenset()):
             lock.setdefault(d, [])
             if n not in lock[d]:
                 lock[d].append(n)
+            if _is_interp(d) and d not in interp:
+                interp.append(d)
     existing = set(existing_names or ())
-    engine = [d for d in deps if d not in existing]
+    # 插值输入不是引擎资源 ⇒ **不进 engine**(不写 `//! engine`), 仅作依赖/锁定信息
+    engine = [d for d in deps if d not in existing and not _is_interp(d)]
 
     fields, seen_f, impl = [], set(), []
     for n in names:
@@ -132,7 +140,7 @@ def resolve(item_names, existing_names=frozenset()):
         impl.extend(e.get("impl") or [])
 
     return {"presets": names, "unknown": unknown, "deps": deps, "engine": engine,
-            "lock": lock, "fields": fields, "impl": impl,
+            "interp": interp, "lock": lock, "fields": fields, "impl": impl,
             "def": struct_text(fields), "build": build_text(fields, impl)}
 
 

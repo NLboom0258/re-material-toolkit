@@ -446,6 +446,22 @@ def _code_only(material_src):
                      if not l.lstrip().startswith("//!"))
 
 
+# 插值输入(非资源; 由各 pass 模板声明; 仅供界面展示/依赖校验)。名 -> 用途说明。
+INTERP_INPUTS = {
+    "main": [("INTERPOLATOR0", "法线 xyz + UV0.x"),
+             ("INTERPOLATOR1", "UV0.y + UV1 + 切线.x"),
+             ("INTERPOLATOR2", "切线.yz + bitangent 符号 + 世界坐标.x"),
+             ("INTERPOLATOR3", "世界坐标.yz"),
+             ("INTERPOLATOR4", "速度项")],
+    "depth": [("INTERPOLATOR0", "UV0(仅当深度源用到 uv0 时声明)")],
+}
+
+
+def interp_inputs(pass_name="main"):
+    """该 pass 模板的插值输入列表 [(名, 用途)]。非资源, 不进 RDEF/声明。"""
+    return list(INTERP_INPUTS.get(pass_name, []))
+
+
 def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None):
     """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, 保活HLSL, report)。
 

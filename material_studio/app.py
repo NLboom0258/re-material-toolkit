@@ -2848,6 +2848,16 @@ class MaterialSystemPanel(QWidget):
                                           "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
                     si.setData(0, Qt.UserRole, ("copy", s["name"]))
                     grp["sampler"].addChild(si)
+        # 1b) 插值输入(非资源; 由 pass 模板声明; 只读展示)
+        _interps = minp.interp_inputs(pass_name)
+        if _interps:
+            itop = QTreeWidgetItem(["插值输入 (模板声明, 只读)", "",
+                                    "由 pass 模板声明; 语义输入可依赖它们(自动添加+锁定)"])
+            tree.addTopLevelItem(itop)
+            for _n, _d in _interps:
+                ti = QTreeWidgetItem([_n, "", _d])
+                ti.setData(0, Qt.UserRole, ("copy", _n))
+                itop.addChild(ti)
         # 2) 自定义输入(归属该 pass 的: 预设/参数/贴图/引擎资源; 会写进 mmtr)
         presets = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
         params = [(n, t) for n, t in self._params
