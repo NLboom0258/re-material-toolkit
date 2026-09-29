@@ -100,6 +100,22 @@ def has_depth_hook(material_src):
     return bool(_DEPTH_HOOK_RE.search(material_src or ""))
 
 
+def depth_subs(material_src):
+    """深度模板的插值替换表(`//__DEPTH_UV0_*__`): 按深度源是否用到 `uv0` 决定是否声明。
+
+    供 GUI 预览/编译与 `depth_hook_ps` **共用**(避免两条路径不一致)。
+    """
+    _code = "\n".join(l for l in (material_src or "").splitlines()
+                      if not l.lstrip().startswith("//!"))
+    use_uv0 = re.search(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])", _code) is not None
+    return {
+        "//__DEPTH_UV0_IN__": ("float4 v1 : INTERPOLATOR0;  // reg1  xy=UV0"
+                               if use_uv0 else ""),
+        "//__DEPTH_UV0_DI__": ("float2 uv0;" if use_uv0 else ""),
+        "//__DEPTH_UV0_BUILD__": ("di.uv0 = i.v1.xy;" if use_uv0 else ""),
+    }
+
+
 def depth_hook_ps(material_src, iface, minput):
     """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
@@ -108,17 +124,9 @@ def depth_hook_ps(material_src, iface, minput):
     插值: **按深度源是否用到 `uv0` 自动决定**是否声明 `INTERPOLATOR0`
     (默认 no-op 不声明 ⇒ 默认深度 PS 与极简同构; 显式 `//! interp` 配置待后续)。
     """
-    _code = "\n".join(l for l in (material_src or "").splitlines()
-                      if not l.lstrip().startswith("//!"))
-    use_uv0 = re.search(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])", _code) is not None
-    subs = {
-        "//__DEPTH_UV0_IN__": ("float4 v1 : INTERPOLATOR0;  // reg1  xy=UV0"
-                               if use_uv0 else ""),
-        "//__DEPTH_UV0_DI__": ("float2 uv0;" if use_uv0 else ""),
-        "//__DEPTH_UV0_BUILD__": ("di.uv0 = i.v1.xy;" if use_uv0 else ""),
-    }
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
-                                 keepalive="", minput=minput, subs=subs)
+                                 keepalive="", minput=minput,
+                                 subs=depth_subs(material_src))
     if err:
         raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
     return ps
@@ -207,7 +215,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     d_src = _strip_hlsl_fn(material_src, "MaterialMain")
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.default_iface()
-    iface, ka, _rep = INP.build_iface_and_keepalive(mp_src, base, pass_name="main")
+    iface, ka, _rep = INP.build_iface_and_keepalive(
+        mp_src, base, pass_name="main", other_code=INP._code_only(d_src))
     if iface is None:
         iface = base
     minput = _rep.get("minput")

@@ -446,11 +446,12 @@ def _code_only(material_src):
                      if not l.lstrip().startswith("//!"))
 
 
-def build_iface_and_keepalive(material_src, base_iface, pass_name=None):
+def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None):
     """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, 保活HLSL, report)。
 
     pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
                (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
+    other_code: 另一个 pass 的代码(仅主 pass 传); 无标签且两边都未引用 ⇒ 归本 pass(默认家)。
     无任何声明时返回 (None, "", report)。
     """
     from . import material_gen as MG
@@ -474,12 +475,18 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None):
         _tags = _decl_name_tags(material_src)
         _code = _code_only(material_src)
 
+        def _ref(nm, text):
+            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(nm),
+                             text) is not None
+
         def _belongs(nm):
             tg = _tags.get(nm)
             if tg:
                 return tg == pass_name
-            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(nm),
-                             _code) is not None
+            if _ref(nm, _code):
+                return True
+            # 未被本 pass 引用: 若给了"另一 pass 的代码"且那边也没引用 ⇒ 归本 pass(默认家)
+            return other_code is not None and not _ref(nm, other_code)
     params = [(n, t) for (n, t) in params if _belongs(n)]
     textures = [n for n in textures if _belongs(n)]
     eng_names = [n for n in eng_names if _belongs(n)]

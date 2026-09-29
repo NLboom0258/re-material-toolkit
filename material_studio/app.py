@@ -2508,6 +2508,7 @@ class MaterialSystemPanel(QWidget):
         self._params = []
         self._textures = []
         self._engine = []
+        self._tags = {}          # (kind, name) -> 显式 `@pass`; 无 = 按引用自动归属
 
     # ---- 状态同步 ----
     def _sync_asset(self):
@@ -2621,12 +2622,21 @@ class MaterialSystemPanel(QWidget):
             self._iface_min = minp.default_iface()
         return self._iface_min
 
-    def _effective_inputs(self):
-        """基础接口 + 自定义输入(预设/参数/贴图/引擎资源); 返回 (iface, keepalive, minput)。"""
+    def _effective_inputs(self, pass_name="main"):
+        """基础接口 + 自定义输入(**按 pass 过滤**); 返回 (iface, keepalive, minput)。"""
+        src = self.ed_src.toPlainText()
+        if pass_name == "main":
+            own, other, base = "MaterialDepth", "MaterialMain", self._base_iface()
+        else:
+            own, other = "MaterialMain", "MaterialDepth"
+            base = {"cbuffers": [], "textures": [], "samplers": []}
+        p_src = nogen._strip_hlsl_fn(src, own)
+        o_code = (minp._code_only(nogen._strip_hlsl_fn(src, other))
+                  if pass_name == "main" else None)
         iface, ka, rep = minp.build_iface_and_keepalive(
-            self.ed_src.toPlainText(), self._base_iface())
+            p_src, base, pass_name=pass_name, other_code=o_code)
         if iface is None:
-            iface = self._base_iface()
+            iface = base
         return iface, ka, (rep or {}).get("minput")
 
     def _effective_iface(self):
@@ -2634,12 +2644,21 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 输入页 ----
     def _wrap_inputs(self):
+        """输入页: 单页 + 顶部按钮组切换各 pass(每 pass 独立输入树 + 增删)。"""
+        _w1, self.tree_inputs = self._inputs_tree()
+        _w2, self.tree_inputs_depth = self._inputs_tree()
+        page, self._in_btns, self._in_stack = _seg_switch(
+            [("主 pass", _w1), ("深度 pass", _w2)])
+        return page
+
+    def _inputs_tree(self):
+        """一个 pass 的输入视图(输入树 + 增删按钮)。返回 (容器, 树)。"""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        self.tree_inputs = QTreeWidget()
-        self.tree_inputs.setHeaderLabels(["类别 / 名", "类型", "说明"])
-        v.addWidget(self.tree_inputs, 1)
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["类别 / 名", "类型", "说明"])
+        v.addWidget(tree, 1)
         bar = QHBoxLayout()
         for text, cb in (("＋预设输入", self._add_presets), ("＋参数", self._add_param),
                          ("＋贴图", self._add_tex), ("＋引擎资源", self._add_engine),
@@ -2650,13 +2669,31 @@ class MaterialSystemPanel(QWidget):
             bar.addWidget(b)
         bar.addStretch(1)
         v.addLayout(bar)
-        attach_menu(self.tree_inputs, self._menu_inputs)
-        return w
+        attach_menu(tree, self._menu_inputs)
+        return w, tree
+
+    def _cur_pass(self):
+        """输入页当前查看的 pass 名(按钮组选择)。"""
+        return "depth" if self._in_stack.currentIndex() == 1 else "main"
+
+    def _active_input_tree(self):
+        return self.tree_inputs_depth if self._cur_pass() == "depth" else self.tree_inputs
 
     def _load_decls_from_src(self):
-        self._presets = sinp.parse_preset_decls(self.ed_src.toPlainText())
-        self._params, self._textures = mgen.parse_decls(self.ed_src.toPlainText())
-        self._engine = minp.parse_engine_decls(self.ed_src.toPlainText())
+        src = self.ed_src.toPlainText()
+        self._presets = sinp.parse_preset_decls(src)
+        self._params, self._textures = mgen.parse_decls(src)
+        self._engine = minp.parse_engine_decls(src)
+        tags = minp._decl_name_tags(src)
+        self._tags = {}
+        for n in self._presets:
+            self._tags[("preset", n)] = tags.get(n)
+        for n, _t in self._params:
+            self._tags[("param", n)] = tags.get(n)
+        for n in self._textures:
+            self._tags[("tex", n)] = tags.get(n)
+        for n in self._engine:
+            self._tags[("engine", n)] = tags.get(n)
 
     def _locked_names(self):
         """被锁定(禁止删除)的引擎资源名 -> [来源...]: 预设依赖 + 参数所需 UserMaterial。"""
@@ -2687,10 +2724,13 @@ class MaterialSystemPanel(QWidget):
         src = self.ed_src.toPlainText()
         body = "\n".join(l for l in src.splitlines()
                          if not l.lstrip().startswith("//!")).lstrip("\n")
-        lines = ["//! preset %s" % n for n in self._presets]
-        lines += ["//! param %s %s" % (t, n) for n, t in self._params]
-        lines += ["//! tex %s" % n for n in self._textures]
-        lines += ["//! engine %s" % n for n in self._engine]
+        def _tg(kind, name):
+            t = self._tags.get((kind, name))
+            return (" @%s" % t) if t else ""
+        lines = ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
+        lines += ["//! param %s %s%s" % (t, n, _tg("param", n)) for n, t in self._params]
+        lines += ["//! tex %s%s" % (n, _tg("tex", n)) for n in self._textures]
+        lines += ["//! engine %s%s" % (n, _tg("engine", n)) for n in self._engine]
         head = ("\n".join(lines) + "\n\n") if lines else ""
         self.ed_src.setPlainText(head + body)
         self.refresh_info()   # 内含 refresh_inputs
@@ -2711,7 +2751,11 @@ class MaterialSystemPanel(QWidget):
         d = PresetDialog(self, selected=set(self._presets))
         if d.exec() != QDialog.Accepted:
             return
+        _old = set(self._presets)
         self._presets = d.selected_names()
+        for n in self._presets:
+            if n not in _old:
+                self._tags[("preset", n)] = self._cur_pass()
         self._rewrite_decls()
 
     def _add_engine(self):
@@ -2721,7 +2765,11 @@ class MaterialSystemPanel(QWidget):
         d = EngineResDialog(self, selected=set(self._engine), locked=set(lock))
         if d.exec() != QDialog.Accepted:
             return
+        _old = set(self._engine)
         self._engine = d.selected_names()
+        for n in self._engine:
+            if n not in _old:
+                self._tags[("engine", n)] = self._cur_pass()
         self._rewrite_decls()          # normalize 会补回锁定项
 
     def _on_src_changed(self):
@@ -2735,16 +2783,34 @@ class MaterialSystemPanel(QWidget):
             self._src_hl.set_diagnostics([])
 
     def refresh_inputs(self):
-        self.tree_inputs.clear()
-        # 1) 标准接口: 按"来源"分两组 —— 引擎固有(引擎给值) / 标准材质槽(mdf2 给值, 可选)
-        src_of = {e["name"]: e.get("source", "") for e in minp.std()}
-        iface = self._base_iface()
-        if not iface:
-            root = QTreeWidgetItem(["固有输入", "", ""])
-            self.tree_inputs.addTopLevelItem(root)
-            root.addChild(QTreeWidgetItem(
-                ["(缺少预设标准接口: 先跑 scripts/gen_iface.py)", "", ""]))
-        else:
+        """刷新两个 pass 的输入树(每 pass 独立: 该 pass 的固有输入 + 归属该 pass 的自定义输入)。"""
+        self._load_decls_from_src()
+        self.normalize_inputs()
+        self._fill_input_tree(self.tree_inputs, "main", self._base_iface())
+        self._fill_input_tree(self.tree_inputs_depth, "depth", None)
+
+    def _pass_belongs(self, kind, name, pass_name):
+        """声明是否归属该 pass: 显式 `@pass` 优先; 否则按引用; 两边都不引用 ⇒ 归主 pass。"""
+        t = self._tags.get((kind, name))
+        if t:
+            return t == pass_name
+        src = self.ed_src.toPlainText()
+
+        def _ref(text):
+            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(name),
+                             text) is not None
+        if pass_name == "main":
+            this = minp._code_only(nogen._strip_hlsl_fn(src, "MaterialDepth"))
+            other = minp._code_only(nogen._strip_hlsl_fn(src, "MaterialMain"))
+            return _ref(this) or not _ref(other)
+        return _ref(minp._code_only(nogen._strip_hlsl_fn(src, "MaterialMain")))
+
+    def _fill_input_tree(self, tree, pass_name, own_base):
+        tree.clear()
+        # 1) 固有输入(该 pass 的基座; 其他 pass 目前按自定义模式标准: 无)
+        iface = own_base or {}
+        if any(iface.get(c + "s") for c in ("cbuffer", "texture", "sampler")):
+            src_of = {e["name"]: e.get("source", "") for e in minp.std()}
             for gkey, gtitle, gdesc in (
                     ("engine", "固有输入 (引擎, 只读)", "引擎提供值; 材质无需声明"),
                     ("material", "标准材质槽 (可选, 由 mdf2 提供)",
@@ -2755,8 +2821,7 @@ class MaterialSystemPanel(QWidget):
                 if not any(sub.values()):
                     continue
                 top = QTreeWidgetItem([gtitle, "", gdesc])
-                self.tree_inputs.addTopLevelItem(top)
-                # 每组内部再按 cbuffer / texture / sampler 分类(成员默认折叠)
+                tree.addTopLevelItem(top)
                 grp = {}
                 for cat in ("cbuffer", "texture", "sampler"):
                     g = QTreeWidgetItem(["%s (%d)" % (cat, len(sub[cat])), "", ""])
@@ -2783,16 +2848,18 @@ class MaterialSystemPanel(QWidget):
                                           "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
                     si.setData(0, Qt.UserRole, ("copy", s["name"]))
                     grp["sampler"].addChild(si)
-        # 2) 系统预制输入已移除(最小化): 默认空材质只用插值输入; 模板体系待后续重构
-        # 3) 自定义输入(预设/参数/贴图/引擎资源; 会写进 mmtr)
-        self._load_decls_from_src()
-        self.normalize_inputs()
+        # 2) 自定义输入(归属该 pass 的: 预设/参数/贴图/引擎资源; 会写进 mmtr)
+        presets = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        params = [(n, t) for n, t in self._params
+                  if self._pass_belongs("param", n, pass_name)]
+        textures = [n for n in self._textures if self._pass_belongs("tex", n, pass_name)]
+        engine = [n for n in self._engine if self._pass_belongs("engine", n, pass_name)]
         lock = self._locked_names()
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
-        self.tree_inputs.addTopLevelItem(cust)
-        pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(self._presets)])
+        tree.addTopLevelItem(cust)
+        pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
         cust.addChild(pre)
-        _sel = set(self._presets)
+        _sel = set(presets)
         for g in sinp.groups():                      # 按分组列已添加的项(单项粒度)
             _items = [e for e in g["items"] if e["name"] in _sel]
             if not _items:
@@ -2808,26 +2875,26 @@ class MaterialSystemPanel(QWidget):
                                       (e.get("field") or {}).get("type", ""), d])
                 it.setData(0, Qt.UserRole, ("preset", e["name"]))
                 gnode.addChild(it)
-        for n in self._presets:              # 目录里没有的(旧/手写)也列出, 便于删除
+        for n in presets:                    # 目录里没有的(旧/手写)也列出, 便于删除
             if sinp.find(n) is None:
                 it = QTreeWidgetItem([n, "", "(未知语义输入项)"])
                 it.setData(0, Qt.UserRole, ("preset", n))
                 pre.addChild(it)
-        pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(self._params)])
+        pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(params)])
         cust.addChild(pnode)
-        for n, t in self._params:
+        for n, t in params:
             it = QTreeWidgetItem([n, t, ""])
             it.setData(0, Qt.UserRole, ("param", n))
             pnode.addChild(it)
-        tnode = QTreeWidgetItem(["贴图 (//! tex)", "", "%d" % len(self._textures)])
+        tnode = QTreeWidgetItem(["贴图 (//! tex)", "", "%d" % len(textures)])
         cust.addChild(tnode)
-        for n in self._textures:
+        for n in textures:
             it = QTreeWidgetItem([n, "", ""])
             it.setData(0, Qt.UserRole, ("tex", n))
             tnode.addChild(it)
-        enode = QTreeWidgetItem(["引擎资源 (//! engine)", "", "%d" % len(self._engine)])
+        enode = QTreeWidgetItem(["引擎资源 (//! engine)", "", "%d" % len(engine)])
         cust.addChild(enode)
-        for n in self._engine:
+        for n in engine:
             e = minp.find(n) or {}
             kd = e.get("kind", "")
             if kd == "cbuffer":
@@ -2847,7 +2914,7 @@ class MaterialSystemPanel(QWidget):
             enode.addChild(it)
             if n == "UserMaterial":
                 # UserMaterial 的成员 = 自定义材质参数(单独声明在 //! param)
-                for pn, pt in self._params:
+                for pn, pt in params:
                     cm = QTreeWidgetItem([pn, pt, "(材质参数)"])
                     cm.setData(0, Qt.UserRole, ("param", pn))
                     it.addChild(cm)
@@ -2859,8 +2926,8 @@ class MaterialSystemPanel(QWidget):
                     cm.setData(0, Qt.UserRole, ("copy", mn))
                     it.addChild(cm)
         # 默认只展开到"分类"层(0=顶层, 1=分类); 资源项与 cbuffer 成员默认折叠
-        self.tree_inputs.expandToDepth(1)
-        fit_columns(self.tree_inputs, (0, 1, 2))
+        tree.expandToDepth(1)
+        fit_columns(tree, (0, 1, 2))
 
     def _menu_inputs(self, item):
         kind = item.data(0, Qt.UserRole) if item is not None else None
@@ -2895,6 +2962,7 @@ class MaterialSystemPanel(QWidget):
             QMessageBox.warning(self, "重复", "参数已存在: %s" % name)
             return
         self._params.append((name, typ))
+        self._tags[("param", name)] = self._cur_pass()
         self._rewrite_decls()
 
     def _add_tex(self):
@@ -2907,6 +2975,7 @@ class MaterialSystemPanel(QWidget):
             QMessageBox.warning(self, "重复", "贴图已存在: %s" % name)
             return
         self._textures.append(name)
+        self._tags[("tex", name)] = self._cur_pass()
         self._rewrite_decls()
 
     def _rename_custom(self, kind):
@@ -2920,10 +2989,11 @@ class MaterialSystemPanel(QWidget):
             self._params = [(new if n == name else n, t) for n, t in self._params]
         else:
             self._textures = [new if n == name else n for n in self._textures]
+        self._tags[(cat, new)] = self._tags.pop((cat, name), None)
         self._rewrite_decls()
 
     def _del_custom(self):
-        it = self.tree_inputs.currentItem()
+        it = self._active_input_tree().currentItem()
         kind = it.data(0, Qt.UserRole) if it is not None else None
         if not kind:
             return
@@ -2944,6 +3014,7 @@ class MaterialSystemPanel(QWidget):
             self._engine = [n for n in self._engine if n != name]
         else:
             self._textures = [n for n in self._textures if n != name]
+        self._tags.pop((cat, name), None)
         self._rewrite_decls()
 
     # ---- 编译诊断 ----
@@ -3040,7 +3111,7 @@ class MaterialSystemPanel(QWidget):
                                     % ", ".join("void %s(...)" % n for n in missing))
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        iface, ka, minput = self._effective_inputs()
+        iface, ka, minput = self._effective_inputs("main")
         # ---- 主 pass(剥掉 MaterialDepth: 未调用函数里的资源引用会污染主 PS 的 RDEF) ----
         m_src, m_map = nogen.strip_line_map(src, "MaterialDepth")
         try:
@@ -3056,14 +3127,16 @@ class MaterialSystemPanel(QWidget):
                                               keepalive=ka, minput=minput)
         # ---- 深度 pass(恒组装; 剥掉 MaterialMain) ----
         d_src, d_map = nogen.strip_line_map(src, "MaterialMain")
+        iface_d, _, _ = self._effective_inputs("depth")
+        _dsubs = nogen.depth_subs(d_src)
         try:
             self.ed_full_depth.setPlainText(
-                mpass.build_source(d_src, "deferred_depth", iface=iface,
-                                   keepalive="", minput=minput))
+                mpass.build_source(d_src, "deferred_depth", iface=iface_d,
+                                   keepalive="", minput=None, subs=_dsubs))
         except Exception as e:  # noqa: BLE001
             self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
-        d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface,
-                                              keepalive="", minput=minput)
+        d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface_d,
+                                              keepalive="", minput=None, subs=_dsubs)
         # ---- 报错(优先主 pass) ----
         if m_err:
             diags = self._err_diags(m_err, tmpl, m_map)
