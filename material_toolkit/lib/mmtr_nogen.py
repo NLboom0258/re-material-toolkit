@@ -18,6 +18,7 @@ try:
     from . import mmtr_blobs as B
     from . import mmtr_presets as P
     from . import material_pass as MP
+    from . import material_gen as MG
     from . import rdef as R
     from . import mmtr_tail as T
     from .mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
@@ -30,6 +31,7 @@ except ImportError:  # 允许脚本直接 import
     import mmtr_blobs as B
     import mmtr_presets as P
     import material_pass as MP
+    import material_gen as MG
     import rdef as R
     import mmtr_tail as T
     from mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
@@ -192,6 +194,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth; 之后新增 pass 同理)
     require_fn(material_src, "MaterialMain")
     require_fn(material_src, "MaterialDepth")
+    # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
+    _confl = MG.param_name_conflicts(MG.parse_decls(material_src)[0])
+    if _confl:
+        raise ValueError("材质参数命名冲突:\n  " + "\n  ".join(_confl))
     # 每 pass 一份源(剥掉别的 pass 的函数: 未调用函数里的资源引用既不被 DCE、也会影响保活)。
     mp_src = _strip_hlsl_fn(material_src, "MaterialDepth")
     d_src = _strip_hlsl_fn(material_src, "MaterialMain")
@@ -257,8 +263,11 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         def cbs(bl):
             out = {}
             for (nm, sz, mem) in (R.rdef_cbuffers(bl) or []):
+                # UserMaterial 成员: 写进 mmtr 参数表用**裸名**(去 `VAR_`), 对齐原版
+                # (RDEF 成员带 `VAR_`, 表/mdf2 裸名); 其它引擎 cbuffer 成员保持原名。
+                _mb = MG.param_base_name if nm == "UserMaterial" else (lambda x: x)
                 out.setdefault(nm, (sz, len(mem),
-                                    tuple((m[0], m[2], m[1]) for m in mem)))
+                                    tuple((_mb(m[0]), m[2], m[1]) for m in mem)))
             return out
         if (vs, ps) not in cbs_of:
             d = {}

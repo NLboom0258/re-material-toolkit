@@ -141,6 +141,36 @@ def parse_decls(material_src):
     return params, textures
 
 
+# 材质参数命名: `//! param <type> <名>` 的 `<名>` = **shader RDEF 的 cbuffer 成员名**(材质
+# 代码里就用它引用)。若带 `VAR_` 前缀(原版 RDEF 口径), 则 **mmtr 参数表名 / mdf2 参数名 =
+# 去掉该前缀的裸名**(对齐原版: mdf2 裸名 / mmtr 表名裸名 / RDEF 带 `VAR_`)。
+PARAM_PREFIX = "VAR_"
+
+
+def param_base_name(name):
+    """RDEF 成员名 -> 裸名(mdf2 / mmtr 参数表名): 去掉**单个**前导 `VAR_`。"""
+    return name[len(PARAM_PREFIX):] if name.startswith(PARAM_PREFIX) else name
+
+
+def param_name_conflicts(params):
+    """材质参数命名校验: 返回冲突说明列表([] = 无冲突)。params = [(name, type)]。
+
+    规则: ① RDEF 名(声明名)不得重复; ② 裸名不得重复 —— 否则两个不同参数映射到同一
+    mdf2 / 参数表名(如 `A` 与 `VAR_A` 都 -> `A`)。
+    """
+    out, by_rdef, by_base = [], {}, {}
+    for name, _t in params:
+        if name in by_rdef:
+            out.append("RDEF 成员名重复: %s" % name)
+        by_rdef[name] = True
+        b = param_base_name(name)
+        if b in by_base:
+            out.append("裸名冲突: %r 与 %r 都映射到 %r" % (by_base[b], name, b))
+        else:
+            by_base[b] = name
+    return out
+
+
 def generate(template, material_src=None, template_name="deferred_env",
              pass_name="Deferred", target="ps_5_0", iface_from_template=True,
              add_inputs=True, instance_template=None):
@@ -216,7 +246,8 @@ def generate(template, material_src=None, template_name="deferred_env",
     if added_params:
         mm = Mmtr.from_bytes(out)
         for name, size, off in added_params:
-            out = mm.add_cbuffer_param("UserMaterial", name, size, off)
+            # mmtr 参数表名 = 裸名(去 `VAR_`) —— 对齐原版(RDEF 带前缀, 表/mdf2 裸名)。
+            out = mm.add_cbuffer_param("UserMaterial", param_base_name(name), size, off)
             mm = Mmtr.from_bytes(out)
     for tname in textures:
         for idx in cb_targets + inst_targets:

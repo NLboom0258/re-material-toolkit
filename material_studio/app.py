@@ -2939,16 +2939,34 @@ class MaterialSystemPanel(QWidget):
         self.lbl_status.setText("已复制: %s" % token)
 
     def _add_param(self):
-        name, ok = QInputDialog.getText(self, "新增参数", "参数名(建议 VAR_ 开头):")
-        if not ok or not name.strip():
+        # 输入"裸名" + 是否自动加 `VAR_` 前缀(= RDEF/cbuffer 成员名, 材质代码里用它引用)。默认勾选。
+        dlg = QDialog(self)
+        dlg.setWindowTitle("新增参数")
+        form = QFormLayout(dlg)
+        ed_name = QLineEdit("NewParam")
+        form.addRow("参数名(裸名):", ed_name)
+        chk = QCheckBox("自动加 VAR_ 前缀 (RDEF 成员名; 建议勾选)")
+        chk.setChecked(True)
+        form.addRow("", chk)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec() != QDialog.Accepted:
             return
-        name = name.strip()
+        base = ed_name.text().strip()
+        if not base:
+            return
+        # RDEF 成员名 = 勾选 => `VAR_<裸名>`; 否则与裸名相同。
+        name = ("VAR_" + base) if chk.isChecked() else base
         typ = pick_type(self, "参数类型", "float4")
         if typ is None:
             return
         self._load_decls_from_src()
-        if any(n == name for n, _ in self._params):
-            QMessageBox.warning(self, "重复", "参数已存在: %s" % name)
+        # 命名校验: RDEF 名唯一 + 裸名唯一(防 `A`/`VAR_A` 撞同一 mdf2/参数表名)。
+        confl = mgen.param_name_conflicts(self._params + [(name, typ)])
+        if confl:
+            QMessageBox.warning(self, "命名冲突", "\n".join(confl))
             return
         self._params.append((name, typ))
         self._tags[("param", name)] = self._cur_pass()
