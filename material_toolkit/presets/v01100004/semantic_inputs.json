@@ -27,6 +27,31 @@
       "impl": ["mi.NormalWS = normalize(i.v1.xyz);"]
     },
     {
+      "name": "TangentWS",
+      "group": "几何",
+      "desc": "世界空间切线(插值切线经 .xzy 归一到世界空间)",
+      "depends": [],
+      "field": {"name": "TangentWS", "type": "float3"},
+      "impl": [
+        "float3 _tWS = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
+        "mi.TangentWS = _tWS.xzy;"
+      ]
+    },
+    {
+      "name": "BitangentWS",
+      "group": "几何",
+      "desc": "世界空间副切线(由 GBuffer 基 N×T 与 bitangent 符号得, 经 .xzy 归一)",
+      "depends": [],
+      "field": {"name": "BitangentWS", "type": "float3"},
+      "impl": [
+        "float3 _ngB = normalize(i.v1.xyz).xzy;",
+        "float3 _tgB = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
+        "float3 _bgB = cross(_ngB, _tgB);",
+        "_bgB = (i.v3.z < 0.0) ? -_bgB : _bgB;",
+        "mi.BitangentWS = normalize(_bgB).xzy;"
+      ]
+    },
+    {
       "name": "positionWS",
       "group": "几何",
       "desc": "世界坐标(插值 v3.w/v4.xy)",
