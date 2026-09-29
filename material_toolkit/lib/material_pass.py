@@ -28,7 +28,8 @@ _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # "auto": **不写 register**, 由 d3dcompiler **自动紧凑分配**(寄存器号 ≡ RDEF 位置)
 #   ⇒ 结构上不可能出现空洞(2026-09-30 实机验证: 5 例 AC_* 均正常)。
 # 切 "auto" 时必须同时不注入保活(`build_source` 内部已处理)。
-REGISTER_MODE = "explicit"
+# 2026-09-30: 已切为 "auto"(实机验证: 5 例 AC_* 均正常); 保留 "explicit" 作应急口子。
+REGISTER_MODE = "auto"
 _REG_RE = re.compile(r"\s*:\s*register\([^)]*\)")
 
 
