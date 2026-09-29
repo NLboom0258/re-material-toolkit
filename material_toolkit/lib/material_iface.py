@@ -158,7 +158,8 @@ def _material_cbuffer(iface, name="UserMaterial"):
 
 
 def _flat_cbuffer(out, cb):
-    out.append("cbuffer %s : register(%s)" % (cb["name"], cb["reg"]))
+    # 不写 `register(...)`: 寄存器交由编译器**自动紧凑**分配(见 material_pass 文件头说明)。
+    out.append("cbuffer %s" % cb["name"])
     out.append("{")
     for m in cb["members"]:
         out.append("    %s %s;" % (m["type"], m["name"]))
@@ -176,19 +177,19 @@ _DIMTYPE = {"2d": "Texture2D", "2darray": "Texture2DArray", "1d": "Texture1D",
 
 
 def _texture_decl(t, reg=None):
-    reg = reg or t["reg"]
+    """纹理声明。`reg` 已弃用(不再写 `register`; 寄存器由编译器自动分配)。"""
     fmt = t.get("fmt")
     dim = t.get("dim") or "2d"
     if fmt == "byte":
-        return "ByteAddressBuffer %s : register(%s);" % (t["name"], reg)
+        return "ByteAddressBuffer %s;" % t["name"]
     elem = _ELEM.get(fmt)
     base = _DIMTYPE.get(dim)
     if elem is None or base is None:
         # 结构化缓冲(fmt=struct)等需配套 struct 定义, 这里暂不声明(不用即可)
-        return "// [跳过] %s : %s (fmt=%s dim=%s)" % (t["name"], reg, fmt, dim)
+        return "// [跳过] %s (fmt=%s dim=%s)" % (t["name"], fmt, dim)
     if fmt == "uint" and dim == "3d":
         elem = "uint4"
-    return "%s<%s> %s : register(%s);" % (base, elem, t["name"], reg)
+    return "%s<%s> %s;" % (base, elem, t["name"])
 
 
 def decl_skipped(t):
@@ -219,7 +220,7 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
             out.append(_texture_decl(t))
         for s in iface["samplers"]:
             ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
-            out.append("%s %s : register(%s);" % (ty, s["name"], s["reg"]))
+            out.append("%s %s;" % (ty, s["name"]))
         return "\n".join(out) + "\n"
 
     # ---- style == "instance" ----
@@ -228,10 +229,7 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         if cb is not mc:
             _flat_cbuffer(out, cb)
 
-    # 非 byte 纹理的最小寄存器 = structured 缓冲的寄存器; 非 byte 纹理整体 +1
-    nonbyte = [t for t in iface["textures"] if t["fmt"] != "byte"]
-    struct_reg = "t%d" % min(_regnum(t["reg"]) for t in nonbyte) if nonbyte else "t0"
-
+    # 非 byte 纹理无需再手动占位(寄存器由编译器自动分配)
     if mc is not None:
         out.append("struct %s" % struct_name)
         out.append("{")
@@ -242,8 +240,7 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
             # 空 UserMaterial(如仅 `//! engine UserMaterial` 无参数): struct 不能为空
             out.append("    float _reserved;   // 空: UserMaterial 无成员")
         out.append("};")
-        out.append("StructuredBuffer<%s> %s : register(%s);"
-                   % (struct_name, buffer_name, struct_reg))
+        out.append("StructuredBuffer<%s> %s;" % (struct_name, buffer_name))
         out.append("")
         # 裸名 static 全局(供材质函数直接用 VAR_*)
         for m in mc["members"]:
@@ -257,11 +254,8 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         out.append("")
 
     for t in iface["textures"]:
-        if t["fmt"] == "byte":
-            out.append(_texture_decl(t))
-        else:
-            out.append(_texture_decl(t, "t%d" % (_regnum(t["reg"]) + 1)))
+        out.append(_texture_decl(t))
     for s in iface["samplers"]:
         ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
-        out.append("%s %s : register(%s);" % (ty, s["name"], s["reg"]))
+        out.append("%s %s;" % (ty, s["name"]))
     return "\n".join(out) + "\n"

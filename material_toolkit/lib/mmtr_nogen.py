@@ -100,17 +100,14 @@ def has_depth_hook(material_src):
     return bool(_DEPTH_HOOK_RE.search(material_src or ""))
 
 
-def depth_hook_ps(material_src, iface, minput, bare_registers=None):
+def depth_hook_ps(material_src, iface, minput):
     """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
-    保活传空串(深度 PS 只 discard、无颜色输出, 不能用主 pass 的 o.o0 保活语句);
-    效果的资源绑定由钩子自身的引用决定。
-    插值声明由 `material_pass.build_source` 按 passes.json 注入(uv0 条件化)。
-    bare_registers: 透传给 `material_pass`(自动紧凑模式)。
+    效果的资源绑定由钩子自身的引用决定; 插值声明由 `material_pass.build_source`
+    按 passes.json 注入(uv0 条件化)。寄存器由编译器自动紧凑(见 `material_pass` 文件头)。
     """
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
-                                 keepalive="", minput=minput,
-                                 bare_registers=bare_registers)
+                                 keepalive="", minput=minput)
     if err:
         raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
     return ps
@@ -170,14 +167,12 @@ def strip_line_map(src, name):
     return stripped, _m
 
 
-def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None,
-          bare_registers=None):
+def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
     iface: 接口(来自 material_iface); None 时按材质源码的 `//! param/tex` 声明自动生成
            (无声明则保持零声明)。
-    bare_registers: True = 不写 `register(...)` + 不注入保活 ⇒ d3dcompiler 自动紧凑
-           (寄存器号 ≡ RDEF 位置, 结构上无空洞)。None = 取 `material_pass.REGISTER_MODE`。
+    寄存器由 d3dcompiler **自动紧凑**分配(不写 `register`; 见 `material_pass` 文件头)。
     """
     if not P.has_preset():
         raise RuntimeError("缺少预设: 先跑 scripts/gen_presets.py <ref.mmtr>")
@@ -209,8 +204,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         iface = base
     minput = _rep.get("minput")
     ps_blob, err = MP.compile_shading(mp_src, template, iface=iface,
-                                      keepalive=ka, minput=minput,
-                                      bare_registers=bare_registers)
+                                      keepalive=ka, minput=minput)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
 
@@ -227,8 +221,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
             and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl"))):
         ps_inst, err_inst = MP.compile_shading(mp_src, inst_tpl, iface=iface,
                                                style="instance", keepalive=ka,
-                                               minput=minput,
-                                               bare_registers=bare_registers)
+                                               minput=minput)
         if err_inst:
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
@@ -238,7 +231,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(
         d_src, INP.base_iface_for_pass("depth"), pass_name="depth",
         all_params=INP.all_params(material_src))
-    ps_depth = depth_hook_ps(d_src, iface_d, None, bare_registers=bare_registers)
+    ps_depth = depth_hook_ps(d_src, iface_d, None)
 
     # 2) 逐槽解析程序
     slots = []

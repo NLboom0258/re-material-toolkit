@@ -22,20 +22,13 @@ DEPTH_UV0_BUILD = "//__DEPTH_UV0_BUILD__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
 
-# ---- 寄存器模式 ----
-# "explicit": 在 HLSL 里显式写 `register(bN/tN/sN)`; 因为 d3dcompiler 会剔除"整段未被引用"
-#   的资源, 而引擎是按"RDEF 顺序连续"绑定的 ⇒ 必须**保活**防止寄存器出现空洞。
-# "auto": **不写 register**, 由 d3dcompiler **自动紧凑分配**(寄存器号 ≡ RDEF 位置)
-#   ⇒ 结构上不可能出现空洞(2026-09-30 实机验证: 5 例 AC_* 均正常)。
-# 切 "auto" 时必须同时不注入保活(`build_source` 内部已处理)。
-# 2026-09-30: 已切为 "auto"(实机验证: 5 例 AC_* 均正常); 保留 "explicit" 作应急口子。
-REGISTER_MODE = "auto"
-_REG_RE = re.compile(r"\s*:\s*register\([^)]*\)")
-
-
-def _bare_registers(bare_registers):
-    """是否用"自动紧凑"(不写 register)。None = 取模块默认 REGISTER_MODE。"""
-    return (REGISTER_MODE == "auto") if bare_registers is None else bool(bare_registers)
+# ---- 寄存器: 交给编译器"自动紧凑"(不写 `register`, 也不注入保活) ----
+# d3dcompiler 会剔除"整段未被引用"的资源; 而引擎是按 **RDEF 顺序连续** 绑定材质资源的
+# (不看声明的寄存器号) ⇒ 只要**不写 `register(...)`**, 编译器就自动紧凑分配
+# (寄存器号 ≡ RDEF 位置), 结构上不可能出现空洞。
+# 2026-09-30 实机验证(默认空材质 + 参数/未读成员/引擎资源/贴图/深度钩子共 5 例)均正常
+# ⇒ 已**退役"显式 register + 保活"**: 保活注入已删; `keepalive` 形参仅为兼容保留, 恒被忽略。
+# 注: 若将来换 DXC(SM6) 需重测该"按声明顺序自动分配"行为。
 
 
 def _read(fname):
@@ -63,21 +56,17 @@ def material_line_offset(template="deferred_env"):
 
 
 def build_source(material_src=None, template="deferred_env", iface=None,
-                 style="cbuffer", keepalive=None, minput=None, subs=None,
-                 bare_registers=None):
+                 style="cbuffer", keepalive=None, minput=None, subs=None):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
     接口声明(否则用模板自带的写死声明, 便于单独编译/测试)。
-    keepalive: 非 None 时替换模板里 //__KEEPALIVE__ 标记(自定义输入的“保活”语句,
-               引用资源防被编译器剔除); 模板无该标记则忽略。
+    keepalive: **已退役**(仅为兼容保留, 恒被忽略): 寄存器交由编译器自动紧凑, 无需保活。
     minput: {"def":..., "build":...} 预设(语义)输入动态生成的 MaterialInput 定义/构造;
                None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
     style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
     subs: 额外标记替换 {标记: 文本}(如深度模板的 `//__DEPTH_UV0_*__`, 按需声明插值)。
-    bare_registers: True = 去掉所有 `register(...)`(交给编译器自动紧凑) + 不注入保活。
     """
-    _bare = _bare_registers(bare_registers)
     tpl = _read(template + ".hlsl")
     if subs:
         for k, v in subs.items():
@@ -107,18 +96,15 @@ def build_source(material_src=None, template="deferred_env", iface=None,
         tpl = tpl.replace(MINPUT_DEF, minput["def"])
     if MINPUT_BUILD in tpl:
         tpl = tpl.replace(MINPUT_BUILD, minput["build"])
-    if not _bare and keepalive is not None and KEEPALIVE in tpl:
-        tpl = tpl.replace(KEEPALIVE, keepalive)
+    if KEEPALIVE in tpl:
+        tpl = tpl.replace(KEEPALIVE, "")     # 保活已退役(见文件头说明)
     src = material_src if material_src is not None else default_material(template)
-    out = tpl.replace(MARKER, src)
-    # auto 模式: 剥掉所有 `register(...)` ⇒ 编译器自动紧凑(寄存器号 ≡ RDEF 位置, 无空洞)。
-    return _REG_RE.sub("", out) if _bare else out
+    return tpl.replace(MARKER, src)
 
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None, minput=None, graft=False, subs=None,
-                    bare_registers=None):
+                    keepalive=None, minput=None, graft=False, subs=None):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
 
     注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
@@ -127,8 +113,7 @@ def compile_shading(material_src=None, template="deferred_env",
     **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
     """
     dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style,
-                                            keepalive, minput, subs,
-                                            bare_registers),
+                                            keepalive, minput, subs),
                                entry, target, name="%s.hlsl" % template)
     if err or not graft:
         return dxbc, err

@@ -211,10 +211,6 @@ def member_desc(cbuffer, member):
 
 _ENGINE_RE = re.compile(r"^\s*//!\s*engine\s+(\w+)\s*$")
 _REG_PRE = {"cbuffer": "b", "texture": "t", "sampler": "s"}
-# GetDimensions 输出参数个数(保活用)。必须匹配 HLSL 内建的**无 mipLevel 重载**:
-#   1d=1, 1darray=2, 2d=2, 2darray=3, 3d=3, cube=2, cubearray=3, 2dms=3, 2dmsarray=4。
-_DIM_ARITY = {"1d": 1, "1darray": 2, "2d": 2, "2darray": 3, "3d": 3,
-              "cube": 2, "cubearray": 3, "2dms": 3, "2dmsarray": 4, "buffer": 1}
 
 
 def path():
@@ -365,54 +361,10 @@ def _add_engine(iface, e, reg):
                                   "cmp": bool(e.get("cmp"))})
 
 
-# ---------------------------------------------------------------- 保活
-def _member_ref(t, name):
-    """给一个成员构造"安全标量引用"(用于保活 `_ka += float(ref)`)。"""
-    if "[" in name:                       # 数组: 取首元素(剥掉声明里的长度)
-        name = "%s[0]" % name.split("[", 1)[0]
-    if t in ("float", "int", "uint", "bool", "half"):
-        return name
-    if "[" not in name and "x" in t:      # 矩阵(如 float4x4)
-        return "%s[0][0]" % name
-    return "%s.x" % name
-
-
-def keepalive_hlsl(items):
-    """生成死分支内的"保活"语句(引用各资源, 防被编译器剔除)。
-
-    items: [{"kind":"texture|cbuffer|sampler","name":..,"reg":..,"entry":catalog,..}]
-    sampler 无法单独"使用"⇒ 略过(其存活取决于是否被采样)。
-    """
-    from . import material_iface as MI
-    lines, k = [], 0
-    for it in items:
-        kd, nm = it["kind"], it["name"]
-        if kd == "texture":
-            entry = it.get("entry") or {}
-            if MI.decl_skipped(entry):     # struct/未知 fmt/dim 无法声明 ⇒ 跳过(否则引用未定义名)
-                continue
-            fmt = entry.get("fmt")
-            dim = entry.get("dim") or "2d"
-            if fmt == "byte":
-                lines.append("%s.GetDimensions(_k0); _ka += float(_k0);" % nm)
-            else:
-                n = _DIM_ARITY.get(dim, 2)
-                args = ", ".join("_k%d" % j for j in range(n))
-                lines.append("%s.GetDimensions(%s); _ka += float(_k0);" % (nm, args))
-            k += 1
-        elif kd == "cbuffer":
-            mem = ((it.get("entry") or {}).get("members") or [])
-            if mem:
-                lines.append("_ka += float(%s);" % _member_ref(mem[0]["type"], mem[0]["name"]))
-        elif kd == "param":
-            lines.append("_ka += float(%s);" % _member_ref(it.get("type", "float"), nm))
-    if not lines:
-        return ""
-    head = ("if (i.v1.w > 1e30) {\n"
-            "        uint _k0, _k1, _k2, _k3; float _ka = 0.0;")
-    body = ["        " + s for s in lines]
-    tail = "        o.o0.x += _ka;\n    }"
-    return "\n".join([head] + body + [tail])
+# ---------------------------------------------------------------- 保活(已退役)
+# 2026-09-30: “显式 register + 保活”退役 —— 寄存器改由 d3dcompiler **自动紧凑**分配
+#   (寄存器号 ≡ RDEF 位置, 结构上不可能有空洞), 不再需要死分支保活。
+#   `build_iface_and_keepalive` 仍返回一个第二元素, 但**恒为空串**(仅兼容调用方签名)。
 
 
 # ---------------------------------------------------------------- 组装
@@ -535,7 +487,9 @@ def all_params(material_src):
 
 def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None,
                               all_params=None):
-    """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, 保活HLSL, report)。
+    """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, "", report)。
+
+    第 2 个返回值(保活文本)**已退役**, 恒为 ""(仅为兼容调用方签名; 寄存器改由编译器自动紧凑)。
 
     pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
                (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
@@ -625,46 +579,6 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     report["engine"] = [e["name"] for e in eng]
     report["regs"] = regs
 
-    # 保活: 引擎资源 + 新材质贴图 + 新材质参数
-    items = [{"kind": e["kind"], "name": e["name"], "reg": regs[e["name"]], "entry": e}
-             for e in eng if e["kind"] != "sampler"]
-    # ★ 基座(该 pass 的引擎依赖)**也必须保活**: 否则 d3dcompiler 会剔除"声明但当前未被引用"
-    #   的 cbuffer ⇒ 寄存器出现**空洞**(例: SceneInfo(b0)/GBufferType(b1)/**UserMaterial(b3)**,
-    #   空洞 b2 —— 因 `o.o0` 恒为 0 时 `Tonemap`/`WhitePtSrv` 被折叠剔除)。
-    #   机制与 SRV"从 t0 起连续"同理: 引擎按"从 b0 起的连续块"给材质 cbuffer/资源定位,
-    #   空洞会让 UserMaterial 绑到错槽 ⇒ DX11 读到 0(黑) / DX12 读到堆残留(随视角乱闪)。
-    #   ⇒ 与 SRV 一致: 基座 cbuffer **全部保活**, 令 b0.. 构成连续段。
-    #   (纹理不做此处理 —— 纹理块另有"t0 起连续"的前缀逻辑, 且实例风格会把结构化缓冲放 t0,
-    #    强行保活 byte 纹理 WhitePtSrv@t0 会与之重叠报 X4500。)
-    _have = {it["name"] for it in items}
-    for _c in iface["cbuffers"]:
-        if _c["name"] not in _have:
-            items.append({"kind": "cbuffer", "name": _c["name"], "entry": _c})
-            _have.add(_c["name"])
-    tmap = {t["name"]: t for t in iface["textures"]}
-    for nm in textures:
-        items.append({"kind": "texture", "name": nm,
-                      "entry": tmap.get(nm)})
-    for nm, ty in params:
-        items.append({"kind": "param", "name": nm, "type": ty})
-
-    # 贴图寄存器布局: 材质贴图 SRV 必须"从 t0 起、连续、无缺口"(2026-09-28 实测;
-    #   100% 原版 Deferred PS 如此; 缺口在 DX12 会 GPU 崩 0x887a0006)。⇒ 只要材质用到任一贴图
-    #   (标准/自定义/引擎), 就把 t0..最高用到的寄存器 之间的贴图**全部保活**, 令 RDEF 的纹理
-    #   寄存器构成"从 t0 起的连续段"(WhitePtSrv@t0 恒保留)。
-    have = {it["name"] for it in items}
-    used = set(textures)                       # 自定义 `//! tex`
-    for t in iface["textures"]:                # 源码直接引用 / 已保活的贴图
-        if t["name"] in have or re.search(
-                r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(t["name"]),
-                material_src or ""):
-            used.add(t["name"])
-    regs_used = [_num(t["reg"]) for t in iface["textures"] if t["name"] in used]
-    tmax = max(regs_used) if regs_used else -1
-    for t in sorted(iface["textures"], key=lambda x: _num(x["reg"])):
-        if _num(t["reg"]) <= tmax and t["name"] not in have:
-            items.append({"kind": "texture", "name": t["name"], "entry": t})
-            have.add(t["name"])
-
-    ka = keepalive_hlsl(items)
-    return iface, ka, report
+    # 保活已退役(2026-09-30): 寄存器改由 d3dcompiler“自动紧凑”分配(寄存器号 ≡ RDEF 位置,
+    #   结构上无空洞), 无需再靠死分支引用维持 RDEF。
+    return iface, "", report
