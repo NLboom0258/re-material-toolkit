@@ -265,22 +265,30 @@ def find(name):
     return None
 
 
-def default_iface():
-    """默认(空材质)接口基座 = 固有输入(**单一真源**): 名字取自 `inputs.json` 的 `std`,
-    定义/成员取自标准接口 `iface.json`。
+def base_iface_for_pass(pass_name="main"):
+    """该 pass 的基座接口 = **它声明的引擎资源依赖**(自动分配寄存器)。
 
-    GUI 与生成器**都必须**用它, 避免"两条路径基座不一致"导致的重复声明 / 寄存器错配。
+    依赖来自 `presets/<ver>/passes.json`; 依赖的资源 -> 被系统自动添加(引擎资源被依赖
+    ⇒ 锁定/不可删)。**固有输入已取消** —— 不再写死基座, SceneInfo 等已归引擎资源。
+    GUI 与生成器**都必须**用它, 避免"两条路径基座不一致"。
     """
-    full = P.std_iface() or {"cbuffers": [], "textures": [], "samplers": []}
-    s = load()["std"]
-    kb = {e["name"] for e in s if e["kind"] == "cbuffer"}
-    kt = {e["name"] for e in s if e["kind"] == "texture"}
-    ks = {e["name"] for e in s if e["kind"] == "sampler"}
-    return {
-        "cbuffers": [c for c in full.get("cbuffers", []) if c["name"] in kb],
-        "textures": [t for t in full.get("textures", []) if t["name"] in kt],
-        "samplers": [x for x in full.get("samplers", []) if x["name"] in ks],
-    }
+    deps = (P.passes().get("passes", {}).get(pass_name, {}) or {}).get("depends") or []
+    iface = {"cbuffers": [], "textures": [], "samplers": []}
+    sel, seen = [], set()
+    for nm in deps:
+        e = find(nm)
+        if e and nm not in seen:
+            seen.add(nm)
+            sel.append(e)
+    regs = assign_regs(sel, iface)
+    for e in sel:
+        _add_engine(iface, e, regs[e["name"]])
+    return iface
+
+
+def default_iface():
+    """(兼容别名) 主 pass 的基座接口。"""
+    return base_iface_for_pass("main")
 
 
 def catalog_text():
@@ -446,20 +454,26 @@ def _code_only(material_src):
                      if not l.lstrip().startswith("//!"))
 
 
-# 插值输入(非资源; 由各 pass 模板声明; 仅供界面展示/依赖校验)。名 -> 用途说明。
-INTERP_INPUTS = {
-    "main": [("INTERPOLATOR0", "法线 xyz + UV0.x"),
-             ("INTERPOLATOR1", "UV0.y + UV1 + 切线.x"),
-             ("INTERPOLATOR2", "切线.yz + bitangent 符号 + 世界坐标.x"),
-             ("INTERPOLATOR3", "世界坐标.yz"),
-             ("INTERPOLATOR4", "速度项")],
-    "depth": [("INTERPOLATOR0", "UV0(仅当深度源用到 uv0 时声明)")],
+# 插值输入的用途说明(供界面展示; 非资源)。
+INTERP_DESC = {
+    "INTERPOLATOR0": "法线 xyz / UV0.x / 深度: UV0 等(见模板)",
+    "INTERPOLATOR1": "UV0.y / UV1 / 切线.x",
+    "INTERPOLATOR2": "切线.yz / bitangent 符号 / 世界坐标.x",
+    "INTERPOLATOR3": "世界坐标.yz",
+    "INTERPOLATOR4": "速度项",
 }
 
 
 def interp_inputs(pass_name="main"):
-    """该 pass 模板的插值输入列表 [(名, 用途)]。非资源, 不进 RDEF/声明。"""
-    return list(INTERP_INPUTS.get(pass_name, []))
+    """该 pass **声明依赖的插值输入** [(名, 用途)]。非资源, 不进 RDEF/声明(元数据)。"""
+    p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
+    return [(n, INTERP_DESC.get(n, "")) for n in (p.get("interp") or [])]
+
+
+def pass_dep_names(pass_name="main"):
+    """该 pass **声明的引擎资源依赖**名列表(passes.json)。系统自动添加 + 锁定。"""
+    p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
+    return list(p.get("depends") or [])
 
 
 def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None):
@@ -468,7 +482,7 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
                (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
     other_code: 另一个 pass 的代码(仅主 pass 传); 无标签且两边都未引用 ⇒ 归本 pass(默认家)。
-    无任何声明时返回 (None, "", report)。
+    **始终**返回接口(模板已无写死 IFACE): 无 `//!` 声明时接口 = 基座(该 pass 的引擎依赖)。
     """
     from . import material_gen as MG
     from . import material_iface as MI
@@ -518,9 +532,7 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     report["lock"] = _si["lock"]
     report["minput"] = {"def": _si["def"], "build": _si["build"]}
 
-    # 无 `//!` 声明: 接口仍返回 None(让上层回退到模板 IFACE), 但**仍要**按
-    # "源码引用了哪些标准资源"生成 t0 前缀保活(否则单张/缺口会出错)。
-    bare = not params and not textures and not eng_names
+    # 注: **始终**返回接口(模板已无写死 IFACE); 无 `//!` 声明时接口 = 基座(该 pass 的引擎依赖)。
     known_p = {m["name"] for c in base_iface["cbuffers"] for m in c["members"]}
     known_t = {t["name"] for t in base_iface["textures"]}
     params = [(n, t) for (n, t) in params if n not in known_p]
@@ -581,4 +593,4 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
             have.add(t["name"])
 
     ka = keepalive_hlsl(items)
-    return (None if bare else iface), ka, report
+    return iface, ka, report

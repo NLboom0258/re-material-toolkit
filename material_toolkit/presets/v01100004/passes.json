@@ -1,0 +1,18 @@
+{
+  "format": "passes/1",
+  "_note": "自生 pass 注册表: 每个 pass 声明其函数/模板/依赖(引擎资源 + 插值)。系统按依赖自动添加输入: 引擎资源被依赖 ⇒ 自动添加 + 锁定(不可删); 插值被依赖 ⇒ 自动添加, 但不锁定(无任何项依赖时自动去除)。人工维护。",
+  "passes": {
+    "main": {
+      "fn": "MaterialMain",
+      "template": "deferred_std",
+      "depends": ["SceneInfo", "GBufferType", "Tonemap", "WhitePtSrv"],
+      "interp": ["INTERPOLATOR0", "INTERPOLATOR1", "INTERPOLATOR2", "INTERPOLATOR3", "INTERPOLATOR4"]
+    },
+    "depth": {
+      "fn": "MaterialDepth",
+      "template": "deferred_depth",
+      "depends": [],
+      "interp": ["INTERPOLATOR0"]
+    }
+  }
+}

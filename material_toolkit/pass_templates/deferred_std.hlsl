@@ -10,48 +10,7 @@
 // ============================================================================
 
 //__IFACE_BEGIN__
-cbuffer SceneInfo : register(b0)
-{
-    row_major float4x4 viewProjMat;
-    row_major float3x4 transposeViewMat;
-    row_major float3x4 transposeViewInvMat;
-    float4 projElement[2];
-    float4 projInvElements[2];
-    row_major float4x4 viewProjInvMat;
-    row_major float4x4 prevViewProjMat;
-    float3 ZToLinear;
-    float  subdivisionLevel;
-    float2 screenSize;
-    float2 screenInverseSize;
-    float2 cullingHelper;
-    float  cameraNearPlane;
-    float  cameraFarPlane;
-    float4 viewFrustum[6];
-    float4 clipplane;
-};
-
-cbuffer GBufferType : register(b1)
-{
-    float  gbufferTypeFlag;
-    float  gbufferTypeReserve0;
-    float  gbufferTypeReserve1;
-    float  gbufferTypeReserve2;
-};
-
-cbuffer Tonemap : register(b2)
-{
-    float exposureAdjustment;
-    float tonemapRange;
-    float sharpness;
-    float preTonemapRange;
-    int   useAutoExposure;
-    float echoBlend;
-    float AABlend;
-    float AASubPixel;
-    float ResponsiveAARate;
-};
-
-ByteAddressBuffer WhitePtSrv : register(t0);
+// (占位; 该 pass 的引擎资源依赖由**依赖系统**注入 —— 见 presets/<ver>/passes.json)
 //__IFACE_END__
 
 // ---- 输入签名(寄存器 0..5) ----

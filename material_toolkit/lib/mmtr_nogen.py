@@ -214,7 +214,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     mp_src = _strip_hlsl_fn(material_src, "MaterialDepth")
     d_src = _strip_hlsl_fn(material_src, "MaterialMain")
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
-    base = iface if iface is not None else INP.default_iface()
+    base = iface if iface is not None else INP.base_iface_for_pass("main")
     iface, ka, _rep = INP.build_iface_and_keepalive(
         mp_src, base, pass_name="main", other_code=INP._code_only(d_src))
     if iface is None:
@@ -243,11 +243,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
     # 1c) 深度族 PS: **恒组装** —— MaterialDepth(必需) -> deferred_depth 模板(剥掉 MaterialMain)。
-    #     基座 = **空**(其他 pass 目前按自定义模式标准: 无固有输入) ⇒ 不再夹带 WhitePtSrv;
-    #     声明/接口按 depth 过滤; 保活为空(深度无颜色输出, 用不了主 pass 的 o0 保活语句)。
-    _empty = {"cbuffers": [], "textures": [], "samplers": []}
-    iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(d_src, _empty,
-                                                           pass_name="depth")
+    # 基座 = **空**(depth 未声明引擎资源依赖); 声明/接口按 depth 过滤; 保活为空
+    #     (深度无颜色输出, 用不了主 pass 的 o0 保活语句)。
+    iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(
+        d_src, INP.base_iface_for_pass("depth"), pass_name="depth")
     ps_depth = depth_hook_ps(d_src, iface_d, None)
 
     # 2) 逐槽解析程序

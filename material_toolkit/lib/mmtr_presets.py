@@ -70,6 +70,19 @@ def iface_path():
     return os.path.join(_DIR, "iface.json")
 
 
+def passes_path():
+    return os.path.join(_DIR, "passes.json")
+
+
+def passes():
+    """自生 pass 注册表(passes.json): {pass名: {fn/template/depends/interp}}。无文件返回 {}。"""
+    p = passes_path()
+    if not os.path.exists(p):
+        return {}
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def ps_meta_paths():
     """参考 Deferred PS 的元数据块文件(RDEF/ISGN/OSGN), 供"元数据嫁接"。"""
     return tuple(os.path.join(_DIR, "ps_meta.%s" % k) for k in ("rdef", "isgn", "osgn"))

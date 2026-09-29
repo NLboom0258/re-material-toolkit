@@ -8,8 +8,7 @@
 // ============================================================================
 
 //__IFACE_BEGIN__
-// (占位; nogen 传 iface 时会被 material_iface(style="instance") 替换)
-cbuffer SceneInfo : register(b0) { float4x4 viewProjMat; };
+// (占位; 该 pass 的引擎资源依赖由**依赖系统**注入 —— 见 presets/<ver>/passes.json)
 //__IFACE_END__
 
 // ---- 输入签名(寄存器 0..6) ----

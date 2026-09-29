@@ -2614,22 +2614,25 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setText("配置合法")
             self.lbl_status.setStyleSheet("color:#1a7f37")
 
-    def _base_iface(self):
-        """材质接口基座 = 固有输入(**单一真源**: `minp.default_iface()`)。
-        GUI 与生成器共用, 避免两条路径基座不一致(重复声明/寄存器错配)。
+    def _base_iface(self, pass_name="main"):
+        """该 pass 的基座接口 = 它声明的引擎资源依赖(**单一真源**: `minp.base_iface_for_pass`)。
+
+        GUI 与生成器共用, 避免两条路径基座不一致(重复声明/寄存器错配)。按 pass 缓存。
         """
         if not hasattr(self, "_iface_min"):
-            self._iface_min = minp.default_iface()
-        return self._iface_min
+            self._iface_min = {}
+        if pass_name not in self._iface_min:
+            self._iface_min[pass_name] = minp.base_iface_for_pass(pass_name)
+        return self._iface_min[pass_name]
 
     def _effective_inputs(self, pass_name="main"):
-        """基础接口 + 自定义输入(**按 pass 过滤**); 返回 (iface, keepalive, minput)。"""
+        """基座(该 pass 的引擎依赖) + 自定义输入(**按 pass 过滤**); 返回 (iface, keepalive, minput)。"""
         src = self.ed_src.toPlainText()
         if pass_name == "main":
-            own, other, base = "MaterialDepth", "MaterialMain", self._base_iface()
+            own, other = "MaterialDepth", "MaterialMain"
         else:
             own, other = "MaterialMain", "MaterialDepth"
-            base = {"cbuffers": [], "textures": [], "samplers": []}
+        base = self._base_iface(pass_name)
         p_src = nogen._strip_hlsl_fn(src, own)
         o_code = (minp._code_only(nogen._strip_hlsl_fn(src, other))
                   if pass_name == "main" else None)
@@ -2695,10 +2698,15 @@ class MaterialSystemPanel(QWidget):
         for n in self._engine:
             self._tags[("engine", n)] = tags.get(n)
 
-    def _locked_names(self):
-        """被锁定(禁止删除)的引擎资源名 -> [来源...]: 预设依赖 + 参数所需 UserMaterial。"""
-        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface()))
+    def _locked_names(self, pass_name="main"):
+        """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。"""
+        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
+        _pt = "深度 pass" if pass_name == "depth" else "主 pass"
+        for nm in minp.pass_dep_names(pass_name):
+            lock.setdefault(nm, [])
+            if _pt not in lock[nm]:
+                lock[nm].append(_pt)
         if self._params:
             lock.setdefault("UserMaterial", [])
             if "材质参数" not in lock["UserMaterial"]:
@@ -2786,8 +2794,8 @@ class MaterialSystemPanel(QWidget):
         """刷新两个 pass 的输入树(每 pass 独立: 该 pass 的固有输入 + 归属该 pass 的自定义输入)。"""
         self._load_decls_from_src()
         self.normalize_inputs()
-        self._fill_input_tree(self.tree_inputs, "main", self._base_iface())
-        self._fill_input_tree(self.tree_inputs_depth, "depth", None)
+        self._fill_input_tree(self.tree_inputs, "main")
+        self._fill_input_tree(self.tree_inputs_depth, "depth")
 
     def _pass_belongs(self, kind, name, pass_name):
         """声明是否归属该 pass: 显式 `@pass` 优先; 否则按引用; 两边都不引用 ⇒ 归主 pass。"""
@@ -2805,54 +2813,13 @@ class MaterialSystemPanel(QWidget):
             return _ref(this) or not _ref(other)
         return _ref(minp._code_only(nogen._strip_hlsl_fn(src, "MaterialMain")))
 
-    def _fill_input_tree(self, tree, pass_name, own_base):
+    def _fill_input_tree(self, tree, pass_name):
         tree.clear()
-        # 1) 固有输入(该 pass 的基座; 其他 pass 目前按自定义模式标准: 无)
-        iface = own_base or {}
-        if any(iface.get(c + "s") for c in ("cbuffer", "texture", "sampler")):
-            src_of = {e["name"]: e.get("source", "") for e in minp.std()}
-            for gkey, gtitle, gdesc in (
-                    ("engine", "固有输入 (引擎, 只读)", "引擎提供值; 材质无需声明"),
-                    ("material", "标准材质槽 (可选, 由 mdf2 提供)",
-                     "引擎固定槽位(t1/t2/t3/b3); 材质用到才生效")):
-                sub = {c: [x for x in iface[c + "s"]
-                           if src_of.get(x["name"], "") == gkey]
-                       for c in ("cbuffer", "texture", "sampler")}
-                if not any(sub.values()):
-                    continue
-                top = QTreeWidgetItem([gtitle, "", gdesc])
-                tree.addTopLevelItem(top)
-                grp = {}
-                for cat in ("cbuffer", "texture", "sampler"):
-                    g = QTreeWidgetItem(["%s (%d)" % (cat, len(sub[cat])), "", ""])
-                    top.addChild(g)
-                    grp[cat] = g
-                for cb in sub["cbuffer"]:
-                    it = QTreeWidgetItem([cb["name"], cb["reg"],
-                                          minp.desc_of(cb["name"])])
-                    it.setToolTip(2, "%s · %d 成员"
-                                  % (src_of.get(cb["name"], ""), len(cb["members"])))
-                    grp["cbuffer"].addChild(it)
-                    for m in cb["members"]:
-                        cm = QTreeWidgetItem([m["name"], m["type"],
-                                              minp.member_desc(cb["name"], m["name"])])
-                        cm.setData(0, Qt.UserRole, ("copy", m["name"]))
-                        it.addChild(cm)
-                for t in sub["texture"]:
-                    ti = QTreeWidgetItem([t["name"], t["fmt"],
-                                          "%s · %s" % (src_of.get(t["name"], ""), t["reg"])])
-                    ti.setData(0, Qt.UserRole, ("copy", t["name"]))
-                    grp["texture"].addChild(ti)
-                for s in sub["sampler"]:
-                    si = QTreeWidgetItem([s["name"], "",
-                                          "%s · %s" % (src_of.get(s["name"], ""), s["reg"])])
-                    si.setData(0, Qt.UserRole, ("copy", s["name"]))
-                    grp["sampler"].addChild(si)
-        # 1b) 插值输入(非资源; 由 pass 模板声明; 只读展示)
+        # 1) 插值输入(pass 依赖; 非资源; 只读展示)
         _interps = minp.interp_inputs(pass_name)
         if _interps:
-            itop = QTreeWidgetItem(["插值输入 (模板声明, 只读)", "",
-                                    "由 pass 模板声明; 语义输入可依赖它们(自动添加+锁定)"])
+            itop = QTreeWidgetItem(["插值输入 (pass 依赖, 只读)", "",
+                                    "由 pass 声明依赖; 系统自动添加, 不锁定(无依赖自动去除)"])
             tree.addTopLevelItem(itop)
             for _n, _d in _interps:
                 ti = QTreeWidgetItem([_n, "", _d])
@@ -2864,7 +2831,11 @@ class MaterialSystemPanel(QWidget):
                   if self._pass_belongs("param", n, pass_name)]
         textures = [n for n in self._textures if self._pass_belongs("tex", n, pass_name)]
         engine = [n for n in self._engine if self._pass_belongs("engine", n, pass_name)]
-        lock = self._locked_names()
+        # pass 依赖的引擎资源: 系统自动添加 + 锁定(不出现在材质源)
+        for nm in minp.pass_dep_names(pass_name):
+            if nm != "UserMaterial" and nm not in engine:
+                engine.append(nm)
+        lock = self._locked_names(pass_name)
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
