@@ -2637,7 +2637,8 @@ class MaterialSystemPanel(QWidget):
         o_code = (minp._code_only(nogen._strip_hlsl_fn(src, other))
                   if pass_name == "main" else None)
         iface, ka, rep = minp.build_iface_and_keepalive(
-            p_src, base, pass_name=pass_name, other_code=o_code)
+            p_src, base, pass_name=pass_name, other_code=o_code,
+            all_params=minp.all_params(src))
         if iface is None:
             iface = base
         return iface, ka, (rep or {}).get("minput")
@@ -2707,7 +2708,7 @@ class MaterialSystemPanel(QWidget):
             lock.setdefault(nm, [])
             if _pt not in lock[nm]:
                 lock[nm].append(_pt)
-        if self._params:
+        if any(self._pass_belongs("param", n, pass_name) for n, _t in self._params):
             lock.setdefault("UserMaterial", [])
             if "材质参数" not in lock["UserMaterial"]:
                 lock["UserMaterial"].append("材质参数")
@@ -2722,8 +2723,8 @@ class MaterialSystemPanel(QWidget):
         for nm in res["engine"]:
             if nm not in self._engine:
                 self._engine.append(nm)
-        if self._params and "UserMaterial" not in self._engine:
-            self._engine.append("UserMaterial")
+        # 注: UserMaterial **不写进源码** —— 由系统按 pass"有材质参数"自动供给 + 锁定
+        #     (成员表 = 各 pass 参数的**并集**; 多 pass 重复出现的算一个)。
         return res
 
     def _rewrite_decls(self):
@@ -2838,6 +2839,10 @@ class MaterialSystemPanel(QWidget):
         for nm in minp.pass_dep_names(pass_name):
             if nm != "UserMaterial" and nm not in engine:
                 engine.append(nm)
+        # 有材质参数的 pass: UserMaterial 由系统自动供给 + 锁定
+        if (any(self._pass_belongs("param", n, pass_name) for n, _t in self._params)
+                and "UserMaterial" not in engine):
+            engine.append("UserMaterial")
         lock = self._locked_names(pass_name)
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
@@ -2983,7 +2988,7 @@ class MaterialSystemPanel(QWidget):
             return
         cat, name = kind
         self._load_decls_from_src()
-        lock = self._locked_names()
+        lock = self._locked_names(self._cur_pass())
         if cat == "engine" and name in lock:
             QMessageBox.information(
                 self, "已锁定",

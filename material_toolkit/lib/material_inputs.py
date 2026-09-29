@@ -518,12 +518,29 @@ def pass_dep_names(pass_name="main"):
     return list(p.get("depends") or [])
 
 
-def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None):
+def all_params(material_src):
+    """全部材质参数 [(name,type)] (按序去重)。
+
+    UserMaterial 成员表是 **mmtr 级共享一套** ⇒ 必须是各 pass 参数的**并集**
+    (多 pass 重复出现的算一个), 以保证各 PS 的 UserMaterial 定义一致。
+    """
+    from . import material_gen as MG
+    out, seen = [], set()
+    for n, t in MG.parse_decls(material_src)[0]:
+        if n not in seen:
+            seen.add(n)
+            out.append((n, t))
+    return out
+
+
+def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None,
+                              all_params=None):
     """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, 保活HLSL, report)。
 
     pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
                (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
     other_code: 另一个 pass 的代码(仅主 pass 传); 无标签且两边都未引用 ⇒ 归本 pass(默认家)。
+    all_params: 全部材质参数 (name,type) —— UserMaterial 成员表用**并集**(全局共享一套)。
     **始终**返回接口(模板已无写死 IFACE): 无 `//!` 声明时接口 = 基座(该 pass 的引擎依赖)。
     """
     from . import material_gen as MG
@@ -581,7 +598,9 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     textures = [n for n in textures if n not in known_t]
     iface = copy.deepcopy(base_iface)
     if params or textures:
-        iface, added = MI.extend(iface, "UserMaterial", params, textures)
+        _cbp = [p for p in (all_params if all_params is not None else params)
+                if p[0] not in known_p]
+        iface, added = MI.extend(iface, "UserMaterial", _cbp, textures)
         report["params"] = [n for n, _ in params]
         report["textures"] = list(textures)
 

@@ -198,7 +198,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main")
     iface, ka, _rep = INP.build_iface_and_keepalive(
-        mp_src, base, pass_name="main", other_code=INP._code_only(d_src))
+        mp_src, base, pass_name="main", other_code=INP._code_only(d_src),
+        all_params=INP.all_params(material_src))
     if iface is None:
         iface = base
     minput = _rep.get("minput")
@@ -228,7 +229,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 基座 = **空**(depth 未声明引擎资源依赖); 声明/接口按 depth 过滤; 保活为空
     #     (深度无颜色输出, 用不了主 pass 的 o0 保活语句)。
     iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(
-        d_src, INP.base_iface_for_pass("depth"), pass_name="depth")
+        d_src, INP.base_iface_for_pass("depth"), pass_name="depth",
+        all_params=INP.all_params(material_src))
     ps_depth = depth_hook_ps(d_src, iface_d, None)
 
     # 2) 逐槽解析程序
