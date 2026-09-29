@@ -2459,7 +2459,11 @@ class MaterialSystemPanel(QWidget):
         self.ed_full = CodeEdit(indent=4)
         self.ed_full.setReadOnly(True)
         self._full_hl = HlslHighlighter(self.ed_full.document())
-        self.tabs.addTab(self.ed_full, "组装结果")
+        self.tabs.addTab(self.ed_full, "组装·主 pass")
+        self.ed_full_depth = CodeEdit(indent=4)
+        self.ed_full_depth.setReadOnly(True)
+        self._depth_hl = HlslHighlighter(self.ed_full_depth.document())
+        self.tabs.addTab(self.ed_full_depth, "组装·深度 pass")
         self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
@@ -2981,36 +2985,69 @@ class MaterialSystemPanel(QWidget):
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
         iface, ka, minput = self._effective_inputs()
+        src = self.asset.shading_source or None
+        has_d = nogen.has_depth_hook(src or "")
+        # ---- 主 pass(剥掉 MaterialDepth: 未调用函数里的资源引用会污染主 PS 的 RDEF) ----
+        m_src = nogen._strip_hlsl_fn(src or "", "MaterialDepth") if has_d else src
         try:
-            self.ed_full.setPlainText(mpass.build_source(self.asset.shading_source or None,
-                                                         tmpl, iface=iface, keepalive=ka,
-                                                         minput=minput))
+            self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
+                                                         keepalive=ka, minput=minput))
         except Exception as e:  # noqa: BLE001
             self.ed_full.setPlainText(";; 组装失败: %s" % e)
             self._src_hl.set_diagnostics([])
             self.lbl_status.setText("[组装失败] %s" % e)
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        dxbc, err = mpass.compile_shading(self.asset.shading_source or None, tmpl,
-                                          iface=iface, keepalive=ka, minput=minput)
-        if err:
-            diags = self._err_diags(err, tmpl)
+        m_dxbc, m_err = mpass.compile_shading(m_src, tmpl, iface=iface,
+                                              keepalive=ka, minput=minput)
+        # ---- 深度 pass(有 MaterialDepth 钩子才编; 剥掉 MaterialMain) ----
+        d_dxbc, d_err = None, None
+        if has_d:
+            d_src = nogen._strip_hlsl_fn(src or "", "MaterialMain")
+            try:
+                self.ed_full_depth.setPlainText(
+                    mpass.build_source(d_src, "deferred_depth", iface=iface,
+                                       keepalive="", minput=minput))
+            except Exception as e:  # noqa: BLE001
+                self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
+            d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface,
+                                                  keepalive="", minput=minput)
+        else:
+            self.ed_full_depth.setPlainText(
+                ";; 未定义 MaterialDepth 钩子 ⇒ 深度/阴影族用极简深度 PS\n"
+                ";; (ps_5_0 / dcl_globalFlags / ret, 输入仅 SV_POSITION, RDEF 零绑定)")
+        # ---- 报错(优先主 pass) ----
+        if m_err:
+            diags = self._err_diags(m_err, tmpl)
             self._src_hl.set_diagnostics(diags)
             self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
-            first = diags[0][3] if diags else (err.strip().splitlines()[0] if err.strip() else "?")
-            self.lbl_status.setText("[编译失败] %d 处%s: %s"
+            first = diags[0][3] if diags else (m_err.strip().splitlines()[0] if m_err.strip() else "?")
+            self.lbl_status.setText("[主 pass 编译失败] %d 处%s: %s"
                                     % (len(diags),
                                        ("(第%d行)" % diags[0][0]) if diags else "",
                                        first[:90]))
             self.lbl_status.setStyleSheet("color:#c0392b")
-            self.lbl_status.setToolTip(err[:4000])
+            self.lbl_status.setToolTip(m_err[:4000])
+            return
+        if d_err:
+            self._src_hl.set_diagnostics([])
+            self.tabs.setCurrentWidget(self.ed_full_depth)
+            first = d_err.strip().splitlines()[0] if d_err.strip() else "?"
+            self.lbl_status.setText("[深度 pass 编译失败] %s" % first[:90])
+            self.lbl_status.setStyleSheet("color:#c0392b")
+            self.lbl_status.setToolTip(d_err[:4000])
             return
         self._src_hl.set_diagnostics([])
         self.lbl_status.setToolTip("")
-        v = verify_dxbc(dxbc)
-        self.lbl_status.setText("编译 OK: %dB stage=%s disasm=%s strip=%s reflect=%s"
-                                % (len(dxbc), v["stage"], v["disasm_ok"],
-                                   v["strip_ok"], v["reflect_ok"]))
+        mv = verify_dxbc(m_dxbc)
+        msg = ("编译 OK: 主 %dB stage=%s disasm=%s strip=%s reflect=%s"
+               % (len(m_dxbc), mv["stage"], mv["disasm_ok"], mv["strip_ok"], mv["reflect_ok"]))
+        if d_dxbc is not None:
+            dv = verify_dxbc(d_dxbc)
+            msg += (" | 深度 %dB out=%s disasm=%s strip=%s reflect=%s"
+                    % (len(d_dxbc), "[]" if not dv.get("stage") else "",
+                       dv["disasm_ok"], dv["strip_ok"], dv["reflect_ok"]))
+        self.lbl_status.setText(msg)
         self.lbl_status.setStyleSheet("color:#1a7f37")
 
     def _generate(self):
