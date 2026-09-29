@@ -6,13 +6,21 @@
       "fn": "MaterialMain",
       "template": "deferred_std",
       "depends": ["SceneInfo", "GBufferType", "Tonemap", "WhitePtSrv"],
-      "interp": ["INTERPOLATOR0", "INTERPOLATOR1", "INTERPOLATOR2", "INTERPOLATOR3", "INTERPOLATOR4"]
+      "interp": [
+        {"name": "INTERPOLATOR0", "var": "v1", "mask": 4},
+        {"name": "INTERPOLATOR1", "var": "v2", "mask": 4},
+        {"name": "INTERPOLATOR2", "var": "v3", "mask": 4},
+        {"name": "INTERPOLATOR3", "var": "v4", "mask": 4},
+        {"name": "INTERPOLATOR4", "var": "v5", "mask": 1}
+      ]
     },
     "depth": {
       "fn": "MaterialDepth",
       "template": "deferred_depth",
       "depends": [],
-      "interp": ["INTERPOLATOR0"]
+      "interp": [
+        {"name": "INTERPOLATOR0", "var": "v1", "mask": 4, "when": "uv0"}
+      ]
     }
   }
 }

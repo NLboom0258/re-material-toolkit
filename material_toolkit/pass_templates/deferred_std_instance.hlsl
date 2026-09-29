@@ -12,14 +12,11 @@
 //__IFACE_END__
 
 // ---- 输入签名(寄存器 0..6) ----
+// 插值声明由**依赖系统**按 passes.json 生成(见下方标记行)。
 struct PSIn
 {
     float4 svpos : SV_Position;   // reg0
-    float4 v1    : INTERPOLATOR0; // reg1  xyz=法线, w=UV0.x
-    float4 v2    : INTERPOLATOR1; // reg2  x=UV0.y, yz=UV1, w=切线.x
-    float4 v3    : INTERPOLATOR2; // reg3  xy=切线.yz, z=bitangent 符号, w=世界坐标.x
-    float4 v4    : INTERPOLATOR3; // reg4  xy=世界坐标.yz
-    float  v5    : INTERPOLATOR4; // reg5  x=速度项(上一帧 w)(VS 仅输出 x ⇒ 声明标量)
+//__INTERP_DECL__
     nointerpolation float idx : NOINTERPOLATOR0; // reg6  材质实例索引
 };
 

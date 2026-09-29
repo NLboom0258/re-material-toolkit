@@ -11,12 +11,12 @@
 //__IFACE_END__
 
 // ---- 深度族输入(寄存器 0..2; 由深度族 VS 输出派生) ----
-// 注: `//__DEPTH_UV0_IN__` 等标记由生成器按"深度源是否用到 uv0"替换: 用到才声明
-//     INTERPOLATOR0(否则默认最小空实现在 ISGN 里不带多余插值)。
+// 注: 插值声明由**依赖系统**按 passes.json 生成(见下方标记行; 深度 uv0 条件化:
+//     用到了才声明 INTERPOLATOR0 ⇒ 默认最小空实现不带多余插值)。
 struct PSIn
 {
     float4 svpos : SV_Position;    // reg0  像素坐标
-    //__DEPTH_UV0_IN__
+//__INTERP_DECL__
 };
 
 // ---- 深度输入(供 MaterialDepth 使用) ----

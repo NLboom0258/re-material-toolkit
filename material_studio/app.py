@@ -2816,7 +2816,10 @@ class MaterialSystemPanel(QWidget):
     def _fill_input_tree(self, tree, pass_name):
         tree.clear()
         # 1) 插值输入(pass 依赖; 非资源; 只读展示)
-        _interps = minp.interp_inputs(pass_name)
+        _psrc = nogen._strip_hlsl_fn(
+            self.ed_src.toPlainText(),
+            "MaterialDepth" if pass_name == "main" else "MaterialMain")
+        _interps = minp.interp_inputs(pass_name, _psrc)
         if _interps:
             itop = QTreeWidgetItem(["插值输入 (pass 依赖, 只读)", "",
                                     "由 pass 声明依赖; 系统自动添加, 不锁定(无依赖自动去除)"])
@@ -3109,15 +3112,14 @@ class MaterialSystemPanel(QWidget):
         # ---- 深度 pass(恒组装; 剥掉 MaterialMain) ----
         d_src, d_map = nogen.strip_line_map(src, "MaterialMain")
         iface_d, _, _ = self._effective_inputs("depth")
-        _dsubs = nogen.depth_subs(d_src)
         try:
             self.ed_full_depth.setPlainText(
                 mpass.build_source(d_src, "deferred_depth", iface=iface_d,
-                                   keepalive="", minput=None, subs=_dsubs))
+                                   keepalive="", minput=None))
         except Exception as e:  # noqa: BLE001
             self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
         d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface_d,
-                                              keepalive="", minput=None, subs=_dsubs)
+                                              keepalive="", minput=None)
         # ---- 报错(优先主 pass) ----
         if m_err:
             diags = self._err_diags(m_err, tmpl, m_map)

@@ -464,10 +464,52 @@ INTERP_DESC = {
 }
 
 
-def interp_inputs(pass_name="main"):
-    """该 pass **声明依赖的插值输入** [(名, 用途)]。非资源, 不进 RDEF/声明(元数据)。"""
+def interp_inputs(pass_name="main", material_src=None):
+    """该 pass 声明依赖的插值输入 [(名, 用途)]; 带条件(`when`)的按是否满足过滤。非资源。"""
+    out = []
+    for s in interp_specs(pass_name):
+        if s.get("when") == "uv0" and not _RE_UV0.search(_code_only(material_src)):
+            continue
+        out.append((s["name"], INTERP_DESC.get(s["name"], "")))
+    return out
+
+
+# 插值掩码 -> HLSL 类型(4->float4 ... 1->float)
+_MASK_TYPE = {1: "float", 2: "float2", 3: "float3", 4: "float4"}
+_RE_UV0 = re.compile(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])")
+
+
+def interp_specs(pass_name="main"):
+    """该 pass 的插值声明规格 [{name,var,mask,when?}](来自 passes.json)。"""
     p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
-    return [(n, INTERP_DESC.get(n, "")) for n in (p.get("interp") or [])]
+    out = []
+    for it in (p.get("interp") or []):
+        out.append(it if isinstance(it, dict) else {"name": it, "var": None, "mask": 4})
+    return out
+
+
+def interp_decls(pass_name="main", material_src=None):
+    """生成该 pass 的 `PSIn` 插值声明行(缩进 4; 按 `when` 条件过滤)。供模板注入(真驱动)。"""
+    code = _code_only(material_src)
+    lines = []
+    for s in interp_specs(pass_name):
+        if s.get("when") == "uv0" and not _RE_UV0.search(code):
+            continue
+        lines.append("    %s %s : %s;" % (_MASK_TYPE.get(s.get("mask", 4), "float4"),
+                                          s.get("var"), s.get("name")))
+    return "\n".join(lines)
+
+
+def interp_has(pass_name, name, material_src=None):
+    """该 pass 是否(按当前材质源)声明某插值输入。"""
+    code = _code_only(material_src)
+    for s in interp_specs(pass_name):
+        if s.get("name") != name:
+            continue
+        if s.get("when") == "uv0" and not _RE_UV0.search(code):
+            return False
+        return True
+    return False
 
 
 def pass_dep_names(pass_name="main"):

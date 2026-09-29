@@ -100,33 +100,15 @@ def has_depth_hook(material_src):
     return bool(_DEPTH_HOOK_RE.search(material_src or ""))
 
 
-def depth_subs(material_src):
-    """深度模板的插值替换表(`//__DEPTH_UV0_*__`): 按深度源是否用到 `uv0` 决定是否声明。
-
-    供 GUI 预览/编译与 `depth_hook_ps` **共用**(避免两条路径不一致)。
-    """
-    _code = "\n".join(l for l in (material_src or "").splitlines()
-                      if not l.lstrip().startswith("//!"))
-    use_uv0 = re.search(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])", _code) is not None
-    return {
-        "//__DEPTH_UV0_IN__": ("float4 v1 : INTERPOLATOR0;  // reg1  xy=UV0"
-                               if use_uv0 else ""),
-        "//__DEPTH_UV0_DI__": ("float2 uv0;" if use_uv0 else ""),
-        "//__DEPTH_UV0_BUILD__": ("di.uv0 = i.v1.xy;" if use_uv0 else ""),
-    }
-
-
 def depth_hook_ps(material_src, iface, minput):
     """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
     保活传空串(深度 PS 只 discard、无颜色输出, 不能用主 pass 的 o.o0 保活语句);
     效果的资源绑定由钩子自身的引用决定。
-    插值: **按深度源是否用到 `uv0` 自动决定**是否声明 `INTERPOLATOR0`
-    (默认 no-op 不声明 ⇒ 默认深度 PS 与极简同构; 显式 `//! interp` 配置待后续)。
+    插值声明由 `material_pass.build_source` 按 passes.json 注入(uv0 条件化)。
     """
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
-                                 keepalive="", minput=minput,
-                                 subs=depth_subs(material_src))
+                                 keepalive="", minput=minput)
     if err:
         raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
     return ps

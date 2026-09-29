@@ -14,6 +14,10 @@ KEEPALIVE = "//__KEEPALIVE__"
 # 预设(语义)输入动态生成的两块: 结构定义(文件域) + main 内构造代码
 MINPUT_DEF = "//__MINPUT_DEF__"
 MINPUT_BUILD = "//__MINPUT_BUILD__"
+# 插值声明(真驱动): 由 passes.json 生成(主 pass 全量; 深度 uv0 条件化)。
+INTERP_DECL = "//__INTERP_DECL__"
+DEPTH_UV0_DI = "//__DEPTH_UV0_DI__"
+DEPTH_UV0_BUILD = "//__DEPTH_UV0_BUILD__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
 
@@ -59,6 +63,17 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     if subs:
         for k, v in subs.items():
             tpl = tpl.replace(k, v)
+    # 插值声明(真驱动): 未显式提供时, 按 passes.json 生成该 pass 的声明(深度 uv0 条件化)。
+    if INTERP_DECL in tpl:
+        from . import material_inputs as _INP
+        _pn = "depth" if "depth" in template else "main"
+        tpl = tpl.replace(INTERP_DECL, _INP.interp_decls(_pn, material_src))
+        _uv0 = (_INP.interp_has("depth", "INTERPOLATOR0", material_src)
+                if _pn == "depth" else True)
+        if DEPTH_UV0_DI in tpl:
+            tpl = tpl.replace(DEPTH_UV0_DI, "float2 uv0;" if _uv0 else "")
+        if DEPTH_UV0_BUILD in tpl:
+            tpl = tpl.replace(DEPTH_UV0_BUILD, "di.uv0 = i.v1.xy;" if _uv0 else "")
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
     if iface is not None:
