@@ -417,9 +417,40 @@ def parse_engine_decls(material_src):
     return out
 
 
-def build_iface_and_keepalive(material_src, base_iface):
+# ---- per-pass 声明归属 ----
+_DECL_RE = re.compile(r"^\s*//!\s*(\w+)\s+(.+?)\s*$")
+_PASS_TAG_RE = re.compile(r"@([A-Za-z_]\w*)\s*$")
+
+
+def _decl_name_tags(material_src):
+    """从 `//!` 声明行解析 {资源名: 显式 `@pass` 标签或 None}。"""
+    out = {}
+    for line in (material_src or "").splitlines():
+        m = _DECL_RE.match(line)
+        if not m:
+            continue
+        rest = m.group(2)
+        tm = _PASS_TAG_RE.search(rest)
+        tag = tm.group(1) if tm else None
+        if tm:
+            rest = rest[:tm.start()].strip()
+        parts = rest.split()
+        if parts:                       # param: <type> <name>; 其余: <name> ⇒ 取末token
+            out[parts[-1]] = tag
+    return out
+
+
+def _code_only(material_src):
+    """去掉 `//!` 声明行后的代码(供"按引用归属"判定; 声明行本身不算引用)。"""
+    return "\n".join(l for l in (material_src or "").splitlines()
+                     if not l.lstrip().startswith("//!"))
+
+
+def build_iface_and_keepalive(material_src, base_iface, pass_name=None):
     """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, 保活HLSL, report)。
 
+    pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
+               (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
     无任何声明时返回 (None, "", report)。
     """
     from . import material_gen as MG
@@ -435,10 +466,29 @@ def build_iface_and_keepalive(material_src, base_iface):
                       "textures": [],
                       "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
 
+    # pass 归属(per-pass 输入)
+    if pass_name is None:
+        def _belongs(_nm):
+            return True
+    else:
+        _tags = _decl_name_tags(material_src)
+        _code = _code_only(material_src)
+
+        def _belongs(nm):
+            tg = _tags.get(nm)
+            if tg:
+                return tg == pass_name
+            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(nm),
+                             _code) is not None
+    params = [(n, t) for (n, t) in params if _belongs(n)]
+    textures = [n for n in textures if _belongs(n)]
+    eng_names = [n for n in eng_names if _belongs(n)]
+
     # 预设(语义)输入: 解析 `//! preset` -> 依赖的引擎资源(并入 eng_names, 走同一"声明即保活"
     #   路径) + 动态生成 MaterialInput 定义/构造文本(供 build_source 注入)。
     from . import semantic_inputs as SI
-    _si = SI.minput_from_src(material_src, _iface_names(base_iface))
+    _presets = [n for n in SI.parse_preset_decls(material_src) if _belongs(n)]
+    _si = SI.resolve(_presets, _iface_names(base_iface))
     eng_names = list(eng_names) + list(_si["engine"])
     report["presets"] = _si["presets"]
     report["preset_unknown"] = _si["unknown"]

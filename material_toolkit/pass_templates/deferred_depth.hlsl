@@ -11,17 +11,19 @@
 //__IFACE_END__
 
 // ---- 深度族输入(寄存器 0..2; 由深度族 VS 输出派生) ----
+// 注: `//__DEPTH_UV0_IN__` 等标记由生成器按"深度源是否用到 uv0"替换: 用到才声明
+//     INTERPOLATOR0(否则默认最小空实现在 ISGN 里不带多余插值)。
 struct PSIn
 {
     float4 svpos : SV_Position;    // reg0  像素坐标
-    float4 v1    : INTERPOLATOR0;  // reg1  xy=UV0
+    //__DEPTH_UV0_IN__
 };
 
 // ---- 深度输入(供 MaterialDepth 使用) ----
 struct DepthInput
 {
     float4 svpos;
-    float2 uv0;
+    //__DEPTH_UV0_DI__
 };
 
 // ---- 材质主 pass 输入/输出(材质源可能同时含 MaterialMain; 缺省不使用) ----
@@ -44,7 +46,7 @@ void main(PSIn i)
 {
     DepthInput di;
     di.svpos = i.svpos;
-    di.uv0 = i.v1.xy;
+    //__DEPTH_UV0_BUILD__
     bool discardPixel = false;
     MaterialDepth(di, discardPixel);
     //__KEEPALIVE__

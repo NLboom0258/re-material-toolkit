@@ -43,7 +43,7 @@ def material_line_offset(template="deferred_env"):
 
 
 def build_source(material_src=None, template="deferred_env", iface=None,
-                 style="cbuffer", keepalive=None, minput=None):
+                 style="cbuffer", keepalive=None, minput=None, subs=None):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
@@ -53,8 +53,12 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     minput: {"def":..., "build":...} 预设(语义)输入动态生成的 MaterialInput 定义/构造;
                None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
     style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
+    subs: 额外标记替换 {标记: 文本}(如深度模板的 `//__DEPTH_UV0_*__`, 按需声明插值)。
     """
     tpl = _read(template + ".hlsl")
+    if subs:
+        for k, v in subs.items():
+            tpl = tpl.replace(k, v)
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
     if iface is not None:
@@ -77,7 +81,7 @@ def build_source(material_src=None, template="deferred_env", iface=None,
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None, minput=None, graft=False):
+                    keepalive=None, minput=None, graft=False, subs=None):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
 
     注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
@@ -86,7 +90,7 @@ def compile_shading(material_src=None, template="deferred_env",
     **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
     """
     dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style,
-                                            keepalive, minput),
+                                            keepalive, minput, subs),
                                entry, target, name="%s.hlsl" % template)
     if err or not graft:
         return dxbc, err

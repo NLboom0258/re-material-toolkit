@@ -101,13 +101,24 @@ def has_depth_hook(material_src):
 
 
 def depth_hook_ps(material_src, iface, minput):
-    """编译深度族 PS(deferred_depth 模板 + MaterialDepth 钩子)。
+    """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
     保活传空串(深度 PS 只 discard、无颜色输出, 不能用主 pass 的 o.o0 保活语句);
     效果的资源绑定由钩子自身的引用决定。
+    插值: **按深度源是否用到 `uv0` 自动决定**是否声明 `INTERPOLATOR0`
+    (默认 no-op 不声明 ⇒ 默认深度 PS 与极简同构; 显式 `//! interp` 配置待后续)。
     """
+    _code = "\n".join(l for l in (material_src or "").splitlines()
+                      if not l.lstrip().startswith("//!"))
+    use_uv0 = re.search(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])", _code) is not None
+    subs = {
+        "//__DEPTH_UV0_IN__": ("float4 v1 : INTERPOLATOR0;  // reg1  xy=UV0"
+                               if use_uv0 else ""),
+        "//__DEPTH_UV0_DI__": ("float2 uv0;" if use_uv0 else ""),
+        "//__DEPTH_UV0_BUILD__": ("di.uv0 = i.v1.xy;" if use_uv0 else ""),
+    }
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
-                                 keepalive="", minput=minput)
+                                 keepalive="", minput=minput, subs=subs)
     if err:
         raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
     return ps
@@ -191,11 +202,14 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth; 之后新增 pass 同理)
     require_fn(material_src, "MaterialMain")
     require_fn(material_src, "MaterialDepth")
-    # 主/深度共享一份材质源 ⇒ 编译主 PS 时**剥掉 MaterialDepth**(未调用函数里的资源
-    # 引用既不被 DCE、也会影响保活), 否则 ATOS 等会污染进主 PS 的 RDEF。
+    # 每 pass 一份源(剥掉别的 pass 的函数: 未调用函数里的资源引用既不被 DCE、也会影响保活)。
     mp_src = _strip_hlsl_fn(material_src, "MaterialDepth")
-    iface, ka, _rep = INP.build_iface_and_keepalive(
-        mp_src, iface if iface is not None else INP.default_iface())
+    d_src = _strip_hlsl_fn(material_src, "MaterialMain")
+    # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
+    base = iface if iface is not None else INP.default_iface()
+    iface, ka, _rep = INP.build_iface_and_keepalive(mp_src, base, pass_name="main")
+    if iface is None:
+        iface = base
     minput = _rep.get("minput")
     ps_blob, err = MP.compile_shading(mp_src, template, iface=iface,
                                       keepalive=ka, minput=minput)
@@ -220,8 +234,12 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
     # 1c) 深度族 PS: **恒组装** —— MaterialDepth(必需) -> deferred_depth 模板(剥掉 MaterialMain)。
-    ps_depth = depth_hook_ps(_strip_hlsl_fn(material_src, "MaterialMain"),
-                             iface, minput)
+    #     基座 = **空**(其他 pass 目前按自定义模式标准: 无固有输入) ⇒ 不再夹带 WhitePtSrv;
+    #     声明/接口按 depth 过滤; 保活为空(深度无颜色输出, 用不了主 pass 的 o0 保活语句)。
+    _empty = {"cbuffers": [], "textures": [], "samplers": []}
+    iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(d_src, _empty,
+                                                           pass_name="depth")
+    ps_depth = depth_hook_ps(d_src, iface_d, None)
 
     # 2) 逐槽解析程序
     slots = []
