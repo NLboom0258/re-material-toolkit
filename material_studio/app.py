@@ -74,7 +74,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QGridLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
-    QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
+    QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTabBar, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -124,6 +124,38 @@ def attach_menu(tree, build_actions):
         menu.exec(tree.viewport().mapToGlobal(pos))
 
     tree.customContextMenuRequested.connect(handler)
+
+
+def _seg_go(stack, btns, k):
+    """切到堆叠 stack 的第 k 页, 并同步按钮选中态。"""
+    stack.setCurrentIndex(k)
+    for j, b in enumerate(btns):
+        b.setChecked(j == k)
+
+
+def _seg_switch(items):
+    """单页 + 顶部按钮组(分段)切换视图。items=[(标题, widget)] -> (容器, 按钮列表, 堆叠)。
+
+    用于"组装"页: 不再一 pass 一个顶层 Tab, 而是单页内按按钮切换各 pass。
+    """
+    box = QWidget()
+    v = QVBoxLayout(box)
+    v.setContentsMargins(0, 0, 0, 0)
+    bar = QHBoxLayout()
+    stack = QStackedWidget()
+    btns = []
+    for i, (title, wid) in enumerate(items):
+        stack.addWidget(wid)
+        b = QPushButton(title)
+        b.setCheckable(True)
+        b.clicked.connect(lambda _=False, k=i: _seg_go(stack, btns, k))
+        bar.addWidget(b)
+        btns.append(b)
+    bar.addStretch(1)
+    v.addLayout(bar)
+    v.addWidget(stack, 1)
+    _seg_go(stack, btns, 0)
+    return box, btns, stack
 
 
 def _copy_to_clipboard(text):
@@ -2377,17 +2409,6 @@ def _default_template(shading, lighting):
     return names[0] if names else None
 
 
-_DEPTH_HOOK_SKELETON = """// ---- 深度 pass 钩子: MaterialDepth ----
-// 存在该函数 = 定制深度/阴影族(自生深度 PS); 缺失 = 极简深度 PS(默认最小)。
-// 已自动加入声明: //! tex AlphaTranslucentOcclusionSSSMap + //! engine AutomaticWrap
-void MaterialDepth(DepthInput di, inout bool discardPixel)
-{
-    float a = AlphaTranslucentOcclusionSSSMap.Sample(AutomaticWrap, di.uv0).r;
-    discardPixel = (a < 0.5);   // 例: 镂空; 近距渐隐需 UserMaterial 的 dissolve 参数
-}
-"""
-
-
 class MaterialSystemPanel(QWidget):
     """材质系统页: 语义级“材质资产”编辑(选项 + 材质函数 HLSL) -> 生成 mmtr。
 
@@ -2449,14 +2470,6 @@ class MaterialSystemPanel(QWidget):
             btns2.addWidget(b)
         left.addLayout(btns2)
 
-        btns3 = QHBoxLayout()
-        b = QPushButton("＋ 深度钩子 (MaterialDepth)")
-        b.setToolTip("在材质源插入 MaterialDepth 默认空实现骨架"
-                     "(并自动补 ATOS/AutomaticWrap 声明); 默认空材质不含它")
-        b.clicked.connect(self._add_depth_hook)
-        btns3.addWidget(b)
-        left.addLayout(btns3)
-
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setWordWrap(True)
         left.addWidget(self.lbl_status)
@@ -2478,11 +2491,13 @@ class MaterialSystemPanel(QWidget):
         self.ed_full = CodeEdit(indent=4)
         self.ed_full.setReadOnly(True)
         self._full_hl = HlslHighlighter(self.ed_full.document())
-        self.tabs.addTab(self.ed_full, "组装·主 pass")
         self.ed_full_depth = CodeEdit(indent=4)
         self.ed_full_depth.setReadOnly(True)
         self._depth_hl = HlslHighlighter(self.ed_full_depth.document())
-        self.tabs.addTab(self.ed_full_depth, "组装·深度 pass")
+        # 组装页: 单页 + 顶部按钮组切换各 pass(不再一 pass 一 Tab)
+        self._asm_page, self._asm_btns, self._asm_stack = _seg_switch(
+            [("主 pass", self.ed_full), ("深度 pass", self.ed_full_depth)])
+        self.tabs.addTab(self._asm_page, "组装")
         self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
@@ -2965,35 +2980,6 @@ class MaterialSystemPanel(QWidget):
         self.asset.shading_source = src
         self.refresh_info()
 
-    def _add_depth_hook(self):
-        """插入 MaterialDepth 默认空实现骨架(并自动补 ATOS/AutomaticWrap 声明)。
-
-        默认材质源**不含** MaterialDepth(保持"最小空材质、产物逐字节不变"); 深度族
-        定制由用户**显式添加** —— 存在该函数 ⇒ 深度族用本钩子自生, 缺失 ⇒ 极简深度 PS。
-        """
-        self._load_decls_from_src()
-        if nogen.has_depth_hook(self.ed_src.toPlainText()):
-            self.tabs.setCurrentWidget(self.ed_full_depth)
-            QMessageBox.information(self, "已有深度钩子",
-                                    "材质源已包含 MaterialDepth 函数。\n"
-                                    "见「组装·深度 pass」Tab 与「编译校验」。")
-            return
-        added = []
-        if "AlphaTranslucentOcclusionSSSMap" not in self._textures:
-            self._textures.append("AlphaTranslucentOcclusionSSSMap")
-            added.append("//! tex AlphaTranslucentOcclusionSSSMap")
-        if "AutomaticWrap" not in self._engine:
-            self._engine.append("AutomaticWrap")
-            added.append("//! engine AutomaticWrap")
-        self._rewrite_decls()                      # 写回声明区(尚未含函数)
-        self.ed_src.setPlainText(self.ed_src.toPlainText().rstrip()
-                                 + "\n\n" + _DEPTH_HOOK_SKELETON)
-        self.refresh_info()
-        self.tabs.setCurrentIndex(0)               # 切到材质源看新函数
-        self.lbl_status.setText("已添加深度钩子骨架(可编辑); 已补声明: %s"
-                                % (", ".join(added) or "无"))
-        self.lbl_status.setStyleSheet("color:#1a7f37")
-
     def _new_asset(self):
         sh = self.cmb_shading.currentData()
         lt = self.cmb_light.currentData()
@@ -3038,12 +3024,25 @@ class MaterialSystemPanel(QWidget):
         self._ensure_inputs()
         self._sync_asset()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
+        src = self.asset.shading_source or ""
+        # ---- 必需函数校验(每个 pass 都必须提供; 缺则报错, 不静默回退默认) ----
+        if not src.strip():
+            self._src_hl.set_diagnostics([])
+            self.lbl_status.setText("[材质源为空] 请先「载入默认材质」或填写材质源")
+            self.lbl_status.setStyleSheet("color:#c0392b")
+            return
+        missing = [nm for nm in ("MaterialMain", "MaterialDepth")
+                   if nogen._hlsl_fn_span(src, nm) is None]
+        if missing:
+            self._src_hl.set_diagnostics([])
+            self.tabs.setCurrentIndex(0)
+            self.lbl_status.setText("[缺少必需函数] %s (每个 pass 都必须提供)"
+                                    % ", ".join("void %s(...)" % n for n in missing))
+            self.lbl_status.setStyleSheet("color:#c0392b")
+            return
         iface, ka, minput = self._effective_inputs()
-        src = self.asset.shading_source or None
-        has_d = nogen.has_depth_hook(src or "")
         # ---- 主 pass(剥掉 MaterialDepth: 未调用函数里的资源引用会污染主 PS 的 RDEF) ----
-        m_src, m_map = (nogen.strip_line_map(src or "", "MaterialDepth") if has_d
-                        else (src, None))
+        m_src, m_map = nogen.strip_line_map(src, "MaterialDepth")
         try:
             self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
                                                          keepalive=ka, minput=minput))
@@ -3055,22 +3054,16 @@ class MaterialSystemPanel(QWidget):
             return
         m_dxbc, m_err = mpass.compile_shading(m_src, tmpl, iface=iface,
                                               keepalive=ka, minput=minput)
-        # ---- 深度 pass(有 MaterialDepth 钩子才编; 剥掉 MaterialMain) ----
-        d_dxbc, d_err = None, None
-        if has_d:
-            d_src, d_map = nogen.strip_line_map(src or "", "MaterialMain")
-            try:
-                self.ed_full_depth.setPlainText(
-                    mpass.build_source(d_src, "deferred_depth", iface=iface,
-                                       keepalive="", minput=minput))
-            except Exception as e:  # noqa: BLE001
-                self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
-            d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface,
-                                                  keepalive="", minput=minput)
-        else:
+        # ---- 深度 pass(恒组装; 剥掉 MaterialMain) ----
+        d_src, d_map = nogen.strip_line_map(src, "MaterialMain")
+        try:
             self.ed_full_depth.setPlainText(
-                ";; 未定义 MaterialDepth 钩子 ⇒ 深度/阴影族用极简深度 PS\n"
-                ";; (ps_5_0 / dcl_globalFlags / ret, 输入仅 SV_POSITION, RDEF 零绑定)")
+                mpass.build_source(d_src, "deferred_depth", iface=iface,
+                                   keepalive="", minput=minput))
+        except Exception as e:  # noqa: BLE001
+            self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
+        d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface,
+                                              keepalive="", minput=minput)
         # ---- 报错(优先主 pass) ----
         if m_err:
             diags = self._err_diags(m_err, tmpl, m_map)
@@ -3087,7 +3080,7 @@ class MaterialSystemPanel(QWidget):
         if d_err:
             diags = self._err_diags(d_err, "deferred_depth", d_map)
             self._src_hl.set_diagnostics(diags)
-            self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
+            self._seg_show(1)              # 切到"深度 pass"视图
             first = diags[0][3] if diags else (d_err.strip().splitlines()[0] if d_err.strip() else "?")
             self.lbl_status.setText("[深度 pass 编译失败] %d 处%s: %s"
                                     % (len(diags),
@@ -3101,13 +3094,19 @@ class MaterialSystemPanel(QWidget):
         mv = verify_dxbc(m_dxbc)
         msg = ("编译 OK: 主 %dB stage=%s disasm=%s strip=%s reflect=%s"
                % (len(m_dxbc), mv["stage"], mv["disasm_ok"], mv["strip_ok"], mv["reflect_ok"]))
-        if d_dxbc is not None:
-            dv = verify_dxbc(d_dxbc)
-            msg += (" | 深度 %dB out=%s disasm=%s strip=%s reflect=%s"
-                    % (len(d_dxbc), "[]" if not dv.get("stage") else "",
-                       dv["disasm_ok"], dv["strip_ok"], dv["reflect_ok"]))
+        dv = verify_dxbc(d_dxbc)
+        msg += (" | 深度 %dB out=%s disasm=%s strip=%s reflect=%s"
+                % (len(d_dxbc), "[]" if not dv.get("stage") else "",
+                   dv["disasm_ok"], dv["strip_ok"], dv["reflect_ok"]))
         self.lbl_status.setText(msg)
         self.lbl_status.setStyleSheet("color:#1a7f37")
+
+    def _seg_show(self, k):
+        """切到"组装"页并选中第 k 个 pass 视图。"""
+        self._asm_stack.setCurrentIndex(k)
+        for j, b in enumerate(self._asm_btns):
+            b.setChecked(j == k)
+        self.tabs.setCurrentWidget(self._asm_page)
 
     def _generate(self):
         """生成 mmtr: 无 donor(版本预设 + 我们的材质 PS; 不接任何 master)。"""
@@ -3119,7 +3118,7 @@ class MaterialSystemPanel(QWidget):
             if QMessageBox.question(self, "配置有误", errs + "\n\n仍要生成吗？") != QMessageBox.Yes:
                 return None, None
         try:
-            data, rp = nogen.build(self.asset.shading_source or None,
+            data, rp = nogen.build(self.asset.shading_source or "",
                                    _pass_of_template(tmpl), tmpl)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))

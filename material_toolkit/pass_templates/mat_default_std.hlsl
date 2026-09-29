@@ -10,3 +10,10 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
     m.Occlusion    = 1.0;
     m.Translucency = 0.0;
 }
+
+// 深度族 pass(默认实现, **必需**): 不丢弃任何像素 —— 与"极简深度 PS"效果一致,
+// 且**不引用任何输入**(零额外绑定)。深度/阴影族无颜色输出, 只靠 discard 决定是否写深度。
+void MaterialDepth(DepthInput di, inout bool discardPixel)
+{
+    discardPixel = false;
+}

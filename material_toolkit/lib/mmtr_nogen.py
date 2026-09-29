@@ -137,6 +137,16 @@ def _strip_hlsl_fn(src, name):
     return src if not sp else (src[:sp[0]] + src[sp[1]:])
 
 
+def require_fn(material_src, name):
+    """确保材质源定义了必需函数 `void name(...)`; 缺失即报错(每个 pass 都必须提供)。
+
+    默认材质源已自带各 pass 的默认实现; 用户手删时在此报错(而非静默回退/默认填充)。
+    """
+    if _hlsl_fn_span(material_src or "", name) is None:
+        raise ValueError("材质源缺少必需函数 `void %s(...)`: 每个 pass 都必须提供其函数"
+                         % name)
+
+
 def strip_line_map(src, name):
     """删除 `void name(...) {...}` 并返回 (新源, 行映射函数)。
 
@@ -178,10 +188,12 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
 
     # 1) 我们的 PS (接口 + 保活: 材质声明 -> 规范发射; 引擎资源声明 -> 声明即保活)
     from . import material_inputs as INP
-    _has_dh = has_depth_hook(material_src)
-    # 主/深度钩子共享一份材质源 ⇒ 编译主 PS 时**剥掉 MaterialDepth**(未调用函数里的资源
+    # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth; 之后新增 pass 同理)
+    require_fn(material_src, "MaterialMain")
+    require_fn(material_src, "MaterialDepth")
+    # 主/深度共享一份材质源 ⇒ 编译主 PS 时**剥掉 MaterialDepth**(未调用函数里的资源
     # 引用既不被 DCE、也会影响保活), 否则 ATOS 等会污染进主 PS 的 RDEF。
-    mp_src = _strip_hlsl_fn(material_src, "MaterialDepth") if _has_dh else material_src
+    mp_src = _strip_hlsl_fn(material_src, "MaterialDepth")
     iface, ka, _rep = INP.build_iface_and_keepalive(
         mp_src, iface if iface is not None else INP.default_iface())
     minput = _rep.get("minput")
@@ -207,12 +219,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         if err_inst:
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
 
-    # 1c) 深度族 PS: 材质的 MaterialDepth 钩子(若有) -> deferred_depth 模板(剥掉 MaterialMain);
-    #     否则极简 PS。
-    ps_depth = None
-    if _has_dh:
-        ps_depth = depth_hook_ps(_strip_hlsl_fn(material_src, "MaterialMain"),
-                                 iface, minput)
+    # 1c) 深度族 PS: **恒组装** —— MaterialDepth(必需) -> deferred_depth 模板(剥掉 MaterialMain)。
+    ps_depth = depth_hook_ps(_strip_hlsl_fn(material_src, "MaterialMain"),
+                             iface, minput)
 
     # 2) 逐槽解析程序
     slots = []
@@ -223,8 +232,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
         elif r.get("ps_kind") == "cutout_ps":
-            # 深度/阴影族: 有 MaterialDepth 钩子 -> deferred_depth 模板自生; 否则极简 PS(干净)
-            ps = ps_depth if ps_depth is not None else minimal_depth_ps()
+            # 深度/阴影族: 恒用 MaterialDepth 自生(默认实现 = 不丢弃, 效果同极简 PS)
+            ps = ps_depth
         elif r.get("ps_kind"):
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:
@@ -538,7 +547,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "boundary": boundary, "boundary_pairs": len(_seen),
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
-        "depth_ps": "minimal",
+        "depth_ps": "material",
         "presets": _rep.get("presets") or [],
         "preset_unknown": _rep.get("preset_unknown") or [],
         "lock": _rep.get("lock") or {},
