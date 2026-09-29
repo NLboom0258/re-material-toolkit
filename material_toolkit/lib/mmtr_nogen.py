@@ -11,6 +11,7 @@
 import hashlib
 import json
 import os
+import re
 import struct
 
 try:
@@ -89,6 +90,53 @@ def minimal_depth_ps():
     return _min_depth_ps
 
 
+# 深度族"带效果"自生: 材质源含 `MaterialDepth` 钩子时, 用 deferred_depth 模板 + 钩子编译
+# (RDEF 绑定由钩子引用决定 ⇒ 记录绑定自动回归 ATOS/UserMaterial 等)。缺省(无钩子)走极简 PS。
+_DEPTH_HOOK_RE = re.compile(r"\bvoid\s+MaterialDepth\s*\(")
+
+
+def has_depth_hook(material_src):
+    """材质源是否定义了深度族钩子 `MaterialDepth`。"""
+    return bool(_DEPTH_HOOK_RE.search(material_src or ""))
+
+
+def depth_hook_ps(material_src, iface, minput):
+    """编译深度族 PS(deferred_depth 模板 + MaterialDepth 钩子)。
+
+    保活传空串(深度 PS 只 discard、无颜色输出, 不能用主 pass 的 o.o0 保活语句);
+    效果的资源绑定由钩子自身的引用决定。
+    """
+    ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
+                                 keepalive="", minput=minput)
+    if err:
+        raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
+    return ps
+
+
+def _hlsl_fn_span(src, name):
+    """定位 `void NAME(...) {...}` 的 [start, end); 无则 None(简单大括号计数)。"""
+    m = re.search(r"\bvoid\s+%s\s*\(" % re.escape(name), src or "")
+    if not m:
+        return None
+    i = src.index("{", m.start())
+    d = 0
+    for j in range(i, len(src)):
+        c = src[j]
+        if c == "{":
+            d += 1
+        elif c == "}":
+            d -= 1
+            if d == 0:
+                return (m.start(), j + 1)
+    return None
+
+
+def _strip_hlsl_fn(src, name):
+    """删除 src 中的某函数定义(保留其余: 辅助函数/声明)。未含该名时原样返回。"""
+    sp = _hlsl_fn_span(src, name)
+    return src if not sp else (src[:sp[0]] + src[sp[1]:])
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
@@ -110,13 +158,14 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
 
     # 1) 我们的 PS (接口 + 保活: 材质声明 -> 规范发射; 引擎资源声明 -> 声明即保活)
     from . import material_inputs as INP
-    ka = ""
-    if iface is None:
-        iface, ka, _rep = INP.build_iface_and_keepalive(material_src, INP.default_iface())
-    else:
-        _if, ka, _rep = INP.build_iface_and_keepalive(material_src, iface)
+    _has_dh = has_depth_hook(material_src)
+    # 主/深度钩子共享一份材质源 ⇒ 编译主 PS 时**剥掉 MaterialDepth**(未调用函数里的资源
+    # 引用既不被 DCE、也会影响保活), 否则 ATOS 等会污染进主 PS 的 RDEF。
+    mp_src = _strip_hlsl_fn(material_src, "MaterialDepth") if _has_dh else material_src
+    iface, ka, _rep = INP.build_iface_and_keepalive(
+        mp_src, iface if iface is not None else INP.default_iface())
     minput = _rep.get("minput")
-    ps_blob, err = MP.compile_shading(material_src, template, iface=iface,
+    ps_blob, err = MP.compile_shading(mp_src, template, iface=iface,
                                       keepalive=ka, minput=minput)
     if err:
         raise ValueError("HLSL 编译失败:\n%s" % err)
@@ -132,11 +181,18 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     ps_inst = None
     if (inst_slots and has_um
             and os.path.exists(os.path.join(MP._TDIR, inst_tpl + ".hlsl"))):
-        ps_inst, err_inst = MP.compile_shading(material_src, inst_tpl, iface=iface,
+        ps_inst, err_inst = MP.compile_shading(mp_src, inst_tpl, iface=iface,
                                                style="instance", keepalive=ka,
                                                minput=minput)
         if err_inst:
             raise ValueError("instance PS 编译失败:\n%s" % err_inst)
+
+    # 1c) 深度族 PS: 材质的 MaterialDepth 钩子(若有) -> deferred_depth 模板(剥掉 MaterialMain);
+    #     否则极简 PS。
+    ps_depth = None
+    if _has_dh:
+        ps_depth = depth_hook_ps(_strip_hlsl_fn(material_src, "MaterialMain"),
+                                 iface, minput)
 
     # 2) 逐槽解析程序
     slots = []
@@ -147,8 +203,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
         elif r.get("ps_kind") == "cutout_ps":
-            # 深度/阴影族: 用极简深度 PS(去 alpha-cutout/dissolve) ⇒ 绑定派生成 VS-only 干净形态
-            ps = minimal_depth_ps()
+            # 深度/阴影族: 有 MaterialDepth 钩子 -> deferred_depth 模板自生; 否则极简 PS(干净)
+            ps = ps_depth if ps_depth is not None else minimal_depth_ps()
         elif r.get("ps_kind"):
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:

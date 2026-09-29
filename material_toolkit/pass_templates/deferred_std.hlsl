@@ -89,6 +89,13 @@ struct MaterialOutput
 // ---- 材质输入(由已添加的预设输入决定; 生成器注入) ----
 //__MINPUT_DEF__
 
+// ---- 深度钩子输入(材质源可能同时含 MaterialDepth; 供其类型) ----
+struct DepthInput
+{
+    float4 svpos;
+    float2 uv0;
+};
+
 // 法线八面体编码(等价原版)
 float3 OctEncodeNormal(float3 n)
 {
