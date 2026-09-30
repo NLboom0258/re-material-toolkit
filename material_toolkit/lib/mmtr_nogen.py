@@ -348,8 +348,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                                  "MaterialDepth")
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
     # "补输入": 是否把 reduced 族(深度/阴影/拾取)换到完整族。
-    # 目前仅由**手动开关**(force_full_inputs)决定; 之后由"预设输入依赖"自动触发(缺值被依赖时)。
-    _upg = bool(force_full_inputs)
+    # 由手动开关(force_full_inputs 参数)或源码里的 `//! vertex force_full_inputs` 指令决定;
+    # 之后由"预设输入依赖"自动触发(缺值被依赖时)。
+    _upg = bool(force_full_inputs) or bool(
+        re.search(r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", material_src or ""))
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
     iface, ka, _rep = INP.build_iface_and_keepalive(

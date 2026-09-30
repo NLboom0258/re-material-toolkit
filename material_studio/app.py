@@ -2720,13 +2720,39 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 输入页 ----
     def _wrap_inputs(self):
-        """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
+        """输入页: 顶部「强制完整输入」开关 + 按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
         _w1, self.tree_inputs = self._inputs_tree()
         _w2, self.tree_inputs_depth = self._inputs_tree()
         _w3 = self._vs_inputs_view()
         page, self._in_btns, self._in_stack = _seg_switch(
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
-        return page
+        box = QWidget()
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(0, 0, 0, 0)
+        self.chk_force_full = QCheckBox(
+            "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
+        self.chk_force_full.setToolTip(
+            "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
+            "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
+            "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n默认关 ⇒ 逐字节与现状一致。")
+        self.chk_force_full.toggled.connect(self._on_force_full)
+        bv.addWidget(self.chk_force_full)
+        bv.addWidget(page, 1)
+        return box
+
+    def _on_force_full(self, checked):
+        """「强制完整输入」开关 -> 写/删源码里的 `//! vertex force_full_inputs` 指令。"""
+        self._force_full = bool(checked)
+        self._rewrite_decls()
+
+    def _sync_force_full(self):
+        """按源码里的指令同步勾选框(载入/刷新时; 阻断信号防回环)。"""
+        chk = getattr(self, "chk_force_full", None)
+        if chk is None:
+            return
+        chk.blockSignals(True)
+        chk.setChecked(bool(getattr(self, "_force_full", False)))
+        chk.blockSignals(False)
 
     def _vs_inputs_view(self):
         """顶点(VS) 输入视图: **只读**(输入固定, 由变体决定; 不可增删)。"""
@@ -2783,6 +2809,8 @@ class MaterialSystemPanel(QWidget):
 
     def _load_decls_from_src(self):
         src = self.ed_src.toPlainText()
+        self._force_full = bool(re.search(
+            r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", src))
         self._presets = sinp.parse_preset_decls(src)
         self._params, self._textures = mgen.parse_decls(src)
         self._engine = minp.parse_engine_decls(src)
@@ -2839,7 +2867,9 @@ class MaterialSystemPanel(QWidget):
         def _tg(kind, name):
             t = self._tags.get((kind, name))
             return (" @%s" % t) if t else ""
-        lines = ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
+        lines = (["//! vertex force_full_inputs"] if getattr(self, "_force_full", False)
+                 else [])
+        lines += ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
         lines += ["//! param %s %s%s" % (t, n, _tg("param", n)) for n, t in self._params]
         lines += ["//! tex %s%s" % (n, _tg("tex", n)) for n in self._textures]
         lines += ["//! engine %s%s" % (n, _tg("engine", n)) for n in self._engine]
@@ -2928,6 +2958,7 @@ class MaterialSystemPanel(QWidget):
         """刷新两个 pass 的输入树(每 pass 独立: 该 pass 的固有输入 + 归属该 pass 的自定义输入)。"""
         self._load_decls_from_src()
         self.normalize_inputs()
+        self._sync_force_full()
         self._fill_input_tree(self.tree_inputs, "main")
         self._fill_input_tree(self.tree_inputs_depth, "depth")
 
