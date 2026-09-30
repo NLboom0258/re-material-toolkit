@@ -173,6 +173,214 @@ def shadow_offset(wp="wp", n="wN"):
     ])
 
 
+# ============================================================ 数据驱动(从银行 blob 自动推导)
+# 基础输入族(不含 SV_InstanceID; 需要时追加)
+_BASE_IN = {
+    "full": [("float3", "p0", "POSITION0"), ("float4", "nrm", "NORMAL0"),
+             ("float4", "tan", "TANGENT0"), ("float2", "uv0", "TEXCOORD0"),
+             ("float2", "uv1", "Texcoord1")],
+    "nrm_uv1": [("float3", "p0", "POSITION0"), ("float4", "nrm", "NORMAL0"),
+                ("float2", "uv1", "Texcoord1")],
+    "pos_uv1": [("float3", "p0", "POSITION0"), ("float2", "uv1", "Texcoord1")],
+    "pretr": [("float3", "p0", "POSITION0"), ("float3", "p1", "POSITION1"),
+              ("float4", "nrm", "NORMAL0"), ("float4", "tan", "TANGENT0"),
+              ("float2", "uv0", "TEXCOORD0"), ("float2", "uv1", "Texcoord1")],
+    "skin_full": [("float3", "p0", "POSITION0"), ("float4", "nrm", "NORMAL0"),
+                  ("float4", "tan", "TANGENT0"), ("float2", "uv0", "TEXCOORD0"),
+                  ("uint4", "bi", "INDEX0"), ("float4", "bw", "WEIGHT0"),
+                  ("float2", "uv1", "Texcoord1")],
+    "skin_min": [("float3", "p0", "POSITION0"), ("uint4", "bi", "INDEX0"),
+                 ("float4", "bw", "WEIGHT0"), ("float2", "uv1", "Texcoord1")],
+    "skin_min_nrm": [("float3", "p0", "POSITION0"), ("float4", "nrm", "NORMAL0"),
+                     ("uint4", "bi", "INDEX0"), ("float4", "bw", "WEIGHT0"),
+                     ("float2", "uv1", "Texcoord1")],
+}
+_IN_KEY = {
+    (("POSITION", 0), ("NORMAL", 0), ("TANGENT", 0), ("TEXCOORD", 0), ("TEXCOORD", 1)): "full",
+    (("POSITION", 0), ("NORMAL", 0), ("TEXCOORD", 1)): "nrm_uv1",
+    (("POSITION", 0), ("TEXCOORD", 1)): "pos_uv1",
+    (("POSITION", 0), ("POSITION", 1), ("NORMAL", 0), ("TANGENT", 0),
+     ("TEXCOORD", 0), ("TEXCOORD", 1)): "pretr",
+    (("POSITION", 0), ("NORMAL", 0), ("TANGENT", 0), ("TEXCOORD", 0),
+     ("INDEX", 0), ("WEIGHT", 0), ("TEXCOORD", 1)): "skin_full",
+    (("POSITION", 0), ("INDEX", 0), ("WEIGHT", 0), ("TEXCOORD", 1)): "skin_min",
+    (("POSITION", 0), ("NORMAL", 0), ("INDEX", 0), ("WEIGHT", 0),
+     ("TEXCOORD", 1)): "skin_min_nrm",
+}
+
+
+def spec_from_blob(blob):
+    """从银行标准 VS blob 反推生成 spec(输入族/世界来源/输出/Clip/Shadow)。"""
+    from . import dxbc_sig as SG
+    from . import rdef as R
+    ins = SG.input_signature(blob)
+    key = tuple((n.upper(), s) for (n, s, sv, _c, _r, _m, _rw) in ins if not sv)
+    svid = any(n.upper().startswith("SV_INSTANCE") for (n, *_r) in ins)
+    outs = SG.output_signature(blob)
+    n_interp = sum(1 for (n, *_r) in outs if n.upper().startswith("INTERPOLATOR"))
+    clip = any(n.upper() == "SV_CLIPDISTANCE" for (n, *_r) in outs)
+    nointerp0 = any(n.upper().startswith("NOINTERPOLATOR") for (n, *_r) in outs)
+    cbn = sorted(n for (n, *_r) in (R.rdef_cbuffers(blob) or []))
+    srv = sorted((R.rdef_resources(blob) or (None, None, set()))[2])
+    if "SkinningMatrices" in srv:
+        world = "skin_indirect" if "IndirectIndicesBuffer" in srv else "skin"
+    elif "IndirectIndicesBuffer" in srv:
+        world = "indirect"
+    elif "WorldInstances" in srv:
+        world = "worldinst"
+    elif "InstanceWorldInfo" in srv:
+        world = "inst"
+    elif "World" in cbn:
+        world = "world"
+    else:
+        world = "pre"
+    return {"family": _IN_KEY.get(key), "svid": svid, "world": world,
+            "pack": "mat" if n_interp >= 5 else "depth",
+            "interp": n_interp >= 1, "clip": clip, "nointerp0": nointerp0,
+            "shadow": "ShadowCastInfo" in cbn, "cbuffers": cbn, "srvs": srv}
+
+
+def _emit_world(world, need_n, need_t, need_prev):
+    """生成变换代码, 产出名量 wp/(wN)/(wT)/(pp); 返回 (lines, prevw_expr)。"""
+    L, prevw = [], None
+    if world == "pre":
+        L.append("float3 wp = i.p0;")
+        if need_n:
+            L.append("float3 wN = i.nrm.xyz;")
+        if need_t:
+            L.append("float3 wT = i.tan.xyz;")
+        prevw = "float4(i.p1, 1.0)"
+        return L, prevw
+    if world in ("inst", "indirect", "skin", "skin_indirect"):
+        if world == "inst":
+            ie = "InstanceWorldInfo[constant32Bits]"
+        elif world == "indirect":
+            ie = "InstanceWorldInfo[IndirectIndicesBuffer[i.svid + constant32Bits]]"
+        elif world == "skin":
+            ie = "InstanceWorldInfo[constant32Bits]"
+        else:
+            ie = "InstanceWorldInfo[IndirectIndicesBuffer[i.svid + constant32Bits]]"
+        L.append("InstanceWorld iw = %s;" % ie)
+        L.append("float4 p4 = float4(i.p0, 1.0);")
+        if world.startswith("skin"):
+            L.append("float4 w = i.bw / (i.bw.x + i.bw.y + i.bw.z + i.bw.w);")
+            for k in range(4):
+                L.append("JointMatrix j%d = SkinningMatrices[iw.jointOffset + i.bi.%s];"
+                         % (k, "xyzw"[k]))
+            L.append("float4 r0 = j0.row0*w.x + j1.row0*w.y + j2.row0*w.z + j3.row0*w.w;")
+            L.append("float4 r1 = j0.row1*w.x + j1.row1*w.y + j2.row1*w.z + j3.row1*w.w;")
+            L.append("float4 r2 = j0.row2*w.x + j1.row2*w.y + j2.row2*w.z + j3.row2*w.w;")
+            L.append("float3 wp = float3(dot(r0,p4), dot(r1,p4), dot(r2,p4));")
+            if need_n:
+                L.append("float4 bn = float4(i.nrm.xyz, 0.0);")
+                L.append("float3 wN = float3(dot(r0,bn), dot(r1,bn), dot(r2,bn));")
+            if need_t:
+                L.append("float4 bt = float4(i.tan.xyz, 0.0);")
+                L.append("float3 wT = float3(dot(r0,bt), dot(r1,bt), dot(r2,bt));")
+            if need_prev:
+                for k in range(4):
+                    L.append("JointMatrix q%d = SkinningMatrices[iw.prevJointOffset + i.bi.%s];"
+                             % (k, "xyzw"[k]))
+                L.append("float4 s0 = q0.row0*w.x + q1.row0*w.y + q2.row0*w.z + q3.row0*w.w;")
+                L.append("float4 s1 = q0.row1*w.x + q1.row1*w.y + q2.row1*w.z + q3.row1*w.w;")
+                L.append("float4 s2 = q0.row2*w.x + q1.row2*w.y + q2.row2*w.z + q3.row2*w.w;")
+                L.append("float3 pp = float3(dot(s0,p4), dot(s1,p4), dot(s2,p4));")
+                prevw = "float4(pp, 1.0)"
+        else:
+            L.append("float3 wp = mul(iw.worldMat, p4);")
+            if need_n:
+                L.append("float3 wN = mul(iw.worldMat, float4(i.nrm.xyz, 0.0));")
+            if need_t:
+                L.append("float3 wT = mul(iw.worldMat, float4(i.tan.xyz, 0.0));")
+            if need_prev:
+                L.append("float3 pp = mul(iw.prevWorldMat, p4);")
+                prevw = "float4(pp, 1.0)"
+        return L, prevw
+    if world == "world":
+        L.append("float4 p4 = float4(i.p0, 1.0);")
+        L.append("float3 wp = mul(p4, worldMat).xyz;")
+        if need_n:
+            L.append("float3 wN = mul(i.nrm.xyz, (float3x3)worldMat);")
+        if need_t:
+            L.append("float3 wT = mul(i.tan.xyz, (float3x3)worldMat);")
+        if need_prev:
+            L.append("float3 pp = mul(p4, prevWorldMat).xyz;")
+            prevw = "float4(pp, 1.0)"
+        return L, prevw
+    if world == "worldinst":
+        L.append("WorldInstance wi = WorldInstances[i.svid];")
+        L.append("float4 p4 = float4(i.p0, 1.0);")
+        L.append("float3 wp = mul(p4, wi.worldMat).xyz;")
+        if need_n:
+            L.append("float3 wN = mul(i.nrm.xyz, (float3x3)wi.worldMat);")
+        if need_t:
+            L.append("float3 wT = mul(i.tan.xyz, (float3x3)wi.worldMat);")
+        if need_prev:
+            L.append("float3 pp = mul(p4, wi.prevWorldMat).xyz;")
+            prevw = "float4(pp, 1.0)"
+        return L, prevw
+    raise ValueError("unknown world %r" % world)
+
+
+def _assemble(infields, outs, cbs, srvs, body_lines):
+    from . import material_iface as MI
+    L = [MI.hlsl_of(_iface_for(cbs))]
+    for n in srvs:
+        L.append(_srv_decl(n))
+    L.append("struct VSIn {")
+    for t, n, sem in infields:
+        L.append("    %s %s : %s;" % (t, n, sem))
+    L.append("};")
+    L.append("struct VSOut {")
+    L.append("    float4 pos : SV_Position;")
+    for t, n, sem in outs:
+        L.append("    %s %s : %s;" % (t, n, sem))
+    L.append("};")
+    L.append("VSOut main(VSIn i)")
+    L.append("{")
+    L.append("    VSOut o;")
+    L.extend("    " + ln for ln in body_lines)
+    L.append("    return o;")
+    L.append("}")
+    return "\n".join(L) + "\n"
+
+
+def build_from_spec(spec):
+    """按 spec(来自 spec_from_blob)生成 VS 源。"""
+    world = spec["world"]
+    pack, interp = spec["pack"], spec["interp"]
+    clip, shadow = spec["clip"], spec["shadow"]
+    nointerp0 = spec.get("nointerp0", False)
+    need_n = (pack == "mat") or shadow
+    need_t = (pack == "mat")
+    need_prev = (pack == "mat")
+    L, prevw = _emit_world(world, need_n, need_t, need_prev)
+    if shadow:
+        L.extend(shadow_offset(wp="wp", n="wN").splitlines())
+    if pack == "mat":
+        L.append("float4 pclip = mul(%s, prevViewProjMat);" % prevw)
+        L.extend(mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=clip).splitlines())
+        outs = [("float4", "i0", "INTERPOLATOR0"), ("float4", "i1", "INTERPOLATOR1"),
+                ("float4", "i2", "INTERPOLATOR2"), ("float4", "i3", "INTERPOLATOR3"),
+                ("float", "i4", "INTERPOLATOR4")]
+        if nointerp0:
+            L.append("o.n0 = (float)i.svid;")
+            outs.append(("float", "n0", "NOINTERPOLATOR0"))
+        if clip:
+            outs.append(("float", "cd", "SV_ClipDistance"))
+    else:
+        L.extend(depth_pack(pos="wp", interp=interp, clip=clip).splitlines())
+        outs = []
+        if interp:
+            outs += [("float4", "j0", "INTERPOLATOR0"), ("float2", "j1", "INTERPOLATOR1")]
+        if clip:
+            outs.append(("float", "cd", "SV_ClipDistance"))
+    infields = list(_BASE_IN[spec["family"]])
+    if spec["svid"]:
+        infields.append(("uint", "svid", "SV_InstanceID"))
+    return _assemble(infields, outs, spec["cbuffers"], spec["srvs"], L)
+
+
 def compile_vs(src):
     """编译为 vs_5_0 -> (dxbc_bytes, err_text)。"""
     return B.compile_hlsl(src, "main", "vs_5_0", name="vs_gen.hlsl")
