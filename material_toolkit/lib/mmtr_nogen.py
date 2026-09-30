@@ -189,6 +189,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         e = bank.get(key)
         return bytes(bank_data[e[0]:e[0] + e[1]]) if e else None
 
+    # Pick 族的 PS 全语料唯一(与材质/前缀无关, 恒 3148B) => 预取银行里任意一条 Pick 槽的 key
+    pick_key = next((k for k in bank if k.startswith("cutout_ps|") and "|Pick" in k), None)
+
     # 1) 我们的 PS (接口 + 保活: 材质声明 -> 规范发射; 引擎资源声明 -> 声明即保活)
     from . import material_inputs as INP
     # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth; 之后新增 pass 同理)
@@ -248,8 +251,13 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
         elif r.get("ps_kind") == "cutout_ps":
-            # 深度/阴影族: 恒用 MaterialDepth 自生(默认实现 = 不丢弃, 效果同极简 PS)
-            ps = ps_depth
+            if tech.startswith("Pick"):
+                # Pick 族 = 引擎固定的“屏幕拾取”PS(与材质无关; 全语料唯一一条 3148B)
+                # => 银行任意一条 Pick 槽即可。待办: 之后换自生的固定 pick PS。
+                ps = bank_blob(pick_key) if pick_key else ps_depth
+            else:
+                # 深度/阴影族: 恒用 MaterialDepth 自生(默认实现 = 不丢弃, 效果同极简 PS)
+                ps = ps_depth
         elif r.get("ps_kind"):
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:
