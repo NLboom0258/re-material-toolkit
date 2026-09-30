@@ -2494,9 +2494,28 @@ class MaterialSystemPanel(QWidget):
         self.ed_full_depth = CodeEdit(indent=4)
         self.ed_full_depth.setReadOnly(True)
         self._depth_hl = HlslHighlighter(self.ed_full_depth.document())
-        # 组装页: 单页 + 顶部按钮组切换各 pass(不再一 pass 一 Tab)
+        # 顶点(VS) 视图: 变体下拉(代表变体可切换) + 组装源码(只读) + 状态
+        self.ed_full_vs = CodeEdit(indent=4)
+        self.ed_full_vs.setReadOnly(True)
+        self._vs_hl = HlslHighlighter(self.ed_full_vs.document())
+        _vsbox = QWidget()
+        _vsv = QVBoxLayout(_vsbox)
+        _vsv.setContentsMargins(0, 0, 0, 0)
+        _vrow = QHBoxLayout()
+        _vrow.addWidget(QLabel("标准 VS 变体:"))
+        self.cmb_vs = NoWheelComboBox()
+        self.cmb_vs.currentIndexChanged.connect(self._on_vs_variant_changed)
+        _vrow.addWidget(self.cmb_vs, 1)
+        _vsv.addLayout(_vrow)
+        self.lbl_vs = QLabel("")
+        self.lbl_vs.setWordWrap(True)
+        _vsv.addWidget(self.lbl_vs)
+        _vsv.addWidget(self.ed_full_vs, 1)
+        # 组装页: 单页 + 顶部按钮组切换各 pass/顶点(不再一 pass 一 Tab)
         self._asm_page, self._asm_btns, self._asm_stack = _seg_switch(
-            [("主 pass", self.ed_full), ("深度 pass", self.ed_full_depth)])
+            [("主 pass", self.ed_full), ("深度 pass", self.ed_full_depth),
+             ("顶点 (VS)", _vsbox)])
+        self._asm_btns[2].clicked.connect(self._refresh_vs_preview)
         self.tabs.addTab(self._asm_page, "组装")
         self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tree_info = QTreeWidget()
@@ -2548,6 +2567,56 @@ class MaterialSystemPanel(QWidget):
         self.asset.template["pass_template"] = (
             _default_template(self.cmb_shading.currentData(),
                               self.cmb_light.currentData()) or "deferred_std")
+
+    # ---- 顶点(VS) 预览 ----
+    def _ensure_vs_variants(self):
+        """惰性载入标准 VS 变体列表(供组装页「顶点(VS)」视图的下拉)。"""
+        if getattr(self, "_vs_variants_ready", False):
+            return
+        self._vs_variants_ready = True
+        try:
+            self._vs_variants = nogen.standard_variants()
+        except Exception:  # noqa: BLE001
+            self._vs_variants = []
+        self.cmb_vs.blockSignals(True)
+        for _label, _key in self._vs_variants:
+            self.cmb_vs.addItem(_label, _key)
+        _def = next((i for i, (_l, k) in enumerate(self._vs_variants)
+                     if k.endswith("|DeferredStatic")), 0)
+        if self._vs_variants:
+            self.cmb_vs.setCurrentIndex(_def)
+        self.cmb_vs.blockSignals(False)
+
+    def _on_vs_variant_changed(self, *_):
+        self._refresh_vs_preview()
+
+    def _refresh_vs_preview(self, *_):
+        """组装+编译当前选中变体的标准 VS(注入材质源的顶点钩子)并展示。
+
+        注: 同一 mmtr 内所有变体共用一个 `MaterialVertex` ⇒ 只需看一个代表即可。
+        """
+        self._ensure_vs_variants()
+        key = self.cmb_vs.currentData()
+        if not key:
+            self.ed_full_vs.setPlainText(";; 无标准 VS 变体(预设未就绪?)")
+            self.lbl_vs.setText("")
+            return
+        src = self.ed_src.toPlainText()
+        try:
+            vsrc, dxbc, err = nogen.build_standard_vs(src, key)
+        except Exception as e:  # noqa: BLE001
+            self.ed_full_vs.setPlainText(";; 组装失败: %s" % e)
+            self.lbl_vs.setText("[组装失败] %s" % e)
+            self.lbl_vs.setStyleSheet("color:#c0392b")
+            return
+        self.ed_full_vs.setPlainText(vsrc if vsrc else (";; " + str(err)))
+        if err:
+            self.lbl_vs.setText("[编译失败] %s" % err)
+            self.lbl_vs.setStyleSheet("color:#c0392b")
+        else:
+            self.lbl_vs.setText("编译 OK %dB  ——  标准 VS 共 %d 个变体, 全部注入同一 MaterialVertex"
+                                % (len(dxbc), len(getattr(self, "_vs_variants", []))))
+            self.lbl_vs.setStyleSheet("color:#1a7f37")
 
     def _on_mode_changed(self, *_):
         if self._loading:
@@ -2651,12 +2720,38 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 输入页 ----
     def _wrap_inputs(self):
-        """输入页: 单页 + 顶部按钮组切换各 pass(每 pass 独立输入树 + 增删)。"""
+        """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
         _w1, self.tree_inputs = self._inputs_tree()
         _w2, self.tree_inputs_depth = self._inputs_tree()
+        _w3 = self._vs_inputs_view()
         page, self._in_btns, self._in_stack = _seg_switch(
-            [("主 pass", _w1), ("深度 pass", _w2)])
+            [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
+
+    def _vs_inputs_view(self):
+        """顶点(VS) 输入视图: **只读**(输入固定, 由变体决定; 不可增删)。"""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        t = QTreeWidget()
+        t.setHeaderLabels(["类别 / 名", "类型", "说明"])
+        root = QTreeWidgetItem(["顶点输入(固定; 由变体决定; 只读)", "", ""])
+        for _n, _d in (("worldPos", "世界空间位置(可作偏移基准)"),
+                       ("worldNormal", "世界空间法线(该变体无法线时 = 0)"),
+                       ("worldTangent", "世界空间切线(无切线时 = 0)"),
+                       ("uv0", "第一套 UV(无时 = 0)"),
+                       ("uv1", "第二套 UV(无时 = 0)")):
+            root.addChild(QTreeWidgetItem([_n, "", _d]))
+        t.addTopLevelItem(root)
+        t.expandAll()
+        fit_columns(t, (0, 1, 2))
+        v.addWidget(t, 1)
+        note = QLabel("VS 输入固定、不可增删(与 PS 的预设/参数不同)。顶点效果的编辑在"
+                      "「材质源」的 `float3 MaterialVertex(VertexInput v)`(返回世界空间偏移)。"
+                      "钩子如需额外资源(时间/参数/贴图), 后续用 `//! param/tex` 声明。")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        return w
 
     def _inputs_tree(self):
         """一个 pass 的输入视图(输入树 + 增删按钮)。返回 (容器, 树)。"""
@@ -3216,8 +3311,11 @@ class MaterialSystemPanel(QWidget):
         msg += (" | 深度 %dB out=%s disasm=%s strip=%s reflect=%s"
                 % (len(d_dxbc), "[]" if not dv.get("stage") else "",
                    dv["disasm_ok"], dv["strip_ok"], dv["reflect_ok"]))
+        self._refresh_vs_preview()
+        _vs_ok = self.lbl_vs.text().startswith("编译 OK")
+        msg += " | 顶点(VS) %s" % ("OK" if _vs_ok else "失败(见「顶点 (VS)」页)")
         self.lbl_status.setText(msg)
-        self.lbl_status.setStyleSheet("color:#1a7f37")
+        self.lbl_status.setStyleSheet("color:#1a7f37" if _vs_ok else "color:#c0392b")
 
     def _seg_show(self, k):
         """切到"组装"页并选中第 k 个 pass 视图。"""

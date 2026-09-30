@@ -197,6 +197,49 @@ def strip_line_map_multi(src, names):
     return cur, _m
 
 
+def vs_hook_source(material_src):
+    """材质源 -> VS 钩子源(剥掉两个 PS 函数 MaterialMain/MaterialDepth)。"""
+    return _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"), "MaterialDepth")
+
+
+def _load_bank():
+    data = open(P.standard_path(), "rb").read()
+    idx = json.load(open(P.standard_index_path(), encoding="utf-8"))
+    return data, idx
+
+
+def standard_variants():
+    """distinct 标准 VS 变体 [(label, bank_key)]; 按 blob 内容去重(保序)。供 GUI 预览选择。"""
+    data, idx = _load_bank()
+    seen, out = set(), []
+    for k in idx:
+        if not k.startswith("standard_vs|"):
+            continue
+        e = idx[k]
+        h = hashlib.md5(bytes(data[e[0]:e[0] + e[1]])).hexdigest()
+        if h in seen:
+            continue
+        seen.add(h)
+        _, pre, tech = k.split("|", 2)
+        out.append(("%s · %s" % (pre, tech) if pre else tech, k))
+    return out
+
+
+def build_standard_vs(material_src, bank_key):
+    """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
+    data, idx = _load_bank()
+    e = idx.get(bank_key)
+    if not e:
+        return "", None, "无此变体: %s" % bank_key
+    ref = bytes(data[e[0]:e[0] + e[1]])
+    spec = VG.spec_from_blob(ref)
+    if not spec or not spec.get("family"):
+        return "", None, "无法从银行 blob 反推 spec"
+    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None)
+    dxbc, err = VG.compile_vs(src)
+    return src, dxbc, err
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
