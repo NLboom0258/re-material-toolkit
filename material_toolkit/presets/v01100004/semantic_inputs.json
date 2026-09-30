@@ -136,14 +136,6 @@
         "_wp = _wp * exposureAdjustment;",
         "mi.exposureScale = 1.0 / max(_wp, 0.0001);"
       ]
-    },
-    {
-      "name": "gbufferTypeFlag",
-      "group": "系统",
-      "desc": "GBuffer 类型标志(写 RT2.w 用; 依赖 GBufferType)",
-      "depends": ["GBufferType"],
-      "field": {"name": "gbufferTypeFlag", "type": "float"},
-      "impl": ["mi.gbufferTypeFlag = gbufferTypeFlag;"]
     }
   ]
 }

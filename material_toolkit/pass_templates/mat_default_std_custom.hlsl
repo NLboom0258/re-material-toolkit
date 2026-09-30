@@ -7,7 +7,7 @@
 //! preset Bitangent
 //! preset velocity
 //! preset exposureScale
-//! preset gbufferTypeFlag
+//! engine GBufferType
 
 void MaterialMain(in MaterialInput mi, out MaterialOutput m)
 {
@@ -42,7 +42,7 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
 
     m.RT0 = float4(Emissive, 0.0);
     m.RT1 = float4(BaseColor, o1w);
-    m.RT2 = float4(encN, Roughness, mi.gbufferTypeFlag * 0.333333343 + darkFlag);
+    m.RT2 = float4(encN, Roughness, gbufferTypeFlag * 0.333333343 + darkFlag);
     m.RT3 = float4(Occlusion, mi.velocity, 1.0);
 
     // ---- 曝光(引擎会对 RT0 再乘 <白点*曝光> ⇒ 这里自动抵消; 同默认光照模板) ----

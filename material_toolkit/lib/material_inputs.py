@@ -505,6 +505,38 @@ def pass_dep_names(pass_name="main", template=None):
     return _pass_deps(pass_name, template)
 
 
+def _canonical_dep_order(pass_name):
+    """该 pass 的引擎资源**规范声明顺序**(取 pass 级 `depends`, 与模板覆盖无关)。"""
+    if not pass_name:
+        return []
+    p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
+    return list(p.get("depends") or [])
+
+
+def _apply_canonical_order(iface, pass_name):
+    """把接口里的资源按**引擎期望的固定顺序**重排。
+
+    引擎**按 RDEF 顺序连续绑定材质资源**(顺序敏感) ⇒ 声明顺序必须固定(与 passes.json 的
+    `depends` 一致), 否则同一种资源在“默认/自定义”两路径下会落不同寄存器 ⇒ 绑定错位。
+    未在规范表内的(如 UserMaterial / 额外声明)按原相对顺序排在其后。寄存器号随重排重标
+    (仅展示用; 实际由编译器按声明序自动紧凑)。
+    """
+    order = _canonical_dep_order(pass_name)
+    if not order:
+        return
+    idx = {n: i for i, n in enumerate(order)}
+    for kind, pre in (("cbuffers", "b"), ("textures", "t"), ("samplers", "s")):
+        lst = iface.get(kind) or []
+        if len(lst) < 2:
+            continue
+        reordered = sorted(lst, key=lambda e: idx.get(e["name"], len(order)))
+        if [e["name"] for e in reordered] == [e["name"] for e in lst]:
+            continue
+        for i, e in enumerate(reordered):
+            e["reg"] = "%s%d" % (pre, i)
+        iface[kind] = reordered
+
+
 def all_params(material_src):
     """全部材质参数 [(name,type)] (按序去重)。
 
@@ -614,6 +646,9 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     report["engine"] = [e["name"] for e in eng]
     report["regs"] = regs
 
+    # 规范声明顺序: 引擎按 RDEF 顺序绑定材质资源(顺序敏感) ⇒ 重排为与 passes.json
+    #   `depends` 一致的固定顺序(对默认模式无影响; 把“按预设声明序”漂移的自定义拉回规范)。
+    _apply_canonical_order(iface, pass_name)
     # 保活已退役(2026-09-30): 寄存器改由 d3dcompiler“自动紧凑”分配(寄存器号 ≡ RDEF 位置,
     #   结构上无空洞), 无需再靠死分支引用维持 RDEF。
     return iface, "", report
