@@ -21,6 +21,7 @@ try:
     from . import material_gen as MG
     from . import rdef as R
     from . import mmtr_tail as T
+    from . import vs_gen as VG
     from .mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
                              PT_LO, PT_N, PT_SIZE)
     from .hashes import ascii_hash
@@ -34,11 +35,16 @@ except ImportError:  # 允许脚本直接 import
     import material_gen as MG
     import rdef as R
     import mmtr_tail as T
+    import vs_gen as VG
     from mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
                             PT_LO, PT_N, PT_SIZE)
     from hashes import ascii_hash
 
 _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
+
+# 标准 VS 自生结果缓存: 银行键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。
+# 自生需编译 HLSL(较慢) ⇒ 按键全局缓存, 同一键在多槽/多次构建间复用。
+_vs_cache = {}
 
 # 引擎 post 表区: InputLayout 元素表等(PT 指针指向此处); 记录栅格尾部与其交叠。
 POST_LO = 0x46210
@@ -189,6 +195,29 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         e = bank.get(key)
         return bytes(bank_data[e[0]:e[0] + e[1]]) if e else None
 
+    # 标准 VS: **优先自生**(vs_gen 反推 spec→生成→编译 vs_5_0), 失败/无键回退银行字节。
+    # 引擎只看签名+绑定组(离线 62/62 已证自生与银行等价) ⇒ 属行为等价的内部替换。
+    vs_stat = {"gen": 0, "bank": 0, "none": 0}
+
+    def vs_for(key):
+        """键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。结果全局缓存(见 _vs_cache)。"""
+        c = _vs_cache.get(key)
+        if c is None:
+            ref = bank_blob(key)
+            if not ref:
+                c = ("none", None)
+            else:
+                gen = None
+                try:
+                    spec = VG.spec_from_blob(ref)
+                    if spec and spec.get("family"):
+                        gen, _err = VG.compile_vs(VG.build_from_spec(spec))
+                except Exception:
+                    gen = None
+                c = ("gen", gen) if gen else ("bank", ref)
+            _vs_cache[key] = c
+        return c
+
     # Pick 族的 PS 全语料唯一(与材质/前缀无关, 恒 3148B) => 预取银行里任意一条 Pick 槽的 key
     pick_key = next((k for k in bank if k.startswith("cutout_ps|") and "|Pick" in k), None)
 
@@ -246,7 +275,15 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     slots = []
     for r in recs:
         pre, tech = r.get("prefix") or "", r["tech"]
-        vs = bank_blob("standard_vs|%s|%s" % (pre, tech)) if r.get("vs_kind") else None
+        vs = None
+        if r.get("vs_kind"):
+            _src, vs = vs_for("standard_vs|%s|%s" % (pre, tech))
+            if _src == "gen":
+                vs_stat["gen"] += 1
+            elif _src == "bank":
+                vs_stat["bank"] += 1
+            elif _src == "none":
+                vs_stat["none"] += 1
         cs = bank_blob("%s|%s|%s" % (r["cs_kind"], pre, tech)) if r.get("cs_kind") else None
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
@@ -573,6 +610,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "pt_miss": pt_miss, "pt_nomap": pt_nomap,
         "boundary": boundary, "boundary_pairs": len(_seen),
         "tex_regs": tex_regs, "tex_gap": tex_gap,
+        "vs_gen": vs_stat["gen"], "vs_bank": vs_stat["bank"],
+        "vs_missing": vs_stat["none"], "vs_cache": len(_vs_cache),
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
         "depth_ps": "material",
         "presets": _rep.get("presets") or [],
