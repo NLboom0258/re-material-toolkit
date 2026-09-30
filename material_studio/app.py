@@ -2432,7 +2432,7 @@ class MaterialSystemPanel(QWidget):
 
         form = QFormLayout()
         self.cmb_light = NoWheelComboBox()
-        for label, val in (("默认光照", "default"), ("自定义光照", "custom")):
+        for label, val in (("默认", "default"), ("自定义", "custom")):
             self.cmb_light.addItem(label, val)
         self.cmb_shading = NoWheelComboBox()
         # 前向暂去掉(模板已归档; 之后重构再加回)
@@ -2441,7 +2441,7 @@ class MaterialSystemPanel(QWidget):
         self.ed_mmtr = QLineEdit()
         self.ed_mmtr.setPlaceholderText("导出 mdf2 时的 MasterMaterial 路径(可留空)")
         self.ed_name = QLineEdit()
-        form.addRow("光照模式", self.cmb_light)
+        form.addRow("输出模式", self.cmb_light)
         form.addRow("着色类型", self.cmb_shading)
         form.addRow("材质路径(mdf2 用)", self.ed_mmtr)
         form.addRow("材质名", self.ed_name)

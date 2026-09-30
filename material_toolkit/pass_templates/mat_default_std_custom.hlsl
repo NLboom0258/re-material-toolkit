@@ -2,9 +2,9 @@
 // **初始即等价"默认光照"模式** —— 中性 PBR 值, 并按默认模板(deferred_std)的相同规则
 // 打包进 4 个原始 GBuffer RT; 曝光抵消也在此做。因这些逻辑都在材质源里, 用户可**删改**。
 // 依赖的预设输入已声明(下方 `//! preset`); 删掉它们即表示自行接管对应逻辑。
-//! preset NormalWS
-//! preset TangentWS
-//! preset BitangentWS
+//! preset Normal
+//! preset Tangent
+//! preset Bitangent
 //! preset velocity
 //! preset exposureScale
 //! preset gbufferTypeFlag
@@ -21,10 +21,10 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
     float  Translucency = 0.0;
 
     // ---- 打包(复刻 deferred_std 模板的输出逻辑) ----
-    // 法线基: GBuffer/插值约定 = 世界空间基再 .xzy (预设给的是世界空间)
-    float3 N = mi.NormalWS.xzy;
-    float3 T = mi.TangentWS.xzy;
-    float3 B = mi.BitangentWS.xzy;
+    // 法线基: 直接用 GBuffer/插值约定基(Normal/Tangent/Bitangent 预设已按该约定)
+    float3 N = mi.Normal;
+    float3 T = mi.Tangent;
+    float3 B = mi.Bitangent;
 
     float metallic = saturate(Metallic * 1.02 - 0.02);
     bool opaque = (metallic > 0.0) || (Translucency <= 0.0);

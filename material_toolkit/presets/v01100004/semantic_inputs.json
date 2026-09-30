@@ -52,6 +52,36 @@
       ]
     },
     {
+      "name": "Normal",
+      "group": "几何",
+      "desc": "GBuffer/插值约定的世界法线基 N(已 .xzy; 供直写 RT2 打包; 光照请用 NormalWS)",
+      "depends": ["INTERPOLATOR0"],
+      "field": {"name": "Normal", "type": "float3"},
+      "impl": ["mi.Normal = normalize(i.v1.xyz).xzy;"]
+    },
+    {
+      "name": "Tangent",
+      "group": "几何",
+      "desc": "GBuffer/插值约定的切线基 T(供直写 RT2 打包)",
+      "depends": ["INTERPOLATOR1", "INTERPOLATOR2"],
+      "field": {"name": "Tangent", "type": "float3"},
+      "impl": ["mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));"]
+    },
+    {
+      "name": "Bitangent",
+      "group": "几何",
+      "desc": "GBuffer/插值约定的副切线基 B(由 N×T 与符号得; 供直写 RT2 打包)",
+      "depends": ["INTERPOLATOR0", "INTERPOLATOR1", "INTERPOLATOR2"],
+      "field": {"name": "Bitangent", "type": "float3"},
+      "impl": [
+        "float3 _nB = normalize(i.v1.xyz).xzy;",
+        "float3 _tB = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
+        "float3 _bB = cross(_nB, _tB);",
+        "_bB = (i.v3.z < 0.0) ? -_bB : _bB;",
+        "mi.Bitangent = normalize(_bB);"
+      ]
+    },
+    {
       "name": "positionWS",
       "group": "几何",
       "desc": "世界坐标(插值 v3.w/v4.xy)",
