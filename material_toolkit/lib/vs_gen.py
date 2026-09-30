@@ -222,6 +222,13 @@ _IN_KEY = {
 }
 
 
+# "补输入": reduced 族 -> 带全属性的族。用于顶点效果需要在 depth/shadow/pick 也算出来的
+# 场合(否则那些 pass 的钩子拿不到法线等, 与颜色 pass 对不上)。换族后还须同步记录的 d30
+# (输入布局码) —— 见 mmtr_nogen.d30_map。是否启用由材质系统决定(手动开关 / 预设输入依赖)。
+FULLMAP = {"pos_uv1": "full", "skin_min": "skin_full",
+           "nrm_uv1": "full", "skin_min_nrm": "skin_full"}
+
+
 def spec_from_blob(blob):
     """从银行标准 VS blob 反推生成 spec(输入族/世界来源/输出/Clip/Shadow)。"""
     from . import dxbc_sig as SG

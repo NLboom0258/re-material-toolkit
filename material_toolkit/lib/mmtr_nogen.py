@@ -225,6 +225,35 @@ def standard_variants():
     return out
 
 
+_d30_map_cache = None
+
+
+def d30_map():
+    """(prefix, family, world) -> 记录 d30(相对 desc 偏移)。由版本目录(records+银行 VS)派生。
+
+    d30 = 记录 `+0x30` = **输入布局码**指针; 其码块随 (family, world) 变。
+    "补输入"换族后, 该槽 d30 须重指到"目标 family+world"的码块 ⇒ 需本映射(取自同族 donor 槽)。
+    """
+    global _d30_map_cache
+    if _d30_map_cache is None:
+        data, idx = _load_bank()
+        recs = json.load(open(P.records_path(), encoding="utf-8"))
+        m = {}
+        for r in recs:
+            if not r.get("vs_kind") or not r.get("d30"):
+                continue
+            pre, tech = r.get("prefix") or "", r["tech"]
+            e = idx.get("standard_vs|%s|%s" % (pre, tech))
+            if not e:
+                continue
+            sp = VG.spec_from_blob(bytes(data[e[0]:e[0] + e[1]]))
+            if not sp or not sp.get("family"):
+                continue
+            m.setdefault((pre, sp["family"], sp["world"]), r["d30"])
+        _d30_map_cache = m
+    return _d30_map_cache
+
+
 def build_standard_vs(material_src, bank_key):
     """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
     data, idx = _load_bank()
@@ -240,11 +269,14 @@ def build_standard_vs(material_src, bank_key):
     return src, dxbc, err
 
 
-def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
+def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None,
+          force_full_inputs=False):
     """-> (mmtr bytes, report)。
 
     iface: 接口(来自 material_iface); None 时按材质源码的 `//! param/tex` 声明自动生成
            (无声明则保持零声明)。
+    force_full_inputs: 为 True 时**强制**把 reduced 族(depth/shadow/pick)补输入到完整族
+           (`full`/`skin_full`); 默认 False(仅当顶点钩子引用了缺属性字段时自动补)。
     寄存器由 d3dcompiler **自动紧凑**分配(不写 `register`; 见 `material_pass` 文件头)。
     """
     if not P.has_preset():
@@ -262,26 +294,35 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
 
     # 标准 VS: **优先自生**(vs_gen 反推 spec→生成→编译 vs_5_0), 失败/无键回退银行字节。
     # 引擎只看签名+绑定组(离线 62/62 已证自生与银行等价) ⇒ 属行为等价的内部替换。
-    vs_stat = {"gen": 0, "bank": 0, "none": 0}
+    vs_stat = {"gen": 0, "bank": 0, "none": 0, "upgraded": 0}
 
     def vs_for(key):
-        """键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。结果全局缓存(键含钩子签名)。"""
-        ck = (key, _hook_h)
+        """键 -> (kind, dxbc, spec_used, orig_family); kind ∈ {"gen","bank","none"}。
+
+        结果全局缓存(键含钩子签名 + 补输入标志)。_upg 时对 reduced 族做"补输入"(换完整族)。
+        """
+        ck = (key, _hook_h, _upg)
         c = _vs_cache.get(ck)
         if c is None:
             ref = bank_blob(key)
             if not ref:
-                c = ("none", None)
+                c = ("none", None, None, None)
             else:
-                gen = None
+                gen, spec_used, orig_fam = None, None, None
                 try:
                     spec = VG.spec_from_blob(ref)
                     if spec and spec.get("family"):
+                        orig_fam = spec["family"]
+                        spec_used = spec
+                        if _upg and orig_fam in VG.FULLMAP:
+                            spec_used = dict(spec)
+                            spec_used["family"] = VG.FULLMAP[orig_fam]
                         gen, _err = VG.compile_vs(
-                            VG.build_from_spec(spec, hook=vs_hook_src or None))
+                            VG.build_from_spec(spec_used, hook=vs_hook_src or None))
                 except Exception:
                     gen = None
-                c = ("gen", gen) if gen else ("bank", ref)
+                c = (("gen", gen, spec_used, orig_fam) if gen
+                     else ("bank", ref, None, None))
             _vs_cache[ck] = c
         return c
 
@@ -306,6 +347,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     vs_hook_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"),
                                  "MaterialDepth")
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
+    # "补输入": 是否把 reduced 族(深度/阴影/拾取)换到完整族。
+    # 目前仅由**手动开关**(force_full_inputs)决定; 之后由"预设输入依赖"自动触发(缺值被依赖时)。
+    _upg = bool(force_full_inputs)
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
     iface, ka, _rep = INP.build_iface_and_keepalive(
@@ -349,14 +393,22 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     for r in recs:
         pre, tech = r.get("prefix") or "", r["tech"]
         vs = None
+        _src = None
+        rel30 = None
         if r.get("vs_kind"):
-            _src, vs = vs_for("standard_vs|%s|%s" % (pre, tech))
+            _src, vs, _vsp, _vof = vs_for("standard_vs|%s|%s" % (pre, tech))
             if _src == "gen":
                 vs_stat["gen"] += 1
             elif _src == "bank":
                 vs_stat["bank"] += 1
             elif _src == "none":
                 vs_stat["none"] += 1
+            # 补输入: 该槽被升级(reduced -> 完整族) ⇒ 记录 d30 须重指到目标族码块。
+            if _src == "gen" and _vof in VG.FULLMAP and _vsp.get("family") != _vof:
+                _m = d30_map()
+                rel30 = (_m.get((pre, _vsp["family"], _vsp["world"]))
+                         or _m.get((pre, _vsp["family"])))
+                vs_stat["upgraded"] += 1
         cs = bank_blob("%s|%s|%s" % (r["cs_kind"], pre, tech)) if r.get("cs_kind") else None
         if r.get("ps_kind") == "material_ps":
             ps = ps_inst if (ps_inst is not None and r.get("ps_inst")) else ps_blob
@@ -372,7 +424,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
             ps = bank_blob("%s|%s|%s" % (r["ps_kind"], pre, tech))
         else:
             ps = None
-        slots.append({"slot": r["slot"], "rec": r, "vs": vs, "ps": ps, "cs": cs})
+        slots.append({"slot": r["slot"], "rec": r, "vs": vs, "ps": ps, "cs": cs,
+                      "rel30": rel30})
 
     # 3) 绑定组(RDEF 派生) + 去重
     cbs_of = {}       # (vs,ps) -> {name: (size, count, members)}
@@ -566,7 +619,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         struct.pack_into("<I", head, base + 0xC8, int(r.get("c8") or 0))
         struct.pack_into("<I", head, base + 0xA0, len(s["cs"]) if s["cs"] else 0)
         for fo, rk in ((0x30, "d30"), (0x68, "d68")):
-            rel = r.get(rk)
+            rel = (s["rel30"] if (fo == 0x30 and s.get("rel30") is not None)
+                   else r.get(rk))
             struct.pack_into("<I", head, base + fo, desc_base + rel if rel else 0)
         k = gkey.get(i)
         if k is not None:
@@ -685,6 +739,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "vs_gen": vs_stat["gen"], "vs_bank": vs_stat["bank"],
         "vs_missing": vs_stat["none"], "vs_cache": len(_vs_cache),
+        "vs_upgrade": _upg, "vs_upgraded": vs_stat["upgraded"],
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
         "depth_ps": "material",
         "presets": _rep.get("presets") or [],
