@@ -6,7 +6,7 @@
   实机/离线结论: FXC **保留"已声明未使用"的输入** ⇒ 复刻 ISGN 只需声明完整 struct。
   材质族打包(= PS 模板解包约定, 全变体统一):
     i0=(worldN.xyz, uv0.x) i1=(uv0.y, uv1.xy, worldT.x) i2=(worldT.y, worldT.z, tan.w, worldPos.x)
-    i3=(worldPos.y, worldPos.z, prevClip.xy) i4=prevClip.z
+    i3=(worldPos.y, worldPos.z, prevClip.xy) i4=prevClip.**w**(齐次项, 非 .z)
 """
 from . import mmtr_blobs as B
 
@@ -128,7 +128,9 @@ def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=False):
         "o.i1 = float4(i.uv0.y, i.uv1.xy, %s.x);" % t,
         "o.i2 = float4(%s.y, %s.z, i.tan.w, %s.x);" % (t, t, pos),
         "o.i3 = float4(%s.y, %s.z, %s.xy);" % (pos, pos, pclip),
-        "o.i4 = %s.z;" % pclip,
+        # i4 = **prevClip.w**(齐次除法项) —— 千万别写成 .z! 材质 PS 里 `vel = i.v4.zw/i.v5.x - ndc`
+        # 把 i.v5.x 当上一帧裁剪坐标的 **W** 用; 写 .z 会让运动矢量全错(TAA 把抖动累积成条状/残影)。
+        "o.i4 = %s.w;" % pclip,
     ]
     if clip:
         L.append("o.cd = dot(clipplane, float4(%s, 1.0));" % pos)
