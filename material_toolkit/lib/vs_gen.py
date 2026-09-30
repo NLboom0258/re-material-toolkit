@@ -220,8 +220,12 @@ def spec_from_blob(blob):
     n_interp = sum(1 for (n, *_r) in outs if n.upper().startswith("INTERPOLATOR"))
     clip = any(n.upper() == "SV_CLIPDISTANCE" for (n, *_r) in outs)
     nointerp0 = any(n.upper().startswith("NOINTERPOLATOR") for (n, *_r) in outs)
-    cbn = sorted(n for (n, *_r) in (R.rdef_cbuffers(blob) or []))
-    srv = sorted((R.rdef_resources(blob) or (None, None, set()))[2])
+    # 顺序必须**保留银行 RDEF 声明序**(不可排序): 引擎按 shader 声明序给引擎资源分槽 ——
+    # 排序会把 SkinningMatrices/InstanceWorldInfo、SceneInfo/RootConstant 对调,
+    # 致蒙皮读到错误的矩阵/实例信息 ⇒ 顶点炸开成条状(实机 2026-09-30)。
+    _bo = R.rdef_bind_order(blob) or {"cb": [], "smp": [], "tex": []}
+    cbn = list(_bo["cb"])
+    srv = list(_bo["tex"])
     if "SkinningMatrices" in srv:
         world = "skin_indirect" if "IndirectIndicesBuffer" in srv else "skin"
     elif "IndirectIndicesBuffer" in srv:
