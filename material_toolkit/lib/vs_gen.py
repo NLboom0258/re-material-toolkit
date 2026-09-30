@@ -10,6 +10,17 @@
 """
 from . import mmtr_blobs as B
 
+# 顶点钩子输入结构(用户 `MaterialVertex` 的入参)。字段固定 —— 缺属性的输入族给 0。
+VERTEX_INPUT_STRUCT = (
+    "struct VertexInput\n"
+    "{\n"
+    "    float3 worldPos;       // 世界空间位置\n"
+    "    float3 worldNormal;     // 世界空间法线(该变体无法线时 = 0)\n"
+    "    float3 worldTangent;    // 世界空间切线(无切线时 = 0)\n"
+    "    float2 uv0;             // 第一套 UV(无时 = 0)\n"
+    "    float2 uv1;             // 第二套 UV(无时 = 0)\n"
+    "};\n")
+
 # 输入族 -> [(hlsl_type, var, semantic), ...](声明顺序 == 寄存器序, 必须与 ISGN 一致)
 INPUT_FAMILIES = {
     "Static": [
@@ -328,11 +339,13 @@ def _emit_world(world, need_n, need_t, need_prev):
     raise ValueError("unknown world %r" % world)
 
 
-def _assemble(infields, outs, cbs, srvs, body_lines):
+def _assemble(infields, outs, cbs, srvs, body_lines, extra_global=""):
     from . import material_iface as MI
     L = [MI.hlsl_of(_iface_for(cbs))]
     for n in srvs:
         L.append(_srv_decl(n))
+    if extra_global:
+        L.append(extra_global)
     L.append("struct VSIn {")
     for t, n, sem in infields:
         L.append("    %s %s : %s;" % (t, n, sem))
@@ -351,20 +364,44 @@ def _assemble(infields, outs, cbs, srvs, body_lines):
     return "\n".join(L) + "\n"
 
 
-def build_from_spec(spec):
-    """按 spec(来自 spec_from_blob)生成 VS 源。"""
+def build_from_spec(spec, hook=None):
+    """按 spec(来自 spec_from_blob)生成 VS 源。
+
+    hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入(填 VertexInput -> 取世界偏移 ->
+    施加到 wp, 并把同一偏移加到“上一帧世界位置”以保持运动矢量一致)。None => 不注入(现状)。
+    """
     world = spec["world"]
     pack, interp = spec["pack"], spec["interp"]
     clip, shadow = spec["clip"], spec["shadow"]
     nointerp0 = spec.get("nointerp0", False)
+    in_names = {n for (_t, n, _s) in _BASE_IN[spec["family"]]}
+    has_nrm, has_tan = "nrm" in in_names, "tan" in in_names
+    has_uv0, has_uv1 = "uv0" in in_names, "uv1" in in_names
     need_n = (pack == "mat") or shadow
     need_t = (pack == "mat")
     need_prev = (pack == "mat")
+    if hook:
+        # 钩子需要这些量 -> 按可用性补算(未用则被 DCE)
+        need_n = need_n or has_nrm
+        need_t = need_t or has_tan
     L, prevw = _emit_world(world, need_n, need_t, need_prev)
     if shadow:
         L.extend(shadow_offset(wp="wp", n="wN").splitlines())
+    if hook:
+        # 世界变换(+shadow)之后、打包之前: 填输入 -> 取世界偏移 -> 施加(并同步到上一帧)
+        L.append("VertexInput _vi;")
+        L.append("_vi.worldPos = wp;")
+        L.append("_vi.worldNormal = %s;" % ("wN" if has_nrm else "float3(0.0, 0.0, 0.0)"))
+        L.append("_vi.worldTangent = %s;" % ("wT" if has_tan else "float3(0.0, 0.0, 0.0)"))
+        L.append("_vi.uv0 = %s;" % ("i.uv0" if has_uv0 else "float2(0.0, 0.0)"))
+        L.append("_vi.uv1 = %s;" % ("i.uv1" if has_uv1 else "float2(0.0, 0.0)"))
+        L.append("float3 _dv = MaterialVertex(_vi);")
+        L.append("wp += _dv;")
     if pack == "mat":
-        L.append("float4 pclip = mul(%s, prevViewProjMat);" % prevw)
+        if hook:
+            L.append("float4 pclip = mul(%s + float4(_dv, 0.0), prevViewProjMat);" % prevw)
+        else:
+            L.append("float4 pclip = mul(%s, prevViewProjMat);" % prevw)
         L.extend(mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=clip).splitlines())
         outs = [("float4", "i0", "INTERPOLATOR0"), ("float4", "i1", "INTERPOLATOR1"),
                 ("float4", "i2", "INTERPOLATOR2"), ("float4", "i3", "INTERPOLATOR3"),
@@ -389,7 +426,9 @@ def build_from_spec(spec):
     infields = list(_BASE_IN[spec["family"]])
     if spec["svid"]:
         infields.append(("uint", "svid", "SV_InstanceID"))
-    return _assemble(infields, outs, spec["cbuffers"], spec["srvs"], L)
+    extra = (VERTEX_INPUT_STRUCT + "\n" + hook) if hook else ""
+    return _assemble(infields, outs, spec["cbuffers"], spec["srvs"], L,
+                     extra_global=extra)
 
 
 def compile_vs(src):

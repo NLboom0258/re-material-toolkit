@@ -3148,7 +3148,7 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setText("[材质源为空] 请先「载入默认材质」或填写材质源")
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        missing = [nm for nm in ("MaterialMain", "MaterialDepth")
+        missing = [nm for nm in ("MaterialMain", "MaterialDepth", "MaterialVertex")
                    if nogen._hlsl_fn_span(src, nm) is None]
         if missing:
             self._src_hl.set_diagnostics([])
@@ -3158,8 +3158,8 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
         iface, ka, minput = self._effective_inputs("main")
-        # ---- 主 pass(剥掉 MaterialDepth: 未调用函数里的资源引用会污染主 PS 的 RDEF) ----
-        m_src, m_map = nogen.strip_line_map(src, "MaterialDepth")
+        # ---- 主 pass(剥掉 MaterialDepth/MaterialVertex: 未调用函数/VS 类型会污染主 PS) ----
+        m_src, m_map = nogen.strip_line_map_multi(src, ("MaterialDepth", "MaterialVertex"))
         try:
             self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
                                                          keepalive=ka, minput=minput))
@@ -3171,8 +3171,8 @@ class MaterialSystemPanel(QWidget):
             return
         m_dxbc, m_err = mpass.compile_shading(m_src, tmpl, iface=iface,
                                               keepalive=ka, minput=minput)
-        # ---- 深度 pass(恒组装; 剥掉 MaterialMain) ----
-        d_src, d_map = nogen.strip_line_map(src, "MaterialMain")
+        # ---- 深度 pass(恒组装; 剥掉 MaterialMain/MaterialVertex) ----
+        d_src, d_map = nogen.strip_line_map_multi(src, ("MaterialMain", "MaterialVertex"))
         iface_d, _, _ = self._effective_inputs("depth")
         try:
             self.ed_full_depth.setPlainText(

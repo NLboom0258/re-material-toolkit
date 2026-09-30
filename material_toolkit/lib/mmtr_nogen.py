@@ -122,8 +122,13 @@ def depth_hook_ps(material_src, iface, minput):
 
 
 def _hlsl_fn_span(src, name):
-    """定位 `void NAME(...) {...}` 的 [start, end); 无则 None(简单大括号计数)。"""
-    m = re.search(r"\bvoid\s+%s\s*\(" % re.escape(name), src or "")
+    """定位 `TYPE NAME(...) {...}` 的 [start, end); 无则 None(简单大括号计数)。
+
+    TYPE 不限 `void`(如 VS 钩子 `float3 MaterialVertex(...)`); 限定在**行首**(定义),
+    避免误匹配调用(`= NAME(` / `return NAME(`)。
+    """
+    m = re.search(r"^[ \t]*[A-Za-z_]\w*\s+%s\s*\(" % re.escape(name), src or "",
+                  re.MULTILINE)
     if not m:
         return None
     i = src.index("{", m.start())
@@ -175,6 +180,23 @@ def strip_line_map(src, name):
     return stripped, _m
 
 
+def strip_line_map_multi(src, names):
+    """连续删除多个函数, 并把行映射合成为“新源行 -> 原源行”。
+
+    用于 PS 编译: 须同时剥掉其它 pass 的函数(`MaterialMain`/`MaterialDepth`/`MaterialVertex`)。
+    """
+    cur, maps = src, []
+    for nm in names:
+        cur, m = strip_line_map(cur, nm)
+        maps.append(m)
+
+    def _m(ln):
+        for m in reversed(maps):
+            ln = m(ln)
+        return ln
+    return cur, _m
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None):
     """-> (mmtr bytes, report)。
 
@@ -200,8 +222,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     vs_stat = {"gen": 0, "bank": 0, "none": 0}
 
     def vs_for(key):
-        """键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。结果全局缓存(见 _vs_cache)。"""
-        c = _vs_cache.get(key)
+        """键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。结果全局缓存(键含钩子签名)。"""
+        ck = (key, _hook_h)
+        c = _vs_cache.get(ck)
         if c is None:
             ref = bank_blob(key)
             if not ref:
@@ -211,11 +234,12 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                 try:
                     spec = VG.spec_from_blob(ref)
                     if spec and spec.get("family"):
-                        gen, _err = VG.compile_vs(VG.build_from_spec(spec))
+                        gen, _err = VG.compile_vs(
+                            VG.build_from_spec(spec, hook=vs_hook_src or None))
                 except Exception:
                     gen = None
                 c = ("gen", gen) if gen else ("bank", ref)
-            _vs_cache[key] = c
+            _vs_cache[ck] = c
         return c
 
     # Pick 族的 PS 全语料唯一(与材质/前缀无关, 恒 3148B) => 预取银行里任意一条 Pick 槽的 key
@@ -223,16 +247,22 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
 
     # 1) 我们的 PS (接口 + 保活: 材质声明 -> 规范发射; 引擎资源声明 -> 声明即保活)
     from . import material_inputs as INP
-    # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth; 之后新增 pass 同理)
+    # 每个 pass 函数都必须存在(MaterialMain/MaterialDepth/MaterialVertex; 之后新增 pass 同理)
     require_fn(material_src, "MaterialMain")
     require_fn(material_src, "MaterialDepth")
+    require_fn(material_src, "MaterialVertex")
     # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
     _confl = MG.param_name_conflicts(MG.parse_decls(material_src)[0])
     if _confl:
         raise ValueError("材质参数命名冲突:\n  " + "\n  ".join(_confl))
     # 每 pass 一份源(剥掉别的 pass 的函数: 未调用函数里的资源引用既不被 DCE、也会影响保活)。
-    mp_src = _strip_hlsl_fn(material_src, "MaterialDepth")
-    d_src = _strip_hlsl_fn(material_src, "MaterialMain")
+    #   PS 编译须再剥 `MaterialVertex`(VS 钩子用到 VertexInput, PS 侧无此类型)。
+    mp_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialDepth"), "MaterialVertex")
+    d_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"), "MaterialVertex")
+    # VS 钩子源 = 材质源剥掉两个 PS 函数(`MaterialVertex` + 辅助函数; `//!` 是注释, 无害)。
+    vs_hook_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"),
+                                 "MaterialDepth")
+    _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
     iface, ka, _rep = INP.build_iface_and_keepalive(

@@ -17,3 +17,9 @@ void MaterialDepth(DepthInput di, inout bool discardPixel)
 {
     discardPixel = false;
 }
+
+// 顶点钩子(必需, VS 级): 缺省不偏移 ⇒ 等价“无钩子”的标准 VS(逐字节一致)。
+float3 MaterialVertex(VertexInput v)
+{
+    return float3(0.0, 0.0, 0.0);
+}
