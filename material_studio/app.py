@@ -2798,8 +2798,12 @@ class MaterialSystemPanel(QWidget):
             self._tags[("engine", n)] = tags.get(n)
 
     def _locked_names(self, pass_name="main"):
-        """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。"""
-        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface(pass_name)))
+        """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。
+
+        **只算该 pass 自己的预设**(之前用全量 `_presets` ⇒ 会把另一 pass 预设的依赖也算成本 pass 锁定)。
+        """
+        _pre = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
         _pt = "深度 pass" if pass_name == "depth" else "主 pass"
         _tmpl = self.asset.template.get("pass_template") or "deferred_std"
@@ -2854,22 +2858,52 @@ class MaterialSystemPanel(QWidget):
         self._rewrite_decls()
 
     def _add_presets(self):
-        """从预设(语义)输入目录挑选; 依赖的引擎资源会自动加入并锁定。"""
+        """从预设(语义)输入目录挑选(**只增删当前 pass 的项**); 依赖的引擎资源会自动加入并锁定。"""
         self._load_decls_from_src()
-        d = PresetDialog(self, selected=set(self._presets))
+        _pass = self._cur_pass()
+        _own = [n for n in self._presets if self._pass_belongs("preset", n, _pass)]
+        # 初选 = 本 pass 已添加项(不夹带另一 pass, 否则会“显示成已添加但实际没加”)。
+        d = PresetDialog(self, selected=set(_own))
         if d.exec() != QDialog.Accepted:
             return
-        _old = set(self._presets)
-        self._presets = d.selected_names()
+        self._apply_presets(_pass, d.selected_names())
+
+    def _apply_presets(self, pass_name, selected):
+        """把某 pass 的预设选择结果落到全局 `_presets`: **其它 pass 的项保持不变**。
+
+        回归保护: 之前对话框初选=全部预设、且直接覆盖 `_presets` ⇒ 在深度页添加的项会
+        “显示成”主 pass 已添加(实际未加)。本方法保证三页(主/深度/顶点)各自独立增删。
+        """
+        self._load_decls_from_src()
+        _own = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        _old = set(_own)
+        _sel = [n for n in selected]
+        _sel_set = set(_sel)
+        for n in (_old - _sel_set):               # 本页取消的项: 删标签(等价删除)
+            self._tags.pop(("preset", n), None)
+        for n in _sel:                            # 本页选中的项: 打本页标签
+            self._tags[("preset", n)] = pass_name
+        _res, _seen = [], set()                   # 重排(保序): 其它 pass 的项 + 本页结果
         for n in self._presets:
-            if n not in _old:
-                self._tags[("preset", n)] = self._cur_pass()
+            if n in _old:
+                if n in _sel_set:
+                    _res.append(n)
+                    _seen.add(n)
+            else:
+                _res.append(n)
+                _seen.add(n)
+        for n in _sel:
+            if n not in _seen:
+                _res.append(n)
+                _seen.add(n)
+        self._presets = _res
         self._rewrite_decls()
+        return list(self._presets)
 
     def _add_engine(self):
         """从允许清单挑选引擎资源(cbuffer/texture/sampler); 声明即保活。"""
         self._load_decls_from_src()
-        lock = self._locked_names()
+        lock = self._locked_names(self._cur_pass())
         d = EngineResDialog(self, selected=set(self._engine), locked=set(lock))
         if d.exec() != QDialog.Accepted:
             return
