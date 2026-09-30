@@ -368,12 +368,13 @@ def build_from_spec(spec):
                 ("float4", "i2", "INTERPOLATOR2"), ("float4", "i3", "INTERPOLATOR3"),
                 ("float", "i4", "INTERPOLATOR4")]
         if nointerp0:
-            # 必须声明为 float4: FXC 会把相邻的同类型标量输出(F INTERPOLATOR4 + 本项)
-            # 打包进同一寄存器(本项只占 .y) ⇒ PS 读 NOINTERPOLATOR0.x 时边界超标、
-            # pass 被静默跳过。float4 无法挤进剩余分量 ⇒ 独占新寄存器 x 分量。
-            # (NOINTERPOLATOR 不插值, 多出分量无插值成本; 引擎只校验 PS 输入 ⊆ VS 输出。)
-            L.append("o.n0 = float4((float)i.svid, 0.0, 0.0, 0.0);")
-            outs.append(("float4", "n0", "NOINTERPOLATOR0"))
+            # 必须声明为 `nointerpolation`: 否则 FXC 会把相邻的同类型标量输出
+            # (float INTERPOLATOR4 + 本项)打包进同一寄存器(本项只占 .y) ⇒ mask 错位。
+            # 用 `nointerpolation` 让 FXC 分到**独立寄存器**(mask=1), 精确复刻银行;
+            # 绝不可用 float4 撑开 —— 虽能独占寄存器但 mask=15 ≠ 银行 1, 引擎会异常
+            # (实机: 近距渐隐抖动图案异常/拖影)。
+            L.append("o.n0 = (float)i.svid;")
+            outs.append(("nointerpolation float", "n0", "NOINTERPOLATOR0"))
         if clip:
             outs.append(("float", "cd", "SV_ClipDistance"))
     else:
