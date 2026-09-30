@@ -46,6 +46,13 @@ INPUT_FAMILIES = {
         ("uint4", "bi", "INDEX0"), ("float4", "bw", "WEIGHT0"),
         ("float2", "uv1", "Texcoord1"), ("uint", "svid", "SV_InstanceID"),
     ],
+    "NrmUV1": [
+        ("float3", "p0", "POSITION0"), ("float4", "nrm", "NORMAL0"),
+        ("float2", "uv1", "Texcoord1"),
+    ],
+    "PosUV1": [
+        ("float3", "p0", "POSITION0"), ("float2", "uv1", "Texcoord1"),
+    ],
     "PreTransformMin": [
         ("float3", "p0", "POSITION0"), ("float2", "uv1", "Texcoord1"),
     ],
@@ -110,15 +117,59 @@ def build_source(input_family, cbuffers, out_fields, body, srvs=()):
     return "\n".join(L) + "\n"
 
 
-def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip"):
-    """材质族统一打包(pos/n/t = float3 世界量; pclip = float4 上一帧裁剪坐标)。"""
-    return "\n".join([
+def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=False):
+    """材质族统一打包(pos/n/t = float3 世界量; pclip = float4 上一帧裁剪坐标)。
+
+    clip=True 时额外输出 SV_ClipDistance = dot(clipplane, float4(pos,1))。
+    """
+    L = [
         "o.pos = mul(float4(%s, 1.0), viewProjMat);" % pos,
         "o.i0 = float4(%s.xyz, i.uv0.x);" % n,
         "o.i1 = float4(i.uv0.y, i.uv1.xy, %s.x);" % t,
         "o.i2 = float4(%s.y, %s.z, i.tan.w, %s.x);" % (t, t, pos),
         "o.i3 = float4(%s.y, %s.z, %s.xy);" % (pos, pos, pclip),
         "o.i4 = %s.z;" % pclip,
+    ]
+    if clip:
+        L.append("o.cd = dot(clipplane, float4(%s, 1.0));" % pos)
+    return "\n".join(L)
+
+
+def depth_pack(pos="wp", interp=False, clip=False):
+    """深度族打包: o.pos = pos·viewProj; interp=True 时输出 uv0+pos(与 deferred_depth 解包一致);
+    clip=True 时输出 SV_ClipDistance。"""
+    L = ["o.pos = mul(float4(%s, 1.0), viewProjMat);" % pos]
+    if interp:
+        L.append("o.j0 = float4(i.uv0, %s.xy);" % pos)
+        L.append("o.j1 = float2(%s.z, 0.0);" % pos)
+    if clip:
+        L.append("o.cd = dot(clipplane, float4(%s, 1.0));" % pos)
+    return "\n".join(L)
+
+
+def shadow_offset(wp="wp", n="wN"):
+    """Shadow 族: 沿法线偏移世界位置(抗阴影痤疮), 逐条对应原版 asm(blob4/b8)。
+
+    依赖 ShadowCastInfo(shadowCastDepthBias/SlopeBias) + SceneInfo(transposeViewInvMat/
+    projElement[1].y/screenInverseSize.x)。开启条件 = 两个 bias 均非 0。
+    """
+    return "\n".join([
+        "float3 _cam = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w,"
+        " transposeViewInvMat[2].w);",
+        "if (shadowCastDepthBias != 0.0 && shadowCastSlopeBias != 0.0) {",
+        "    if (0.5 < abs(projElement[1].y)) {",
+        "        float3 _vd = normalize(_cam - %s);" % wp,
+        "        float _b = ((1.0 - saturate(dot(%s, -_vd))) * screenInverseSize.x)"
+        " * shadowCastSlopeBias + shadowCastDepthBias;" % n,
+        "        %s = %s - _vd * _b;" % (wp, wp),
+        "    } else {",
+        "        float3 _vd = -float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z,"
+        " transposeViewInvMat[2].z);",
+        "        float _b = ((1.0 - saturate(dot(%s, _vd))) * screenInverseSize.x)"
+        " * shadowCastSlopeBias + shadowCastDepthBias;" % n,
+        "        %s = %s + _vd * _b;" % (wp, wp),
+        "    }",
+        "}",
     ])
 
 
