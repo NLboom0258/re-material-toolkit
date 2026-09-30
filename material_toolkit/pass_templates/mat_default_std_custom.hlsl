@@ -21,11 +21,6 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
     float  Translucency = 0.0;
 
     // ---- 打包(复刻 deferred_std 模板的输出逻辑) ----
-    // 法线基: 直接用 GBuffer/插值约定基(Normal/Tangent/Bitangent 预设已按该约定)
-    float3 N = mi.Normal;
-    float3 T = mi.Tangent;
-    float3 B = mi.Bitangent;
-
     float metallic = saturate(Metallic * 1.02 - 0.02);
     bool opaque = (metallic > 0.0) || (Translucency <= 0.0);
     float o1w, darkFlag;
@@ -40,8 +35,9 @@ void MaterialMain(in MaterialInput mi, out MaterialOutput m)
         darkFlag = 0.0;
     }
 
+    // 法线基 = GBuffer/插值约定基(Normal/Tangent/Bitangent 预设已按该约定)
     float3 nt = normalize(NormalTS);
-    float3 nrm = normalize(N * nt.z + T * nt.x + B * nt.y);
+    float3 nrm = normalize(mi.Normal * nt.z + mi.Tangent * nt.x + mi.Bitangent * nt.y);
     float2 encN = OctEncodeNormal(nrm).xy;
 
     m.RT0 = float4(Emissive, 0.0);

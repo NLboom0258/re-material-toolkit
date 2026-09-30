@@ -6,6 +6,10 @@
       "fn": "MaterialMain",
       "template": "deferred_std",
       "depends": ["SceneInfo", "GBufferType", "Tonemap", "WhitePtSrv"],
+      "depends_by_template": {
+        "deferred_std_custom": [],
+        "deferred_std_custom_instance": []
+      },
       "interp": [
         {"name": "INTERPOLATOR0", "var": "v1", "mask": 4},
         {"name": "INTERPOLATOR1", "var": "v2", "mask": 4},

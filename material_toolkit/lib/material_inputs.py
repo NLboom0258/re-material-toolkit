@@ -282,14 +282,29 @@ def find(name):
     return None
 
 
-def base_iface_for_pass(pass_name="main"):
+def _pass_deps(pass_name, template=None):
+    """该 pass 的**引擎资源依赖**名列表。
+
+    优先用 passes.json 里该模板的 `depends_by_template[template]` 覆盖(同一 pass 的
+    不同**模板**结构性需求不同: 薄模板(如自定义光照)不直接读引擎资源 ⇒ 依赖为空,
+    其依赖只从**材质的预设**来); 未提供覆盖时回退到 pass 级 `depends`。
+    """
+    p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
+    by = p.get("depends_by_template") or {}
+    if template is not None and template in by:
+        return list(by[template] or [])
+    return list(p.get("depends") or [])
+
+
+def base_iface_for_pass(pass_name="main", template=None):
     """该 pass 的基座接口 = **它声明的引擎资源依赖**(自动分配寄存器)。
 
-    依赖来自 `presets/<ver>/passes.json`; 依赖的资源 -> 被系统自动添加(引擎资源被依赖
-    ⇒ 锁定/不可删)。**固有输入已取消** —— 不再写死基座, SceneInfo 等已归引擎资源。
+    依赖来自 `presets/<ver>/passes.json`(可按 **模板** 覆盖 —— `depends_by_template`);
+    依赖的资源 -> 被系统自动添加(引擎资源被依赖 ⇒ 锁定/不可删)。
+    **固有输入已取消** —— 不再写死基座, SceneInfo 等已归引擎资源。
     GUI 与生成器**都必须**用它, 避免"两条路径基座不一致"。
     """
-    deps = (P.passes().get("passes", {}).get(pass_name, {}) or {}).get("depends") or []
+    deps = _pass_deps(pass_name, template)
     iface = {"cbuffers": [], "textures": [], "samplers": []}
     sel, seen = [], set()
     for nm in deps:
@@ -485,10 +500,9 @@ def interp_has(pass_name, name, material_src=None):
     return False
 
 
-def pass_dep_names(pass_name="main"):
-    """该 pass **声明的引擎资源依赖**名列表(passes.json)。系统自动添加 + 锁定。"""
-    p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
-    return list(p.get("depends") or [])
+def pass_dep_names(pass_name="main", template=None):
+    """该 pass **声明的引擎资源依赖**名列表(passes.json; 可按模板覆盖)。系统自动添加 + 锁定。"""
+    return _pass_deps(pass_name, template)
 
 
 def all_params(material_src):

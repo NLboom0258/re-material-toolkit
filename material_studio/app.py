@@ -2617,13 +2617,16 @@ class MaterialSystemPanel(QWidget):
     def _base_iface(self, pass_name="main"):
         """该 pass 的基座接口 = 它声明的引擎资源依赖(**单一真源**: `minp.base_iface_for_pass`)。
 
-        GUI 与生成器共用, 避免两条路径基座不一致(重复声明/寄存器错配)。按 pass 缓存。
+        GUI 与生成器共用, 避免两条路径基座不一致(重复声明/寄存器错配)。按 (pass, 模板) 缓存
+        —— 不同**模板**的结构性依赖可不同(如自定义光照薄模板依赖为空)。
         """
+        tmpl = self.asset.template.get("pass_template") or "deferred_std"
         if not hasattr(self, "_iface_min"):
             self._iface_min = {}
-        if pass_name not in self._iface_min:
-            self._iface_min[pass_name] = minp.base_iface_for_pass(pass_name)
-        return self._iface_min[pass_name]
+        key = (pass_name, tmpl)
+        if key not in self._iface_min:
+            self._iface_min[key] = minp.base_iface_for_pass(pass_name, tmpl)
+        return self._iface_min[key]
 
     def _effective_inputs(self, pass_name="main"):
         """基座(该 pass 的引擎依赖) + 自定义输入(**按 pass 过滤**); 返回 (iface, keepalive, minput)。"""
@@ -2704,7 +2707,8 @@ class MaterialSystemPanel(QWidget):
         res = sinp.resolve(self._presets, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
         _pt = "深度 pass" if pass_name == "depth" else "主 pass"
-        for nm in minp.pass_dep_names(pass_name):
+        _tmpl = self.asset.template.get("pass_template") or "deferred_std"
+        for nm in minp.pass_dep_names(pass_name, _tmpl):
             lock.setdefault(nm, [])
             if _pt not in lock[nm]:
                 lock[nm].append(_pt)
