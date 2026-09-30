@@ -82,6 +82,38 @@
       "depends": ["SceneInfo"],
       "field": {"name": "camUp", "type": "float3"},
       "impl": ["mi.camUp = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y, transposeViewInvMat[2].y));"]
+    },
+    {
+      "name": "velocity",
+      "group": "系统",
+      "desc": "屏幕空间运动矢量(上一帧裁剪坐标 W 齐次除法 - NDC; 供直写 RT3.zw)",
+      "depends": ["SceneInfo", "INTERPOLATOR3", "INTERPOLATOR4"],
+      "field": {"name": "velocity", "type": "float2"},
+      "impl": [
+        "float2 _ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);",
+        "mi.velocity = (i.v4.zw / i.v5.x) - _ndc;"
+      ]
+    },
+    {
+      "name": "exposureScale",
+      "group": "系统",
+      "desc": "曝光抵消系数 = 1/(白点*曝光系数)(引擎会对 RT0 再乘 <白点*曝光>)",
+      "depends": ["WhitePtSrv", "Tonemap"],
+      "field": {"name": "exposureScale", "type": "float"},
+      "impl": [
+        "float _wp = asfloat(WhitePtSrv.Load(0));",
+        "_wp = (useAutoExposure != 0) ? _wp : 1.0;",
+        "_wp = _wp * exposureAdjustment;",
+        "mi.exposureScale = 1.0 / max(_wp, 0.0001);"
+      ]
+    },
+    {
+      "name": "gbufferTypeFlag",
+      "group": "系统",
+      "desc": "GBuffer 类型标志(写 RT2.w 用; 依赖 GBufferType)",
+      "depends": ["GBufferType"],
+      "field": {"name": "gbufferTypeFlag", "type": "float"},
+      "impl": ["mi.gbufferTypeFlag = gbufferTypeFlag;"]
     }
   ]
 }
