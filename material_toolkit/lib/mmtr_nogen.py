@@ -47,6 +47,7 @@ _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
 # 标准 VS 自生结果缓存: 银行键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。
 # 自生需编译 HLSL(较慢) ⇒ 按键全局缓存, 同一键在多槽/多次构建间复用。
 _vs_cache = {}
+_vs_fail = {}          # (key, hook_h, upg, full) -> 失败原因(生成失败回退银行时记录)
 
 # 引擎 post 表区: InputLayout 元素表等(PT 指针指向此处); 记录栅格尾部与其交叠。
 POST_LO = 0x46210
@@ -342,7 +343,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
 
     # 标准 VS: **优先自生**(vs_gen 反推 spec→生成→编译 vs_5_0), 失败/无键回退银行字节。
     # 引擎只看签名+绑定组(离线 62/62 已证自生与银行等价) ⇒ 属行为等价的内部替换。
-    vs_stat = {"gen": 0, "bank": 0, "none": 0, "upgraded": 0}
+    vs_stat = {"gen": 0, "bank": 0, "none": 0, "upgraded": 0, "failed": []}
+    _vs_fail_seen = set()          # 本次 build 已告警的 bank 键(去重)
 
     def vs_for(key, full=False):
         """键 -> (kind, dxbc, spec_used, orig_family); kind ∈ {"gen","bank","none"}。
@@ -358,6 +360,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                 c = ("none", None, None, None)
             else:
                 gen, spec_used, orig_fam = None, None, None
+                _fail = None
                 try:
                     spec = VG.spec_from_blob(ref)
                     if spec and spec.get("family"):
@@ -370,11 +373,25 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                             VG.build_from_spec(spec_used, hook=vs_hook_src or None,
                                                vs_in=vs_in, depth_full=full,
                                                vs_iface=vs_iface))
-                except Exception:
+                        if not gen:
+                            _fail = _err or "编译返回空"
+                    else:
+                        _fail = "spec 反推失败(银行 blob 无 family)"
+                except Exception as _ex:  # noqa: BLE001
                     gen = None
-                c = (("gen", gen, spec_used, orig_fam) if gen
-                     else ("bank", ref, None, None))
+                    _fail = str(_ex)
+                if gen:
+                    c = ("gen", gen, spec_used, orig_fam)
+                else:
+                    c = ("bank", ref, None, None)
+                    # 生成失败 -> 静默回退银行(保留健壮性); 但**记录原因**(模块级缓存键), 供告警。
+                    _m = re.search(r"error[^\n]*", _fail or "")
+                    _vs_fail[ck] = (_m.group(0) if _m else (_fail or "?"))[:200]
             _vs_cache[ck] = c
+        # 失败信息按 bank 键去重收集(缓存命中也能复现告警)。
+        if c[0] == "bank" and ck in _vs_fail and key not in _vs_fail_seen:
+            _vs_fail_seen.add(key)
+            vs_stat["failed"].append((key, _vs_fail[ck]))
         return c
 
     # Pick 族的 PS 全语料唯一(与材质/前缀无关, 恒 3148B) => 预取银行里任意一条 Pick 槽的 key
@@ -812,6 +829,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "vs_gen": vs_stat["gen"], "vs_bank": vs_stat["bank"],
         "vs_missing": vs_stat["none"], "vs_cache": len(_vs_cache),
+        "vs_gen_failed": len(vs_stat["failed"]),
+        "vs_gen_errors": vs_stat["failed"][:8],
         "vs_upgrade": _upg, "vs_upgraded": vs_stat["upgraded"],
         "vs_attrs": list(vs_in.get("vs_attrs") or []),
         "vs_full_inputs_auto": _auto_upg,

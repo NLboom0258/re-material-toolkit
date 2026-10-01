@@ -3288,12 +3288,23 @@ class MaterialSystemPanel(QWidget):
         return data, {"replaced": [], "replaced_instance": [], "skipped": [],
                       "bad": [], "issues": rp.get("issues", []),
                       "ps_size": rp["ps_size"], "groups": rp["groups"],
-                      "records": rp["records"], "nogen": True}
+                      "records": rp["records"], "nogen": True,
+                      "vs_gen_failed": rp.get("vs_gen_failed") or 0,
+                      "vs_gen_errors": rp.get("vs_gen_errors") or []}
 
     def generate_mmtr(self):
         data, rep = self._generate()
         if data is None:
             return
+        _vf = rep.get("vs_gen_failed") or 0
+        if _vf:
+            _e = "\n".join("  %s\n      %s" % (k, v)
+                            for k, v in (rep.get("vs_gen_errors") or []))
+            QMessageBox.warning(
+                self, "顶点(VS) 生成失败(已回退银行)",
+                "有 %d 个 VS 变体编译失败 ⇒ 已回退为银行字节; 该材质的顶点效果不会生效。\n\n%s\n\n"
+                "常见原因: 顶点里采样必须用 SampleLevel(显式 LOD); 变量名拼写; 未声明标识符。"
+                % (_vf, _e))
         path, _ = QFileDialog.getSaveFileName(self, "生成 mmtr",
                                               self.asset.name + ".mmtr.1808168797",
                                               "mmtr (*.mmtr.1808168797);;All (*)")
