@@ -33,6 +33,7 @@ except ImportError:  # 允许脚本直接 import
 
 _PRESET_RE = re.compile(r"^\s*//!\s*preset\s+(\w+)\s*$")
 _PASS_TAG_RE = re.compile(r"\s+@[A-Za-z_]\w*\s*$")
+_PASS_TAG_G = re.compile(r"@([A-Za-z_]\w*)\s*$")
 _GROUP_NONE = "(未分组)"
 
 # ---- 值层: 每个"阶段值"给 ps/vs/depth 各自的"供值表达式"(真·世界空间/屏幕语义) ----
@@ -109,6 +110,27 @@ def parse_preset_decls(material_src):
         if m and m.group(1) not in out:
             out.append(m.group(1))
     return out
+
+
+def parse_preset_decls_tags(material_src):
+    """`//! preset` -> [(name, tag或None)] (按序去重; tag 如 main/depth/vertex)。"""
+    out, seen = [], set()
+    for line in (material_src or "").splitlines():
+        tm = _PASS_TAG_G.search(line)
+        m = _PRESET_RE.match(_PASS_TAG_RE.sub("", line))
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append((m.group(1), tm.group(1) if tm else None))
+    return out
+
+
+def presets_for_pass(material_src, pass_name):
+    """归属于某 pass 的 `//! preset` 名单: `@pass` 优先; 无标签 -> 归 main。
+
+    目录是**全局**的(任何 pass 都可添加任一项); 启用集按 pass 各自维护(降低耦合)。
+    """
+    return [nm for (nm, tag) in parse_preset_decls_tags(material_src)
+            if (tag or "main") == pass_name]
 
 
 def _is_interp(name):

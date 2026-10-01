@@ -286,7 +286,7 @@ def build_standard_vs(material_src, bank_key):
     if not spec or not spec.get("family"):
         return "", None, "无法从银行 blob 反推 spec"
     from . import semantic_inputs as SI
-    vs_in = SI.resolve(SI.parse_preset_decls(material_src), set(), stage="vs",
+    vs_in = SI.resolve(SI.presets_for_pass(material_src, "vertex"), set(), stage="vs",
                        struct_name="VertexInput", recv="v")
     src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None, vs_in=vs_in)
     dxbc, err = VG.compile_vs(src)
@@ -374,10 +374,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     vs_hook_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"),
                                  "MaterialDepth")
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
-    # 顶点预设(stage="vs"): 全局启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
+    # 顶点预设(stage="vs"): 归属 `@vertex` 的启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
     #   同时给出 vs_attrs(需用到的顶点属性) 供"补输入"依赖判定。
     from . import semantic_inputs as SI
-    vs_in = SI.resolve(SI.parse_preset_decls(material_src), set(), stage="vs",
+    vs_in = SI.resolve(SI.presets_for_pass(material_src, "vertex"), set(), stage="vs",
                        struct_name="VertexInput", recv="v")
     if vs_in.get("unsupported"):
         raise ValueError("顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"])
@@ -781,6 +781,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
         "depth_ps": "material",
         "presets": _rep.get("presets") or [],
+        "vs_presets": list(vs_in.get("presets") or []),
         "preset_unknown": _rep.get("preset_unknown") or [],
         "preset_unsupported": _rep.get("preset_unsupported") or [],
         "lock": _rep.get("lock") or {},

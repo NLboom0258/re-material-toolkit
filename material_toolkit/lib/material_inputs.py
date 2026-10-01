@@ -601,12 +601,12 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     textures = [n for n in textures if _belongs(n)]
     eng_names = [n for n in eng_names if _belongs(n)]
 
-    # 预设(语义)输入: **全局(材质级)一份启用集** —— 不按 pass 过滤; 各 pass 从同一份目录
-    #   生成**各自**的输入结构体(MaterialInput/DepthInput/VertexInput)。依赖的引擎资源并入 eng_names。
+    # 预设(语义)输入: 目录**全局**(任何 pass 都可添加); 启用集**按 pass 各自**(`@pass` 标签; 无标签归 main).
+    #   各 pass 从同一目录生成**各自**的输入结构体(MaterialInput/DepthInput/VertexInput)。依赖的引擎资源并入 eng_names.
     from . import semantic_inputs as SI
     _stage = stage or ("depth" if pass_name == "depth" else "ps")
     _sn, _rc = ("DepthInput", "di") if _stage == "depth" else ("MaterialInput", "mi")
-    _presets = SI.parse_preset_decls(material_src)
+    _presets = SI.presets_for_pass(material_src, pass_name or "main")
     _si = SI.resolve(_presets, _iface_names(base_iface), stage=_stage,
                      struct_name=_sn, recv=_rc)
     eng_names = list(eng_names) + list(_si["engine"])

@@ -2806,8 +2806,9 @@ class MaterialSystemPanel(QWidget):
         return w, tree
 
     def _cur_pass(self):
-        """输入页当前查看的 pass 名(按钮组选择)。"""
-        return "depth" if self._in_stack.currentIndex() == 1 else "main"
+        """输入页当前查看的 pass 名(按钮组: 主/深度/顶点)。"""
+        _i = self._in_stack.currentIndex()
+        return "depth" if _i == 1 else ("vertex" if _i == 2 else "main")
 
     def _active_input_tree(self):
         return self.tree_inputs_depth if self._cur_pass() == "depth" else self.tree_inputs
@@ -2833,11 +2834,12 @@ class MaterialSystemPanel(QWidget):
     def _locked_names(self, pass_name="main"):
         """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。
 
-        预设是**全局一份**(主/深度/顶点共用) ⇒ 不按 pass 过滤。
+        只算该 pass 自己的预设(`@pass` 标签; 无标签归 main)。
         """
-        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface(pass_name)))
+        _pre = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
-        _pt = "深度 pass" if pass_name == "depth" else "主 pass"
+        _pt = {"depth": "深度 pass", "vertex": "顶点"}.get(pass_name, "主 pass")
         _tmpl = self.asset.template.get("pass_template") or "deferred_std"
         for nm in minp.pass_dep_names(pass_name, _tmpl):
             lock.setdefault(nm, [])
@@ -2873,7 +2875,7 @@ class MaterialSystemPanel(QWidget):
             return (" @%s" % t) if t else ""
         lines = (["//! vertex force_full_inputs"] if getattr(self, "_force_full", False)
                  else [])
-        lines += ["//! preset %s" % n for n in self._presets]
+        lines += ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
         lines += ["//! param %s %s%s" % (t, n, _tg("param", n)) for n, t in self._params]
         lines += ["//! tex %s%s" % (n, _tg("tex", n)) for n in self._textures]
         lines += ["//! engine %s%s" % (n, _tg("engine", n)) for n in self._engine]
@@ -2892,22 +2894,43 @@ class MaterialSystemPanel(QWidget):
         self._rewrite_decls()
 
     def _add_presets(self):
-        """从预设(语义)输入目录挑选(**全局一份**; 主/深度/顶点共用); 依赖的引擎资源自动加入并锁定。"""
+        """从预设(语义)输入目录挑选(**只增删当前 pass 的项**); 依赖的引擎资源自动加入并锁定。"""
         self._load_decls_from_src()
-        d = PresetDialog(self, selected=set(self._presets))
+        _pass = self._cur_pass()
+        _own = [n for n in self._presets if self._pass_belongs("preset", n, _pass)]
+        d = PresetDialog(self, selected=set(_own))
         if d.exec() != QDialog.Accepted:
             return
-        self._apply_presets(d.selected_names())
+        self._apply_presets(_pass, d.selected_names())
 
-    def _apply_presets(self, selected):
-        """设置**全局启用集**(主/深度/顶点共用)。保序: 已有项保持相对顺序, 新项追加。"""
+    def _apply_presets(self, pass_name, selected):
+        """把某 pass 的预设选择结果落到全局 `_presets`: **其它 pass 的项保持不变**。
+
+        回归保护: 之前对话框初选=全部预设、且直接覆盖 `_presets` ⇒ 在深度页添加的项会
+        “显示成”主 pass 已添加(实际未加)。本方法保证三页(主/深度/顶点)各自独立增删。
+        """
         self._load_decls_from_src()
-        _sel = list(selected)
+        _own = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        _old = set(_own)
+        _sel = [n for n in selected]
         _sel_set = set(_sel)
-        _res = [n for n in self._presets if n in _sel_set]
-        for n in _sel:
-            if n not in _res:
+        for n in (_old - _sel_set):               # 本页取消的项: 删标签(等价删除)
+            self._tags.pop(("preset", n), None)
+        for n in _sel:                            # 本页选中的项: 打本页标签
+            self._tags[("preset", n)] = pass_name
+        _res, _seen = [], set()                   # 重排(保序): 其它 pass 的项 + 本页结果
+        for n in self._presets:
+            if n in _old:
+                if n in _sel_set:
+                    _res.append(n)
+                    _seen.add(n)
+            else:
                 _res.append(n)
+                _seen.add(n)
+        for n in _sel:
+            if n not in _seen:
+                _res.append(n)
+                _seen.add(n)
         self._presets = _res
         self._rewrite_decls()
         return list(self._presets)
