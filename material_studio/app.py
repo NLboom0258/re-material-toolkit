@@ -3338,15 +3338,15 @@ class MaterialSystemPanel(QWidget):
                                               keepalive=ka, minput=minput)
         # ---- 深度 pass(恒组装; 剥掉 MaterialMain/MaterialVertex) ----
         d_src, d_map = nogen.strip_line_map_multi(src, ("MaterialMain", "MaterialVertex"))
-        iface_d, _, _ = self._effective_inputs("depth")
+        iface_d, _, minput_d = self._effective_inputs("depth")
         try:
             self.ed_full_depth.setPlainText(
                 mpass.build_source(d_src, "deferred_depth", iface=iface_d,
-                                   keepalive="", minput=None))
+                                   keepalive="", minput=minput_d))
         except Exception as e:  # noqa: BLE001
             self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
         d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface_d,
-                                              keepalive="", minput=None)
+                                              keepalive="", minput=minput_d)
         # ---- 报错(优先主 pass) ----
         if m_err:
             diags = self._err_diags(m_err, tmpl, m_map)

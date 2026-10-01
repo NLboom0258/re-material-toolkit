@@ -452,11 +452,19 @@ INTERP_DESC = {
 }
 
 
+def _needs_uv0(pass_name, material_src):
+    """该 pass 是否需要 uv0(决定条件化插值声明): 材质代码直接引用, 或该 pass 添加了 `uv0` 预设。"""
+    if _RE_UV0.search(_code_only(material_src)):
+        return True
+    from . import semantic_inputs as SI
+    return "uv0" in SI.presets_for_pass(material_src or "", pass_name)
+
+
 def interp_inputs(pass_name="main", material_src=None):
     """该 pass 声明依赖的插值输入 [(名, 用途)]; 带条件(`when`)的按是否满足过滤。非资源。"""
     out = []
     for s in interp_specs(pass_name):
-        if s.get("when") == "uv0" and not _RE_UV0.search(_code_only(material_src)):
+        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
             continue
         out.append((s["name"], INTERP_DESC.get(s["name"], "")))
     return out
@@ -478,10 +486,9 @@ def interp_specs(pass_name="main"):
 
 def interp_decls(pass_name="main", material_src=None):
     """生成该 pass 的 `PSIn` 插值声明行(缩进 4; 按 `when` 条件过滤)。供模板注入(真驱动)。"""
-    code = _code_only(material_src)
     lines = []
     for s in interp_specs(pass_name):
-        if s.get("when") == "uv0" and not _RE_UV0.search(code):
+        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
             continue
         lines.append("    %s %s : %s;" % (_MASK_TYPE.get(s.get("mask", 4), "float4"),
                                           s.get("var"), s.get("name")))
@@ -490,11 +497,10 @@ def interp_decls(pass_name="main", material_src=None):
 
 def interp_has(pass_name, name, material_src=None):
     """该 pass 是否(按当前材质源)声明某插值输入。"""
-    code = _code_only(material_src)
     for s in interp_specs(pass_name):
         if s.get("name") != name:
             continue
-        if s.get("when") == "uv0" and not _RE_UV0.search(code):
+        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
             return False
         return True
     return False
@@ -607,12 +613,15 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     _stage = stage or ("depth" if pass_name == "depth" else "ps")
     _sn, _rc = ("DepthInput", "di") if _stage == "depth" else ("MaterialInput", "mi")
     _presets = SI.presets_for_pass(material_src, pass_name or "main")
+    _bad = SI.unsupported_in_stage(_presets, _stage)   # 该 stage 拿不到的值所依赖的预设
+    if _bad:
+        _presets = [n for n in _presets if n not in _bad]
     _si = SI.resolve(_presets, _iface_names(base_iface), stage=_stage,
                      struct_name=_sn, recv=_rc)
     eng_names = list(eng_names) + list(_si["engine"])
     report["presets"] = _si["presets"]
     report["preset_unknown"] = _si["unknown"]
-    report["preset_unsupported"] = _si["unsupported"]
+    report["preset_unsupported"] = _bad
     report["lock"] = _si["lock"]
     report["minput"] = {"def": _si["def"], "build": _si["build"]}
 

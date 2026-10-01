@@ -133,6 +133,16 @@ def presets_for_pass(material_src, pass_name):
             if (tag or "main") == pass_name]
 
 
+def unsupported_in_stage(names, stage):
+    """这些预设中, 依赖了该 stage 无法供值(如深度拿不到几何值)的项名列表。"""
+    out = []
+    for n in names:
+        e = find(n)
+        if e and any(not _stage_expr(v, stage) for v in (e.get("values") or [])):
+            out.append(n)
+    return out
+
+
 def _is_interp(name):
     """是否插值输入(INTERPOLATORn): 非引擎资源, 仅作依赖/锁定。"""
     return (name or "").startswith("INTERPOLATOR")

@@ -108,12 +108,19 @@ def has_depth_hook(material_src):
     return bool(_DEPTH_HOOK_RE.search(material_src or ""))
 
 
-def depth_hook_ps(material_src, iface, minput):
+def depth_hook_ps(material_src, iface, minput=None):
     """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
     效果的资源绑定由钩子自身的引用决定; 插值声明由 `material_pass.build_source`
     按 passes.json 注入(uv0 条件化)。寄存器由编译器自动紧凑(见 `material_pass` 文件头)。
+    minput: `{def, build}`(DepthInput 由本 pass 预设生成); None 时**自动**按 `@depth` 预设生成。
     """
+    if minput is None:
+        from . import semantic_inputs as SI
+        _p = SI.presets_for_pass(material_src, "depth")
+        _p = [n for n in _p if n not in SI.unsupported_in_stage(_p, "depth")]
+        _d = SI.resolve(_p, set(), stage="depth", struct_name="DepthInput", recv="di")
+        minput = {"def": _d["def"], "build": _d["build"]}
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
                                  keepalive="", minput=minput)
     if err:
@@ -422,7 +429,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(
         d_src, INP.base_iface_for_pass("depth"), pass_name="depth",
         all_params=INP.all_params(material_src))
-    ps_depth = depth_hook_ps(d_src, iface_d, None)
+    # 深度 stage 预设: DepthInput 由本 pass 预设生成(几何值在深度 stage 不支持 -> 已剔除并记录)
+    ps_depth = depth_hook_ps(d_src, iface_d, _rep_d.get("minput"))
 
     # 2) 逐槽解析程序
     slots = []
@@ -782,6 +790,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "depth_ps": "material",
         "presets": _rep.get("presets") or [],
         "vs_presets": list(vs_in.get("presets") or []),
+        "depth_presets": _rep_d.get("presets") or [],
+        "depth_preset_unsupported": _rep_d.get("preset_unsupported") or [],
         "preset_unknown": _rep.get("preset_unknown") or [],
         "preset_unsupported": _rep.get("preset_unsupported") or [],
         "lock": _rep.get("lock") or {},
