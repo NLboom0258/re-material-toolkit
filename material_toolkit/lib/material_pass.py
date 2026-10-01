@@ -71,17 +71,20 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     if subs:
         for k, v in subs.items():
             tpl = tpl.replace(k, v)
-    # 插值声明(真驱动): 未显式提供时, 按 passes.json 生成该 pass 的声明(深度 uv0 条件化)。
+    # 插值声明(真驱动):
+    #   主 pass -> passes.json 全量(material 族, v1..v5);
+    #   深度 pass -> 仅当该 pass 预设需要插值时, 用**材质族**声明(Phase 3: 深度族 VS 也输出材质族
+    #     插值 ⇒ 深度 PS 可解包几何值); 否则不声明(保持最小深度 PS)。
     if INTERP_DECL in tpl:
         from . import material_inputs as _INP
-        _pn = "depth" if "depth" in template else "main"
-        tpl = tpl.replace(INTERP_DECL, _INP.interp_decls(_pn, material_src))
-        _uv0 = (_INP.interp_has("depth", "INTERPOLATOR0", material_src)
-                if _pn == "depth" else True)
-        if DEPTH_UV0_DI in tpl:
-            tpl = tpl.replace(DEPTH_UV0_DI, "float2 uv0;" if _uv0 else "")
-        if DEPTH_UV0_BUILD in tpl:
-            tpl = tpl.replace(DEPTH_UV0_BUILD, "di.uv0 = i.v1.xy;" if _uv0 else "")
+        from . import semantic_inputs as _SI
+        if "depth" in template:
+            _dep = _SI.presets_for_pass(material_src, "depth")
+            _decl = (_INP.interp_decls("main", material_src)
+                     if _SI.presets_need_interp(_dep) else "")
+        else:
+            _decl = _INP.interp_decls("main", material_src)
+        tpl = tpl.replace(INTERP_DECL, _decl)
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
     if iface is not None:

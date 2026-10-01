@@ -40,17 +40,26 @@ _GROUP_NONE = "(未分组)"
 # 预设 impl 用 `G.<值>` 引用; 解析时按 stage 替换。None = 该 stage 拿不到此值。
 #   ps   = 主 PS(读插值 i.v1..)
 #   vs   = 顶点着色器(读生成的局部量 wp/wN/wT; _vs_svpos/_vs_pclip 由 vs_gen 计算)
-#   depth= 深度 PS(只能 svpos / uv0(INTERPOLATOR0) / 引擎资源)
+#   depth= 深度 PS —— Phase 3 后深度族 VS 也输出**材质族插值**(pack=mat) ⇒ depth 供值 == ps 供值。
 STAGE_VALUES = {
-    "worldPos":     {"ps": "float3(i.v3.w, i.v4.x, i.v4.y)", "vs": "wp", "depth": None},
-    "worldNormal":  {"ps": "i.v1.xyz", "vs": "wN", "depth": None},
-    "worldTangent": {"ps": "float3(i.v2.w, i.v3.y, i.v3.x)", "vs": "wT", "depth": None},
-    "tangentSign":  {"ps": "(i.v3.z < 0.0 ? -1.0 : 1.0)", "vs": "sign(i.tan.w)", "depth": None},
-    "uv0":          {"ps": "float2(i.v1.w, i.v2.x)", "vs": "i.uv0", "depth": "i.v1.xy"},
-    "uv1":          {"ps": "i.v2.yz", "vs": "i.uv1", "depth": None},
+    "worldPos":     {"ps": "float3(i.v3.w, i.v4.x, i.v4.y)", "vs": "wp",
+                     "depth": "float3(i.v3.w, i.v4.x, i.v4.y)"},
+    "worldNormal":  {"ps": "i.v1.xyz", "vs": "wN", "depth": "i.v1.xyz"},
+    "worldTangent": {"ps": "float3(i.v2.w, i.v3.y, i.v3.x)", "vs": "wT",
+                     "depth": "float3(i.v2.w, i.v3.y, i.v3.x)"},
+    "tangentSign":  {"ps": "(i.v3.z < 0.0 ? -1.0 : 1.0)", "vs": "sign(i.tan.w)",
+                     "depth": "(i.v3.z < 0.0 ? -1.0 : 1.0)"},
+    "uv0":          {"ps": "float2(i.v1.w, i.v2.x)", "vs": "i.uv0",
+                     "depth": "float2(i.v1.w, i.v2.x)"},
+    "uv1":          {"ps": "i.v2.yz", "vs": "i.uv1", "depth": "i.v2.yz"},
     "svpos":        {"ps": "i.svpos", "vs": "_vs_svpos", "depth": "i.svpos"},
-    "prevClip":     {"ps": "float4(i.v4.zw, 0.0, i.v5.x)", "vs": "_vs_pclip", "depth": None},
+    "prevClip":     {"ps": "float4(i.v4.zw, 0.0, i.v5.x)", "vs": "_vs_pclip",
+                     "depth": "float4(i.v4.zw, 0.0, i.v5.x)"},
 }
+
+# 需要**插值**(INTERPOLATOR)才能供值的值(深度族启用这些时, 深度 VS 须改为输出材质族插值)。
+INTERP_VALUES = frozenset(("worldPos", "worldNormal", "worldTangent", "tangentSign",
+                           "uv0", "uv1", "prevClip"))
 
 # 值 -> 该值在 VS 需要的顶点属性(供"补输入"判定); 未列/空 = 无需额外属性。
 VALUE_VS_ATTR = {
@@ -141,6 +150,15 @@ def unsupported_in_stage(names, stage):
         if e and any(not _stage_expr(v, stage) for v in (e.get("values") or [])):
             out.append(n)
     return out
+
+
+def presets_need_interp(names):
+    """这些预设是否依赖**需要插值**的值(深度族启用时, 深度 VS 须改为输出材质族插值)。"""
+    for n in names:
+        e = find(n)
+        if e and any(v in INTERP_VALUES for v in (e.get("values") or [])):
+            return True
+    return False
 
 
 def _is_interp(name):

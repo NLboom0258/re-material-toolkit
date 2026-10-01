@@ -327,12 +327,13 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 引擎只看签名+绑定组(离线 62/62 已证自生与银行等价) ⇒ 属行为等价的内部替换。
     vs_stat = {"gen": 0, "bank": 0, "none": 0, "upgraded": 0}
 
-    def vs_for(key):
+    def vs_for(key, full=False):
         """键 -> (kind, dxbc, spec_used, orig_family); kind ∈ {"gen","bank","none"}。
 
-        结果全局缓存(键含钩子签名 + 补输入标志)。_upg 时对 reduced 族做"补输入"(换完整族)。
+        结果全局缓存(键含钩子签名 + 补输入标志 + full)。_upg 时对 reduced 族做"补输入"(换完整族);
+        full=True(深度族需插值) 时深度 VS 也输出材质族插值(pack=mat, 见 Phase 3)。
         """
-        ck = (key, _hook_h, _upg)
+        ck = (key, _hook_h, _upg, full)
         c = _vs_cache.get(ck)
         if c is None:
             ref = bank_blob(key)
@@ -350,7 +351,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                             spec_used["family"] = VG.FULLMAP[orig_fam]
                         gen, _err = VG.compile_vs(
                             VG.build_from_spec(spec_used, hook=vs_hook_src or None,
-                                               vs_in=vs_in))
+                                               vs_in=vs_in, depth_full=full))
                 except Exception:
                     gen = None
                 c = (("gen", gen, spec_used, orig_fam) if gen
@@ -389,9 +390,11 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     if vs_in.get("unsupported"):
         raise ValueError("顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"])
     # "补输入": reduced 族(深度/阴影/拾取)换到完整族。
-    # 触发 = 手动开关(force_full_inputs) / 顶点预设依赖缺属性(自动) / 源码指令。
+    # 触发 = 手动开关(force_full_inputs) / 顶点预设依赖缺属性(自动) / 深度族需插值(自动) / 源码指令。
     _auto_upg = bool(vs_in.get("vs_attrs"))
-    _upg = bool(force_full_inputs) or _auto_upg or bool(
+    # Phase 3: 深度族预设若依赖插值值(几何值), 深度 VS 改为输出材质族插值(需 NORMAL/TANGENT ⇒ 补输入)。
+    _depth_full = SI.presets_need_interp(SI.presets_for_pass(material_src, "depth"))
+    _upg = bool(force_full_inputs) or _auto_upg or _depth_full or bool(
         re.search(r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", material_src or ""))
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
@@ -440,7 +443,10 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         _src = None
         rel30 = None
         if r.get("vs_kind"):
-            _src, vs, _vsp, _vof = vs_for("standard_vs|%s|%s" % (pre, tech))
+            # 深度/阴影族槽(非 Pick): 深度预设需插值时, VS 也输出材质族插值(Phase 3)。
+            _isfull = (_depth_full and r.get("ps_kind") == "cutout_ps"
+                       and not tech.startswith("Pick"))
+            _src, vs, _vsp, _vof = vs_for("standard_vs|%s|%s" % (pre, tech), full=_isfull)
             if _src == "gen":
                 vs_stat["gen"] += 1
             elif _src == "bank":

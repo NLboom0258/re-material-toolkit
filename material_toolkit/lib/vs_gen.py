@@ -371,13 +371,15 @@ def _assemble(infields, outs, cbs, srvs, body_lines, extra_global=""):
     return "\n".join(L) + "\n"
 
 
-def build_from_spec(spec, hook=None, vs_in=None):
+def build_from_spec(spec, hook=None, vs_in=None, depth_full=False):
     """按 spec(来自 spec_from_blob)生成 VS 源。
 
     hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入。
     vs_in: 顶点 stage 的预设解析结果(`SI.resolve(stage="vs", struct_name="VertexInput",
            recv="v")`): `def` = `struct VertexInput` 定义, `impl` = 构造行(`v.xxx = ...`),
            `values` = 用到的阶段值。None = 空预设(生成空 VertexInput)。
+    depth_full: 深度族槽专用 —— 为 True 时深度 VS 也输出**材质族插值**(pack=mat),
+           使深度 PS 能解包几何值(Phase 3)。
     在**世界变换(+shadow)之后、打包之前**构造 VertexInput -> 取世界偏移(`_dv`) -> `wp += _dv`;
     并把同一偏移加到“上一帧世界位置”以保持运动矢量一致。
     """
@@ -390,10 +392,12 @@ def build_from_spec(spec, hook=None, vs_in=None):
         vs_in = SI.resolve([], stage="vs", struct_name="VertexInput", recv="v")
     _vals = set(vs_in.get("values") or [])
     _has_vi = bool(hook) or bool(vs_in.get("impl"))
+    # depth_full: 深度族 VS 也输出材质族插值(pack=mat) -> 深度 PS 才能收到几何值
+    _use_mat = (pack == "mat") or (depth_full and pack == "depth")
     # 用到哪些阶段值 -> 决定是否补算世界法线/切线/上一帧(未用则被 DCE)
-    need_n = (pack == "mat") or shadow or ("worldNormal" in _vals)
-    need_t = (pack == "mat") or ("worldTangent" in _vals)
-    need_prev = (pack == "mat") or ("prevClip" in _vals)
+    need_n = _use_mat or shadow or ("worldNormal" in _vals)
+    need_t = _use_mat or ("worldTangent" in _vals)
+    need_prev = _use_mat or ("prevClip" in _vals)
     L, prevw = _emit_world(world, need_n, need_t, need_prev)
     if shadow:
         L.extend(shadow_offset(wp="wp", n="wN").splitlines())
@@ -412,7 +416,7 @@ def build_from_spec(spec, hook=None, vs_in=None):
     if hook:
         L.append("float3 _dv = MaterialVertex(v);")
         L.append("wp += _dv;")
-    if pack == "mat":
+    if _use_mat:
         if hook:
             L.append("float4 pclip = mul(%s + float4(_dv, 0.0), prevViewProjMat);" % prevw)
         else:
