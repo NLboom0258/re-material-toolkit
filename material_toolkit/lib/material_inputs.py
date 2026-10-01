@@ -452,31 +452,33 @@ INTERP_DESC = {
 }
 
 
-def _needs_uv0(pass_name, material_src):
-    """该 pass 是否需要 uv0(决定条件化插值声明): 材质代码直接引用, 或该 pass 添加了 `uv0` 预设。"""
-    if _RE_UV0.search(_code_only(material_src)):
-        return True
-    from . import semantic_inputs as SI
-    return "uv0" in SI.presets_for_pass(material_src or "", pass_name)
+def _interp_specs_for(pass_name, material_src):
+    """该 pass **实际**的插值声明规格。
+
+    主 pass -> passes.json 全量(材质族); 深度 -> 仅当该 pass 预设需要插值时用材质族(Phase 3);
+    顶点 -> 无(顶点输入由预设生成, 非插值)。
+    """
+    if pass_name in ("main", None):
+        return interp_specs("main")
+    if pass_name == "depth":
+        from . import semantic_inputs as SI
+        dep = SI.presets_for_pass(material_src or "", "depth")
+        return interp_specs("main") if SI.presets_need_interp(dep) else []
+    return []
 
 
 def interp_inputs(pass_name="main", material_src=None):
-    """该 pass 声明依赖的插值输入 [(名, 用途)]; 带条件(`when`)的按是否满足过滤。非资源。"""
-    out = []
-    for s in interp_specs(pass_name):
-        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
-            continue
-        out.append((s["name"], INTERP_DESC.get(s["name"], "")))
-    return out
+    """该 pass 声明依赖的插值输入 [(名, 用途)]。非资源(只读展示)。"""
+    return [(s["name"], INTERP_DESC.get(s["name"], ""))
+            for s in _interp_specs_for(pass_name, material_src)]
 
 
 # 插值掩码 -> HLSL 类型(4->float4 ... 1->float)
 _MASK_TYPE = {1: "float", 2: "float2", 3: "float3", 4: "float4"}
-_RE_UV0 = re.compile(r"(?<![A-Za-z0-9_])uv0(?![A-Za-z0-9_])")
 
 
 def interp_specs(pass_name="main"):
-    """该 pass 的插值声明规格 [{name,var,mask,when?}](来自 passes.json)。"""
+    """该 pass 的插值声明规格 [{name,var,mask}](来自 passes.json; 主 pass)。"""
     p = (P.passes().get("passes", {}).get(pass_name, {}) or {})
     out = []
     for it in (p.get("interp") or []):
@@ -485,11 +487,9 @@ def interp_specs(pass_name="main"):
 
 
 def interp_decls(pass_name="main", material_src=None):
-    """生成该 pass 的 `PSIn` 插值声明行(缩进 4; 按 `when` 条件过滤)。供模板注入(真驱动)。"""
+    """生成该 pass 的 `PSIn` 插值声明行(缩进 4)。供模板注入(真驱动)。"""
     lines = []
-    for s in interp_specs(pass_name):
-        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
-            continue
+    for s in _interp_specs_for(pass_name, material_src):
         lines.append("    %s %s : %s;" % (_MASK_TYPE.get(s.get("mask", 4), "float4"),
                                           s.get("var"), s.get("name")))
     return "\n".join(lines)
@@ -497,13 +497,8 @@ def interp_decls(pass_name="main", material_src=None):
 
 def interp_has(pass_name, name, material_src=None):
     """该 pass 是否(按当前材质源)声明某插值输入。"""
-    for s in interp_specs(pass_name):
-        if s.get("name") != name:
-            continue
-        if s.get("when") == "uv0" and not _needs_uv0(pass_name, material_src):
-            return False
-        return True
-    return False
+    return any(s.get("name") == name
+               for s in _interp_specs_for(pass_name, material_src))
 
 
 def pass_dep_names(pass_name="main", template=None):

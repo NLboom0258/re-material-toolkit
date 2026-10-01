@@ -75,14 +75,8 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     #     插值 ⇒ 深度 PS 可解包几何值); 否则不声明(保持最小深度 PS)。
     if INTERP_DECL in tpl:
         from . import material_inputs as _INP
-        from . import semantic_inputs as _SI
-        if "depth" in template:
-            _dep = _SI.presets_for_pass(material_src, "depth")
-            _decl = (_INP.interp_decls("main", material_src)
-                     if _SI.presets_need_interp(_dep) else "")
-        else:
-            _decl = _INP.interp_decls("main", material_src)
-        tpl = tpl.replace(INTERP_DECL, _decl)
+        _pn = "depth" if "depth" in template else "main"
+        tpl = tpl.replace(INTERP_DECL, _INP.interp_decls(_pn, material_src))
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
     if iface is not None:

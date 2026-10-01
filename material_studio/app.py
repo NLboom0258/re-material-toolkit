@@ -2723,7 +2723,7 @@ class MaterialSystemPanel(QWidget):
         """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
         _w1, self.tree_inputs = self._inputs_tree()
         _w2, self.tree_inputs_depth = self._inputs_tree()
-        _w3 = self._vs_inputs_view()
+        _w3, self.tree_inputs_vs = self._inputs_tree(with_force=True)
         page, self._in_btns, self._in_stack = _seg_switch(
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
@@ -2742,53 +2742,24 @@ class MaterialSystemPanel(QWidget):
         chk.setChecked(bool(getattr(self, "_force_full", False)))
         chk.blockSignals(False)
 
-    def _vs_inputs_view(self):
-        """顶点(VS) 输入视图: 「强制完整输入」开关 + 「预设输入」(全局共用) + 说明。"""
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        self.chk_force_full = QCheckBox(
-            "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
-        self.chk_force_full.setToolTip(
-            "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
-            "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
-            "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n默认关 ⇒ 逐字节与现状一致。")
-        self.chk_force_full.toggled.connect(self._on_force_full)
-        v.addWidget(self.chk_force_full)
-        # 预设输入(全局一份): 顶点与主/深度共用同一套; 用到几何值的预设会自动触发补输入。
-        _bar = QHBoxLayout()
-        for _t, _cb in (("＋预设输入", self._add_presets), ("＋引擎资源", self._add_engine)):
-            _b = QPushButton(_t)
-            _b.clicked.connect(_cb)
-            _bar.addWidget(_b)
-        _bar.addStretch(1)
-        v.addLayout(_bar)
-        t = QTreeWidget()
-        t.setHeaderLabels(["类别 / 名", "类型", "说明"])
-        root = QTreeWidgetItem(["VertexInput(由「预设输入」生成; 全局共用)", "", ""])
-        for _n, _d in (("worldPos / positionWS", "世界空间位置"),
-                       ("worldNormal / NormalWS", "世界空间法线"),
-                       ("worldTangent / TangentWS", "世界空间切线"),
-                       ("uv0 / uv1", "两套 UV"),
-                       ("svpos", "屏幕像素坐标(SV_Position)"),
-                       ("camPos / camDir / camUp", "相机量(引擎资源)")):
-            root.addChild(QTreeWidgetItem([_n, "", _d]))
-        t.addTopLevelItem(root)
-        t.expandAll()
-        fit_columns(t, (0, 1, 2))
-        v.addWidget(t, 1)
-        note = QLabel("预设输入为**全局一份**(主 pass / 深度 pass / 顶点共用)。顶点效果写在"
-                      "「材质源」的 `float3 MaterialVertex(VertexInput v)`(返回世界空间偏移); "
-                      "用到几何值的预设会自动触发「强制完整输入」。")
-        note.setWordWrap(True)
-        v.addWidget(note)
-        return w
+    def _inputs_tree(self, with_force=False):
+        """一个 pass 的输入视图(输入树 + 增删按钮)。返回 (容器, 树)。
 
-    def _inputs_tree(self):
-        """一个 pass 的输入视图(输入树 + 增删按钮)。返回 (容器, 树)。"""
+        with_force=True(顶点页): 顶部加「强制完整输入」勾选(只有顶点页有, 是顶点唯一的多余项)。
+        """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
+        if with_force:
+            self.chk_force_full = QCheckBox(
+                "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
+            self.chk_force_full.setToolTip(
+                "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
+                "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
+                "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n"
+                "注: 顶点预设用到几何值时也会**自动**开启(锁死, 不可取消)。")
+            self.chk_force_full.toggled.connect(self._on_force_full)
+            v.addWidget(self.chk_force_full)
         tree = QTreeWidget()
         tree.setHeaderLabels(["类别 / 名", "类型", "说明"])
         v.addWidget(tree, 1)
@@ -2811,7 +2782,12 @@ class MaterialSystemPanel(QWidget):
         return "depth" if _i == 1 else ("vertex" if _i == 2 else "main")
 
     def _active_input_tree(self):
-        return self.tree_inputs_depth if self._cur_pass() == "depth" else self.tree_inputs
+        _p = self._cur_pass()
+        if _p == "depth":
+            return self.tree_inputs_depth
+        if _p == "vertex":
+            return self.tree_inputs_vs
+        return self.tree_inputs
 
     def _load_decls_from_src(self):
         src = self.ed_src.toPlainText()
@@ -2966,6 +2942,7 @@ class MaterialSystemPanel(QWidget):
         self._sync_force_full()
         self._fill_input_tree(self.tree_inputs, "main")
         self._fill_input_tree(self.tree_inputs_depth, "depth")
+        self._fill_input_tree(self.tree_inputs_vs, "vertex")
 
     def _pass_belongs(self, kind, name, pass_name):
         """声明是否归属该 pass: 显式 `@pass` 优先; 否则按引用; 两边都不引用 ⇒ 归主 pass。"""
