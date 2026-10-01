@@ -59,6 +59,7 @@ from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
 from tools.material_toolkit.lib import semantic_inputs as sinp  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
 from tools.material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
+from tools.material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
 
@@ -73,7 +74,8 @@ from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMenu, QMessageBox,
     QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTabBar, QTabWidget, QTextEdit, QTreeWidget,
@@ -2871,6 +2873,25 @@ class MaterialSystemPanel(QWidget):
     def _effective_iface(self):
         return self._effective_inputs()[0]
 
+    def _funcs_text(self, pass_name, stage):
+        """该 pass 要注入的自定义函数定义文本(依赖在前; 分阶段校验, 不通过并抛错)。"""
+        return cfun.injection_text(mimp.funcs(self.asset.inputs, pass_name), stage, pass_name)
+
+    def _missing_funcs(self, pass_name, entry_name):
+        """该 pass 入口调用了、却未导入到本 pass 的库函数(清晰报错用)。"""
+        known = set(cfun.list_names())
+        if not known:
+            return []
+        src = self.asset.shading_source or ""
+        sp = nogen._hlsl_fn_span(src, entry_name)
+        body = src[sp[0]:sp[1]] if sp else ""
+        direct = cfun.calls_in(body, known)
+        if not direct:
+            return []
+        need = cfun.closure(direct)
+        imported = set(mimp.funcs(self.asset.inputs, pass_name))
+        return sorted(n for n in need if n not in imported)
+
     # ---- 输入页 ----
     def _wrap_inputs(self):
         """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
@@ -2920,6 +2941,7 @@ class MaterialSystemPanel(QWidget):
         bar = QHBoxLayout()
         for text, cb in (("＋预设输入", self._add_presets), ("＋参数", self._add_param),
                          ("＋贴图", self._add_tex), ("＋引擎资源", self._add_engine),
+                         ("＋函数", self._add_funcs),
                          ("删除选中", self._del_custom),
                          ("重载输入(补依赖)", self._reload_inputs)):
             b = QPushButton(text)
@@ -2997,6 +3019,33 @@ class MaterialSystemPanel(QWidget):
             n for n in d.selected_names() if (n in _old) or (n not in lock)]
         self._after_inputs_changed()
 
+    def _add_funcs(self):
+        """从函数库挑选用到当前 pass 的自定义函数(导入后直接在材质源调用)。
+
+        门控: 目标阶段(主/深度=PS; 顶点=VS)编译检查不通过的**拒绝导入**; "未确认"导入前先检查。
+        """
+        _pass = self._cur_pass()
+        _stage = "vs" if _pass == "vertex" else "ps"
+        _own = mimp.funcs(self.asset.inputs, _pass)
+        d = FuncDialog(self, selected=set(_own), stage=_stage)
+        if d.exec() != QDialog.Accepted:
+            return
+        chosen = d.selected_names()
+        bad = []
+        for n in chosen:
+            r = cfun.check(n)          # "未确认" -> 在此检查并缓存
+            if not r[_stage]["ok"]:
+                _e = (r[_stage]["err"] or "").strip().splitlines()
+                bad.append((n, _e[0] if _e else "?"))
+        if bad:
+            QMessageBox.warning(
+                self, "阶段检查不通过",
+                "以下函数在本 pass 的阶段(%s)检查不通过, 不予导入:\n\n%s"
+                % (_stage, "\n".join("%s:\n  %s" % (n, e) for n, e in bad)))
+            return
+        self.asset.inputs["func"][_pass] = chosen
+        self._after_inputs_changed()
+
     def _on_src_changed(self):
         # 源码变动 -> 旧诊断(行号)失效; 防抖后再清(不在 textChanged 内同步 rehighlight,
         # 也避免每敲一下键就整篇重绘)。
@@ -3040,7 +3089,7 @@ class MaterialSystemPanel(QWidget):
         if params and "UserMaterial" not in engine:
             engine.append("UserMaterial")
         lock = self._locked_names(pass_name)
-        cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
+        cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图/函数)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
         cust.addChild(pre)
@@ -3114,6 +3163,26 @@ class MaterialSystemPanel(QWidget):
                                          minp.member_desc(n, mn)])
                     cm.setData(0, Qt.UserRole, ("copy", mn))
                     it.addChild(cm)
+        funcs = mimp.funcs(self.asset.inputs, pass_name)
+        fnode = QTreeWidgetItem(["函数 (自定义库)", "", "%d" % len(funcs)])
+        cust.addChild(fnode)
+        for n in funcs:
+            _r = cfun.cached(n)
+            if cfun.get(n) is None:
+                status, col = "库中不存在", QColor("#c0392b")
+            elif _r is None:
+                status, col = "未检查", QColor("#b8791a")
+            else:
+                _ps = "✓" if _r["ps"]["ok"] else "✗"
+                _vs = "✓" if _r["vs"]["ok"] else "✗"
+                status = "PS %s / VS %s" % (_ps, _vs)
+                col = (QColor("#1a7f37") if (_r["ps"]["ok"] and _r["vs"]["ok"])
+                       else QColor("#b8791a"))
+            _dep = sorted(cfun.function_calls(n))
+            it = QTreeWidgetItem([n, status, ("依赖: " + ", ".join(_dep)) if _dep else ""])
+            it.setForeground(1, col)
+            it.setData(0, Qt.UserRole, ("func", n))
+            fnode.addChild(it)
         # 默认只展开到"分类"层(0=顶层, 1=分类); 资源项与 cbuffer 成员默认折叠
         tree.expandToDepth(1)
         fit_columns(tree, (0, 1, 2))
@@ -3129,6 +3198,8 @@ class MaterialSystemPanel(QWidget):
         elif kind[0] == "preset":
             acts.append(("删除", self._del_custom))
         elif kind[0] == "engine":
+            acts.append(("删除", self._del_custom))
+        elif kind[0] == "func":
             acts.append(("删除", self._del_custom))
         token = kind[1]
         acts.append(("复制: %s" % token, lambda: self._copy_token(token)))
@@ -3252,18 +3323,22 @@ class MaterialSystemPanel(QWidget):
         elif cat == "engine":
             self.asset.inputs["engine"][_pass] = [
                 n for n in mimp.engine(self.asset.inputs, _pass) if n != name]
+        elif cat == "func":
+            self.asset.inputs["func"][_pass] = [
+                n for n in mimp.funcs(self.asset.inputs, _pass) if n != name]
         else:
             self.asset.inputs["tex"][_pass] = [
                 n for n in mimp.textures(self.asset.inputs, _pass) if n != name]
         self._after_inputs_changed()
 
     # ---- 编译诊断 ----
-    def _err_diags(self, err_text, tmpl, lmap=None):
+    def _err_diags(self, err_text, tmpl, lmap=None, extra_off=0):
         """把 D3DCompile 报错行(组装文行号)映射回用户源码行。返回 [(行1基,start,end,msg)]。
 
         lmap: 用户编译源(可能已剥离某钩子)行号 -> 编辑器源码(ed_src)行号 的映射。
+        extra_off: 注入的自定义函数占用的额外行数(它们插在材质源之前)。
         """
-        off = mpass.material_line_offset(tmpl)
+        off = mpass.material_line_offset(tmpl) + extra_off
         out = []
         for line in (err_text or "").splitlines():
             m = _HLSL_ERR_RE.search(line)
@@ -3353,9 +3428,29 @@ class MaterialSystemPanel(QWidget):
                                     % ", ".join("void %s(...)" % n for n in missing))
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
+        # ---- 自定义函数: 校验"调用了未导入的函数", 取出分阶段校验过的注入文本 ----
+        for _p, _fn in (("main", "MaterialMain"), ("depth", "MaterialDepth"),
+                        ("vertex", "MaterialVertex")):
+            _miss = self._missing_funcs(_p, _fn)
+            if _miss:
+                self.lbl_status.setText(
+                    "[缺少函数导入] pass '%s' 调用了未导入的函数: %s (请在「输入」页的「函数」里导入)"
+                    % (_p, ", ".join(_miss)))
+                self.lbl_status.setStyleSheet("color:#c0392b")
+                return
+        try:
+            _fmain = self._funcs_text("main", "ps")
+            _fdepth = self._funcs_text("depth", "ps")
+        except ValueError as e:
+            self.lbl_status.setText("[自定义函数检查不通过] %s" % str(e).replace("\n", "  "))
+            self.lbl_status.setStyleSheet("color:#c0392b")
+            return
+        _n_main = _fmain.count("\n")
+        _n_depth = _fdepth.count("\n")
         iface, ka, minput = self._effective_inputs("main")
         # ---- 主 pass(剥掉 MaterialDepth/MaterialVertex: 未调用函数/VS 类型会污染主 PS) ----
         m_src, m_map = nogen.strip_line_map_multi(src, ("MaterialDepth", "MaterialVertex"))
+        m_src = _fmain + m_src
         try:
             self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
                                                          keepalive=ka, minput=minput))
@@ -3369,6 +3464,7 @@ class MaterialSystemPanel(QWidget):
                                               keepalive=ka, minput=minput)
         # ---- 深度 pass(恒组装; 剥掉 MaterialMain/MaterialVertex) ----
         d_src, d_map = nogen.strip_line_map_multi(src, ("MaterialMain", "MaterialVertex"))
+        d_src = _fdepth + d_src
         iface_d, _, minput_d = self._effective_inputs("depth")
         try:
             self.ed_full_depth.setPlainText(
@@ -3382,7 +3478,7 @@ class MaterialSystemPanel(QWidget):
                                               presets=mimp.presets(self.asset.inputs, "depth"))
         # ---- 报错(优先主 pass) ----
         if m_err:
-            diags = self._err_diags(m_err, tmpl, m_map)
+            diags = self._err_diags(m_err, tmpl, m_map, extra_off=_n_main)
             self._src_hl.set_diagnostics(diags)
             self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
             first = diags[0][3] if diags else (m_err.strip().splitlines()[0] if m_err.strip() else "?")
@@ -3394,7 +3490,7 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setToolTip(m_err[:4000])
             return
         if d_err:
-            diags = self._err_diags(d_err, "deferred_depth", d_map)
+            diags = self._err_diags(d_err, "deferred_depth", d_map, extra_off=_n_depth)
             self._src_hl.set_diagnostics(diags)
             self._seg_show(1)              # 切到"深度 pass"视图
             first = diags[0][3] if diags else (d_err.strip().splitlines()[0] if d_err.strip() else "?")
@@ -3624,6 +3720,223 @@ class PresetDialog(QDialog):
         return out
 
 
+class FuncDialog(QDialog):
+    """自定义函数选择器: 列出函数库(带 PS/VS 检查状态); 目标阶段不通过的禁用。"""
+
+    def __init__(self, parent=None, selected=(), stage="ps"):
+        super().__init__(parent)
+        self.setWindowTitle("导入自定义函数")
+        self.resize(780, 520)
+        self._stage = stage
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "从函数库挑选用到本 pass 的函数(无需声明, 导入后直接在材质源调用)。\n"
+            "状态为 PS/VS 编译检查结果; 目标阶段不通过的会被禁用(请先到「函数库」页修复/检查)。"))
+        bar = QHBoxLayout()
+        self.btn_all = QPushButton("全体编译检查")
+        self.btn_all.clicked.connect(self._check_all)
+        bar.addWidget(self.btn_all)
+        self.lbl = QLabel("")
+        bar.addWidget(self.lbl)
+        bar.addStretch(1)
+        v.addLayout(bar)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["函数", "PS", "VS", "依赖", "说明"])
+        self.tree.setColumnWidth(0, 220)
+        self.tree.setColumnWidth(3, 170)
+        v.addWidget(self.tree, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self._fill(set(selected), {n: cfun.cached(n) for n in cfun.list_names()})
+
+    def _fill(self, selected, status):
+        self.tree.clear()
+        for n in cfun.list_names():
+            r = status.get(n)
+            _ps = ("✓" if r and r["ps"]["ok"] else ("✗" if r else "?"))
+            _vs = ("✓" if r and r["vs"]["ok"] else ("✗" if r else "?"))
+            dep = sorted(cfun.function_calls(n))
+            sig = cfun.parse_signature(cfun.get(n) or "")
+            desc = ("%s %s(...)" % (sig["ret"], sig["name"])) if sig else ""
+            it = QTreeWidgetItem([n, _ps, _vs, ", ".join(dep), desc])
+            it.setData(0, Qt.UserRole, n)
+            if r is not None and not r[self._stage]["ok"]:
+                it.setFlags(it.flags() & ~Qt.ItemIsUserCheckable)
+                it.setText(0, n + "   [本阶段不通过]")
+                it.setForeground(0, QColor("#c0392b"))
+            else:
+                it.setCheckState(0, Qt.Checked if n in selected else Qt.Unchecked)
+            self.tree.addTopLevelItem(it)
+
+    def _check_all(self):
+        self.lbl.setText("检查中…")
+        QApplication.processEvents()
+        _sel = self.selected_names()
+        status = {n: cfun.check(n) for n in cfun.list_names()}
+        self._fill(set(_sel), status)
+        self.lbl.setText("已检查 %d 个" % len(status))
+
+    def selected_names(self):
+        out = []
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.checkState(0) == Qt.Checked:
+                out.append(it.data(0, Qt.UserRole))
+        return out
+
+
+_ERR_LINE_RE = re.compile(r"\((\d+),(\d+)(?:-\d+)?\):\s*(error|warning)\s+(\w+):\s*(.*)")
+
+
+class FunctionLibPanel(QWidget):
+    """自定义函数库页: 左列表(名 + PS/VS 状态) + 右编辑; 新建/删除/改名/保存/编译检查/全体检查。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._name = None
+        self._loading = False
+        h = QHBoxLayout(self)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.addWidget(QLabel("函数库 (每函数一文件; 纯函数)"))
+        self.list = QListWidget()
+        lv.addWidget(self.list, 1)
+        bar = QHBoxLayout()
+        for t, cb in (("新建", self.new_func), ("删除", self.del_func),
+                      ("改名", self.rename_func)):
+            b = QPushButton(t)
+            b.clicked.connect(cb)
+            bar.addWidget(b)
+        bar.addStretch(1)
+        lv.addLayout(bar)
+        h.addWidget(left, 1)
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.addWidget(QLabel("函数源 (只吃形参; 不得引用引擎资源/预设输入)"))
+        self.ed = CodeEdit(indent=4)
+        self._hl = HlslHighlighter(self.ed.document())
+        rv.addWidget(self.ed, 1)
+        rbar = QHBoxLayout()
+        for t, cb in (("保存", self.save_func), ("编译检查", self.check_one),
+                      ("全体编译检查", self.check_all)):
+            b = QPushButton(t)
+            b.clicked.connect(cb)
+            rbar.addWidget(b)
+        rbar.addStretch(1)
+        self.lbl = QLabel("")
+        rbar.addWidget(self.lbl)
+        rv.addLayout(rbar)
+        h.addWidget(right, 2)
+        self.list.currentRowChanged.connect(self._on_sel)
+        self.reload()
+
+    def reload(self, keep=None):
+        self._loading = True
+        self.list.clear()
+        names = cfun.list_names()
+        for n in names:
+            r = cfun.cached(n)
+            if r is None:
+                tag, col = "   [未确认]", None
+            else:
+                tag = "   [PS %s VS %s]" % ("✓" if r["ps"]["ok"] else "✗",
+                                            "✓" if r["vs"]["ok"] else "✗")
+                col = None if (r["ps"]["ok"] and r["vs"]["ok"]) else QColor("#b8791a")
+            it = QListWidgetItem(n + tag)
+            it.setData(Qt.UserRole, n)
+            if col is not None:
+                it.setForeground(col)
+            self.list.addItem(it)
+        self._loading = False
+        if names:
+            self.list.setCurrentRow(names.index(keep) if keep in names else 0)
+        else:
+            self._name = None
+            self._set_src("")
+
+    def _on_sel(self, row):
+        if self._loading or row < 0:
+            return
+        self._name = self.list.item(row).data(Qt.UserRole)
+        self._set_src(cfun.get(self._name) or "")
+        self.lbl.setText("")
+
+    def _set_src(self, text):
+        self._loading = True
+        self.ed.setPlainText(text)
+        self._hl.set_diagnostics([])
+        self._loading = False
+
+    def new_func(self):
+        name, ok = QInputDialog.getText(self, "新建函数", "函数名(即文件名; 撞名自动改):")
+        if not ok or not name.strip():
+            return
+        base = re.sub(r"\W", "_", name.strip())
+        actual = cfun.unique_name(base)
+        cfun.save(actual, "float %s(float x)\n{\n    return x;\n}\n" % actual)
+        self.reload(keep=actual)
+        if actual != base:
+            QMessageBox.warning(self, "已改名", "函数名冲突, 已自动改为: %s" % actual)
+
+    def del_func(self):
+        if not self._name:
+            return
+        if QMessageBox.question(self, "删除函数", "删除 %s ?" % self._name) != QMessageBox.Yes:
+            return
+        cfun.delete(self._name)
+        self.reload()
+
+    def rename_func(self):
+        if not self._name:
+            return
+        new, ok = QInputDialog.getText(self, "改函数名", "新名:", text=self._name)
+        if not ok or not new.strip() or new.strip() == self._name:
+            return
+        actual = cfun.rename(self._name, re.sub(r"\W", "_", new.strip()))
+        self.reload(keep=actual)
+        if actual != re.sub(r"\W", "_", new.strip()):
+            QMessageBox.warning(self, "已改名", "函数名冲突, 已自动改为: %s" % actual)
+
+    def save_func(self):
+        if not self._name:
+            return
+        cfun.save(self._name, self.ed.toPlainText())
+        self.check_one()          # 保存即检查
+
+    def _show(self, r):
+        self.lbl.setText("PS %s / VS %s" % ("✓" if r["ps"]["ok"] else "✗",
+                                            "✓" if r["vs"]["ok"] else "✗"))
+        ok = r["ps"]["ok"] and r["vs"]["ok"]
+        self.lbl.setStyleSheet("color:#1a7f37" if ok else "color:#c0392b")
+        self.lbl.setToolTip((r["ps"]["err"] or r["vs"]["err"] or "")[:2000])
+        diags = []
+        for line in (r["ps"]["err"] or r["vs"]["err"] or "").splitlines():
+            m = _ERR_LINE_RE.search(line)
+            if m:
+                diags.append((int(m.group(1)), max(0, int(m.group(2)) - 1), 10 ** 6,
+                              "%s %s: %s" % (m.group(3), m.group(4), m.group(5))))
+        self._hl.set_diagnostics(diags)
+
+    def check_one(self):
+        if not self._name:
+            return
+        self._show(cfun.check(self._name))
+        self.reload(keep=self._name)
+
+    def check_all(self):
+        self.lbl.setText("检查中…")
+        self.lbl.setStyleSheet("color:#b8791a")
+        QApplication.processEvents()
+        names = cfun.list_names()
+        for n in names:
+            cfun.check(n)
+        self.reload(keep=self._name)
+        self.lbl.setText("已检查 %d 个" % len(names))
+        self.lbl.setStyleSheet("color:#1a7f37")
+
+
 class MmtrTabs(QTabWidget):
     """MMTR 多文件容器: 每个打开的 mmtr 一个标签页。
 
@@ -3848,9 +4161,11 @@ class MainWindow(QMainWindow):
         self.mmtr = MmtrTabs()
         self.mdf2 = Mdf2Tabs()
         self.msys = MaterialSystemPanel()
+        self.funcs = FunctionLibPanel()
         tabs.addTab(self.mmtr, "MMTR")
         tabs.addTab(self.mdf2, "MDF2")
         tabs.addTab(self.msys, "材质系统")
+        tabs.addTab(self.funcs, "函数库")
         self.tabs = tabs
         self.setCentralWidget(tabs)
         self.setAcceptDrops(True)
