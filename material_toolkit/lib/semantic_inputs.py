@@ -161,6 +161,25 @@ def presets_need_interp(names):
     return False
 
 
+# reduced 族(深度/阴影/拾取)缺失的顶点属性 -> 依赖它们的预设必须"补输入"(换完整族)。
+_UPGRADE_ATTRS = frozenset(("NORMAL", "TANGENT", "TEXCOORD0"))
+
+
+def presets_need_upgrade(names):
+    """这些预设是否依赖 reduced 族缺失的顶点属性(NORMAL/TANGENT/TEXCOORD0)。
+
+    为真 ⇒ 应自动启用"强制完整输入"且**锁死**(不可取消), 直到不再有预设依赖它们。
+    """
+    for n in names:
+        e = find(n)
+        if not e:
+            continue
+        for v in (e.get("values") or []):
+            if any(a in _UPGRADE_ATTRS for a in VALUE_VS_ATTR.get(v, [])):
+                return True
+    return False
+
+
 def _is_interp(name):
     """是否插值输入(INTERPOLATORn): 非引擎资源, 仅作依赖/锁定。"""
     return (name or "").startswith("INTERPOLATOR")

@@ -2734,12 +2734,19 @@ class MaterialSystemPanel(QWidget):
         self._rewrite_decls()
 
     def _sync_force_full(self):
-        """按源码里的指令同步勾选框(载入/刷新时; 阻断信号防回环)。"""
+        """同步「强制完整输入」勾选框(载入/刷新/增删预设时; 阻断信号防回环)。
+
+        勾选 = 手动指令(`_force_full`) 或 **顶点预设依赖缺失输入**(自动)。
+        自动触发时**锁死**(禁用, 不可取消), 直到不再有预设依赖那些缺失输入。
+        """
         chk = getattr(self, "chk_force_full", None)
         if chk is None:
             return
+        _forced = sinp.presets_need_upgrade(
+            sinp.presets_for_pass(self.ed_src.toPlainText(), "vertex"))
         chk.blockSignals(True)
-        chk.setChecked(bool(getattr(self, "_force_full", False)))
+        chk.setChecked(bool(getattr(self, "_force_full", False)) or _forced)
+        chk.setEnabled(not _forced)
         chk.blockSignals(False)
 
     def _inputs_tree(self, with_force=False):

@@ -390,8 +390,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     if vs_in.get("unsupported"):
         raise ValueError("顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"])
     # "补输入": reduced 族(深度/阴影/拾取)换到完整族。
-    # 触发 = 手动开关(force_full_inputs) / 顶点预设依赖缺属性(自动) / 深度族需插值(自动) / 源码指令。
-    _auto_upg = bool(vs_in.get("vs_attrs"))
+    # 触发 = 手动开关 / 顶点预设依赖缺属性(NORMAL/TANGENT/UV0) / 深度族需插值 / 源码指令。
+    _auto_upg = SI.presets_need_upgrade(SI.presets_for_pass(material_src, "vertex"))
     # Phase 3: 深度族预设若依赖插值值(几何值), 深度 VS 改为输出材质族插值(需 NORMAL/TANGENT ⇒ 补输入)。
     _depth_full = SI.presets_need_interp(SI.presets_for_pass(material_src, "depth"))
     _upg = bool(force_full_inputs) or _auto_upg or _depth_full or bool(
