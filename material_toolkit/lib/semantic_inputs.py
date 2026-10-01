@@ -35,6 +35,35 @@ _PRESET_RE = re.compile(r"^\s*//!\s*preset\s+(\w+)\s*$")
 _PASS_TAG_RE = re.compile(r"\s+@[A-Za-z_]\w*\s*$")
 _GROUP_NONE = "(未分组)"
 
+# ---- 值层: 每个"阶段值"给 ps/vs/depth 各自的"供值表达式"(真·世界空间/屏幕语义) ----
+# 预设 impl 用 `G.<值>` 引用; 解析时按 stage 替换。None = 该 stage 拿不到此值。
+#   ps   = 主 PS(读插值 i.v1..)
+#   vs   = 顶点着色器(读生成的局部量 wp/wN/wT; _vs_svpos/_vs_pclip 由 vs_gen 计算)
+#   depth= 深度 PS(只能 svpos / uv0(INTERPOLATOR0) / 引擎资源)
+STAGE_VALUES = {
+    "worldPos":     {"ps": "float3(i.v3.w, i.v4.x, i.v4.y)", "vs": "wp", "depth": None},
+    "worldNormal":  {"ps": "i.v1.xyz", "vs": "wN", "depth": None},
+    "worldTangent": {"ps": "float3(i.v2.w, i.v3.y, i.v3.x)", "vs": "wT", "depth": None},
+    "tangentSign":  {"ps": "(i.v3.z < 0.0 ? -1.0 : 1.0)", "vs": "sign(i.tan.w)", "depth": None},
+    "uv0":          {"ps": "float2(i.v1.w, i.v2.x)", "vs": "i.uv0", "depth": "i.v1.xy"},
+    "uv1":          {"ps": "i.v2.yz", "vs": "i.uv1", "depth": None},
+    "svpos":        {"ps": "i.svpos", "vs": "_vs_svpos", "depth": "i.svpos"},
+    "prevClip":     {"ps": "float4(i.v4.zw, 0.0, i.v5.x)", "vs": "_vs_pclip", "depth": None},
+}
+
+# 值 -> 该值在 VS 需要的顶点属性(供"补输入"判定); 未列/空 = 无需额外属性。
+VALUE_VS_ATTR = {
+    "worldNormal": ["NORMAL"], "worldTangent": ["TANGENT"], "tangentSign": ["TANGENT"],
+    "uv0": ["TEXCOORD0"], "uv1": ["TEXCOORD1"],
+}
+
+_G_RE = re.compile(r"G\.(\w+)")
+
+
+def _stage_expr(value, stage):
+    """某值在某 stage 的供值表达式(不可用返回 None)。"""
+    return (STAGE_VALUES.get(value) or {}).get(stage)
+
 
 def path():
     return os.path.join(P.dir_path(), "semantic_inputs.json")
@@ -95,8 +124,14 @@ def _dedup(seq):
     return out
 
 
-def resolve(item_names, existing_names=frozenset()):
-    """按"已添加的语义输入项名"解析出: 依赖资源 + MaterialInput 字段 + 构造实现 + 文本。
+def resolve(item_names, existing_names=frozenset(), stage="ps",
+            struct_name="MaterialInput", recv="mi"):
+    """按"已添加的语义输入项名"解析出: 依赖资源 + 输入结构体字段 + 构造实现 + 文本。
+
+    stage: "ps"(主 PS, 默认) / "vs"(顶点) / "depth"(深度 PS)。决定 `G.<值>` 的替换来源。
+           depth 下拿不到的几何值记入 `unsupported`(调用方据以禁用/报错)。
+    struct_name/recv: 生成的输入结构体名与变量名(PS=MaterialInput mi / VS=VertexInput v /
+           深度=DepthInput di)。
 
     参数:
       item_names     : `//! preset` 名列表(可含未知名); 每名 = 一个单独项。
@@ -131,23 +166,44 @@ def resolve(item_names, existing_names=frozenset()):
     # 插值输入不是引擎资源 ⇒ **不进 engine**(不写 `//! engine`), 仅作依赖/锁定信息
     engine = [d for d in deps if d not in existing and not _is_interp(d)]
 
-    fields, seen_f, impl = [], set(), []
+    fields, seen_f, impl_raw, values, unsupported = [], set(), [], [], []
     for n in names:
         e = find(n)
         f = e.get("field")
         if f and f["name"] not in seen_f:
             seen_f.add(f["name"])
             fields.append({"name": f["name"], "type": f.get("type", "float")})
-        impl.extend(e.get("impl") or [])
+        impl_raw.extend(e.get("impl") or [])
+        for v in (e.get("values") or []):
+            if v not in values:
+                values.append(v)
+            if not _stage_expr(v, stage) and v not in unsupported:
+                unsupported.append(v)
+
+    # 阶段值替换: `G.<值>` -> 该 stage 的供值表达式(不可用 -> 保留占位, 由 unsupported 揭示)
+    def _sub(m):
+        return _stage_expr(m.group(1), stage) or ("/*unsupported:%s*/0.0f" % m.group(1))
+    impl = [_G_RE.sub(_sub, ln) for ln in impl_raw]
+    # 接收者重写: 目录 impl 一律写 `mi.xxx = ...`; 非 PS stage 换成该 stage 的变量名(v./di.)。
+    if recv != "mi":
+        impl = [re.sub(r"\bmi\.", recv + ".", ln) for ln in impl]
+
+    vs_attrs = []
+    for v in values:
+        for a in VALUE_VS_ATTR.get(v, []):
+            if a not in vs_attrs:
+                vs_attrs.append(a)
 
     return {"presets": names, "unknown": unknown, "deps": deps, "engine": engine,
             "interp": interp, "lock": lock, "fields": fields, "impl": impl,
-            "def": struct_text(fields), "build": build_text(fields, impl)}
+            "values": values, "unsupported": unsupported, "vs_attrs": vs_attrs,
+            "def": struct_text(fields, struct_name),
+            "build": build_text(fields, impl, struct_name, recv)}
 
 
-def struct_text(fields):
-    """`struct MaterialInput { ... };` —— 无字段时放一个占位成员(空 struct 在 HLSL 非法)。"""
-    lines = ["struct MaterialInput", "{"]
+def struct_text(fields, name="MaterialInput"):
+    """`struct <name> { ... };` —— 无字段时放一个占位成员(空 struct 在 HLSL 非法)。"""
+    lines = ["struct %s" % name, "{"]
     if fields:
         for f in fields:
             lines.append("    %s %s;" % (f["type"], f["name"]))
@@ -157,10 +213,10 @@ def struct_text(fields):
     return "\n".join(lines)
 
 
-def build_text(fields, impl):
-    """main 内的构造代码(缩进 4 空格)。无字段时给占位赋初值, 避免未初始化。"""
-    body = list(impl) if impl else ["mi._reserved = 0.0;"]
-    return "\n".join(["    MaterialInput mi;"] + ["    " + s for s in body])
+def build_text(fields, impl, name="MaterialInput", recv="mi"):
+    """该 stage main 内的构造代码(缩进 4 空格)。无字段时给占位赋初值, 避免未初始化。"""
+    body = list(impl) if impl else ["%s._reserved = 0.0;" % recv]
+    return "\n".join(["    %s %s;" % (name, recv)] + ["    " + s for s in body])
 
 
 def minput_from_src(material_src, existing_names=frozenset()):

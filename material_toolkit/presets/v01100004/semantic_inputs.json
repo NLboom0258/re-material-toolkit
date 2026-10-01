@@ -1,54 +1,56 @@
 {
-  "format": "semantic_inputs/2",
-  "_note": "预设(语义)输入目录: 每个条目 = 一个可**单独添加**的语义输入项(name -> 依赖的引擎资源 + MaterialInput 字段 + 构造实现)。group 仅用于界面分组显示(不是可添加的一整类)。人工维护(非从 mmtr 抽取)。",
+  "format": "semantic_inputs/3",
+  "_note": "预设(语义)输入目录: 每个条目 = 一个可**单独添加**的语义输入项。新增 `values` = 该预设依赖的**阶段值**(由 lib/semantic_inputs.STAGE_VALUES 按 ps/vs/depth 各自提供表达式)。`impl` 用 `G.<值>` 引用阶段值(真·世界空间语义), 解析时按当前 stage 替换。`depends` 保留(PS 的引擎资源 + 插值, 供锁定/接口)。group 仅界面分组。",
   "entries": [
     {
       "name": "uv0",
       "group": "UV",
-      "desc": "第一套 UV(插值 v1.w/v2.x)",
+      "desc": "第一套 UV",
       "depends": ["INTERPOLATOR0", "INTERPOLATOR1"],
+      "values": ["uv0"],
       "field": {"name": "uv0", "type": "float2"},
-      "impl": ["mi.uv0 = float2(i.v1.w, i.v2.x);"]
+      "impl": ["mi.uv0 = G.uv0;"]
     },
     {
       "name": "uv1",
       "group": "UV",
-      "desc": "第二套 UV(插值 v2.yz)",
+      "desc": "第二套 UV",
       "depends": ["INTERPOLATOR1"],
+      "values": ["uv1"],
       "field": {"name": "uv1", "type": "float2"},
-      "impl": ["mi.uv1 = i.v2.yz;"]
+      "impl": ["mi.uv1 = G.uv1;"]
     },
     {
       "name": "NormalWS",
       "group": "几何",
       "desc": "世界(光照)空间法线; 做 N·L 用它(与光方向同空间)",
       "depends": ["INTERPOLATOR0"],
+      "values": ["worldNormal"],
       "field": {"name": "NormalWS", "type": "float3"},
-      "impl": ["mi.NormalWS = normalize(i.v1.xyz);"]
+      "impl": ["mi.NormalWS = normalize(G.worldNormal);"]
     },
     {
       "name": "TangentWS",
       "group": "几何",
-      "desc": "世界空间切线(插值切线经 .xzy 归一到世界空间)",
+      "desc": "世界空间切线",
       "depends": ["INTERPOLATOR1", "INTERPOLATOR2"],
+      "values": ["worldTangent"],
       "field": {"name": "TangentWS", "type": "float3"},
-      "impl": [
-        "float3 _tWS = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
-        "mi.TangentWS = _tWS.xzy;"
-      ]
+      "impl": ["mi.TangentWS = normalize(G.worldTangent);"]
     },
     {
       "name": "BitangentWS",
       "group": "几何",
-      "desc": "世界空间副切线(由 GBuffer 基 N×T 与 bitangent 符号得, 经 .xzy 归一)",
+      "desc": "世界空间副切线(由世界基 N×T 与 bitangent 符号得)",
       "depends": ["INTERPOLATOR0", "INTERPOLATOR1", "INTERPOLATOR2"],
+      "values": ["worldNormal", "worldTangent", "tangentSign"],
       "field": {"name": "BitangentWS", "type": "float3"},
       "impl": [
-        "float3 _ngB = normalize(i.v1.xyz).xzy;",
-        "float3 _tgB = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
-        "float3 _bgB = cross(_ngB, _tgB);",
-        "_bgB = (i.v3.z < 0.0) ? -_bgB : _bgB;",
-        "mi.BitangentWS = normalize(_bgB).xzy;"
+        "float3 _ngW = normalize(G.worldNormal).xzy;",
+        "float3 _tgW = normalize(G.worldTangent);",
+        "float3 _bgW = cross(_ngW, _tgW);",
+        "_bgW = (G.tangentSign < 0.0) ? -_bgW : _bgW;",
+        "mi.BitangentWS = normalize(_bgW).xzy;"
       ]
     },
     {
@@ -56,44 +58,49 @@
       "group": "几何",
       "desc": "GBuffer/插值约定的世界法线基 N(已 .xzy; 供直写 RT2 打包; 光照请用 NormalWS)",
       "depends": ["INTERPOLATOR0"],
+      "values": ["worldNormal"],
       "field": {"name": "Normal", "type": "float3"},
-      "impl": ["mi.Normal = normalize(i.v1.xyz).xzy;"]
+      "impl": ["mi.Normal = normalize(G.worldNormal).xzy;"]
     },
     {
       "name": "Tangent",
       "group": "几何",
       "desc": "GBuffer/插值约定的切线基 T(供直写 RT2 打包)",
       "depends": ["INTERPOLATOR1", "INTERPOLATOR2"],
+      "values": ["worldTangent"],
       "field": {"name": "Tangent", "type": "float3"},
-      "impl": ["mi.Tangent = normalize(float3(i.v2.w, i.v3.y, i.v3.x));"]
+      "impl": ["mi.Tangent = normalize(G.worldTangent);"]
     },
     {
       "name": "Bitangent",
       "group": "几何",
       "desc": "GBuffer/插值约定的副切线基 B(由 N×T 与符号得; 供直写 RT2 打包)",
       "depends": ["INTERPOLATOR0", "INTERPOLATOR1", "INTERPOLATOR2"],
+      "values": ["worldNormal", "worldTangent", "tangentSign"],
       "field": {"name": "Bitangent", "type": "float3"},
       "impl": [
-        "float3 _nB = normalize(i.v1.xyz).xzy;",
-        "float3 _tB = normalize(float3(i.v2.w, i.v3.y, i.v3.x));",
-        "float3 _bB = cross(_nB, _tB);",
-        "_bB = (i.v3.z < 0.0) ? -_bB : _bB;",
-        "mi.Bitangent = normalize(_bB);"
+        "float3 _nBW = normalize(G.worldNormal).xzy;",
+        "float3 _tBW = normalize(G.worldTangent);",
+        "float3 _bBW = cross(_nBW, _tBW);",
+        "_bBW = (G.tangentSign < 0.0) ? -_bBW : _bBW;",
+        "mi.Bitangent = normalize(_bBW);"
       ]
     },
     {
       "name": "positionWS",
       "group": "几何",
-      "desc": "世界坐标(插值 v3.w/v4.xy)",
+      "desc": "世界坐标",
       "depends": ["INTERPOLATOR2", "INTERPOLATOR3"],
+      "values": ["worldPos"],
       "field": {"name": "positionWS", "type": "float3"},
-      "impl": ["mi.positionWS = float3(i.v3.w, i.v4.x, i.v4.y);"]
+      "impl": ["mi.positionWS = G.worldPos;"]
     },
     {
       "name": "camPos",
       "group": "相机",
       "desc": "相机世界位置(依赖 SceneInfo.transposeViewInvMat)",
       "depends": ["SceneInfo"],
+      "values": [],
       "field": {"name": "camPos", "type": "float3"},
       "impl": ["mi.camPos = float3(transposeViewInvMat[0].w, transposeViewInvMat[1].w, transposeViewInvMat[2].w);"]
     },
@@ -102,6 +109,7 @@
       "group": "相机",
       "desc": "相机前方向(依赖 SceneInfo.transposeViewInvMat)",
       "depends": ["SceneInfo"],
+      "values": [],
       "field": {"name": "camDir", "type": "float3"},
       "impl": ["mi.camDir = normalize(float3(transposeViewInvMat[0].z, transposeViewInvMat[1].z, transposeViewInvMat[2].z));"]
     },
@@ -110,18 +118,29 @@
       "group": "相机",
       "desc": "相机上方向(依赖 SceneInfo.transposeViewInvMat)",
       "depends": ["SceneInfo"],
+      "values": [],
       "field": {"name": "camUp", "type": "float3"},
       "impl": ["mi.camUp = normalize(float3(transposeViewInvMat[0].y, transposeViewInvMat[1].y, transposeViewInvMat[2].y));"]
+    },
+    {
+      "name": "svpos",
+      "group": "系统",
+      "desc": "屏幕像素坐标(SV_Position; PS 由光栅化给, VS 由 clip 算)",
+      "depends": [],
+      "values": ["svpos"],
+      "field": {"name": "svpos", "type": "float4"},
+      "impl": ["mi.svpos = G.svpos;"]
     },
     {
       "name": "velocity",
       "group": "系统",
       "desc": "屏幕空间运动矢量(上一帧裁剪坐标 W 齐次除法 - NDC; 供直写 RT3.zw)",
       "depends": ["SceneInfo", "INTERPOLATOR3", "INTERPOLATOR4"],
+      "values": ["svpos", "prevClip"],
       "field": {"name": "velocity", "type": "float2"},
       "impl": [
-        "float2 _ndc = i.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);",
-        "mi.velocity = (i.v4.zw / i.v5.x) - _ndc;"
+        "float2 _ndc = G.svpos.xy * screenInverseSize * float2(2.0, -2.0) + float2(-1.0, 1.0);",
+        "mi.velocity = (G.prevClip.xy / G.prevClip.w) - _ndc;"
       ]
     },
     {
@@ -129,6 +148,7 @@
       "group": "系统",
       "desc": "曝光抵消系数 = 1/(白点*曝光系数)(引擎会对 RT0 再乘 <白点*曝光>)",
       "depends": ["WhitePtSrv", "Tonemap"],
+      "values": [],
       "field": {"name": "exposureScale", "type": "float"},
       "impl": [
         "float _wp = asfloat(WhitePtSrv.Load(0));",

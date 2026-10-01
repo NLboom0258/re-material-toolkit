@@ -2743,7 +2743,7 @@ class MaterialSystemPanel(QWidget):
         chk.blockSignals(False)
 
     def _vs_inputs_view(self):
-        """顶点(VS) 输入视图: 只读输入说明 + 「强制完整输入」开关(材质级)。"""
+        """顶点(VS) 输入视图: 「强制完整输入」开关 + 「预设输入」(全局共用) + 说明。"""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
@@ -2755,22 +2755,31 @@ class MaterialSystemPanel(QWidget):
             "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n默认关 ⇒ 逐字节与现状一致。")
         self.chk_force_full.toggled.connect(self._on_force_full)
         v.addWidget(self.chk_force_full)
+        # 预设输入(全局一份): 顶点与主/深度共用同一套; 用到几何值的预设会自动触发补输入。
+        _bar = QHBoxLayout()
+        for _t, _cb in (("＋预设输入", self._add_presets), ("＋引擎资源", self._add_engine)):
+            _b = QPushButton(_t)
+            _b.clicked.connect(_cb)
+            _bar.addWidget(_b)
+        _bar.addStretch(1)
+        v.addLayout(_bar)
         t = QTreeWidget()
         t.setHeaderLabels(["类别 / 名", "类型", "说明"])
-        root = QTreeWidgetItem(["顶点输入(固定; 由变体决定; 只读)", "", ""])
-        for _n, _d in (("worldPos", "世界空间位置(可作偏移基准)"),
-                       ("worldNormal", "世界空间法线(该变体无法线时 = 0)"),
-                       ("worldTangent", "世界空间切线(无切线时 = 0)"),
-                       ("uv0", "第一套 UV(无时 = 0)"),
-                       ("uv1", "第二套 UV(无时 = 0)")):
+        root = QTreeWidgetItem(["VertexInput(由「预设输入」生成; 全局共用)", "", ""])
+        for _n, _d in (("worldPos / positionWS", "世界空间位置"),
+                       ("worldNormal / NormalWS", "世界空间法线"),
+                       ("worldTangent / TangentWS", "世界空间切线"),
+                       ("uv0 / uv1", "两套 UV"),
+                       ("svpos", "屏幕像素坐标(SV_Position)"),
+                       ("camPos / camDir / camUp", "相机量(引擎资源)")):
             root.addChild(QTreeWidgetItem([_n, "", _d]))
         t.addTopLevelItem(root)
         t.expandAll()
         fit_columns(t, (0, 1, 2))
         v.addWidget(t, 1)
-        note = QLabel("VS 输入固定、不可增删(与 PS 的预设/参数不同)。顶点效果的编辑在"
-                      "「材质源」的 `float3 MaterialVertex(VertexInput v)`(返回世界空间偏移)。"
-                      "钩子如需额外资源(时间/参数/贴图), 后续用 `//! param/tex` 声明。")
+        note = QLabel("预设输入为**全局一份**(主 pass / 深度 pass / 顶点共用)。顶点效果写在"
+                      "「材质源」的 `float3 MaterialVertex(VertexInput v)`(返回世界空间偏移); "
+                      "用到几何值的预设会自动触发「强制完整输入」。")
         note.setWordWrap(True)
         v.addWidget(note)
         return w
@@ -2824,10 +2833,9 @@ class MaterialSystemPanel(QWidget):
     def _locked_names(self, pass_name="main"):
         """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。
 
-        **只算该 pass 自己的预设**(之前用全量 `_presets` ⇒ 会把另一 pass 预设的依赖也算成本 pass 锁定)。
+        预设是**全局一份**(主/深度/顶点共用) ⇒ 不按 pass 过滤。
         """
-        _pre = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
-        res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)))
+        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
         _pt = "深度 pass" if pass_name == "depth" else "主 pass"
         _tmpl = self.asset.template.get("pass_template") or "deferred_std"
@@ -2865,7 +2873,7 @@ class MaterialSystemPanel(QWidget):
             return (" @%s" % t) if t else ""
         lines = (["//! vertex force_full_inputs"] if getattr(self, "_force_full", False)
                  else [])
-        lines += ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
+        lines += ["//! preset %s" % n for n in self._presets]
         lines += ["//! param %s %s%s" % (t, n, _tg("param", n)) for n, t in self._params]
         lines += ["//! tex %s%s" % (n, _tg("tex", n)) for n in self._textures]
         lines += ["//! engine %s%s" % (n, _tg("engine", n)) for n in self._engine]
@@ -2884,44 +2892,22 @@ class MaterialSystemPanel(QWidget):
         self._rewrite_decls()
 
     def _add_presets(self):
-        """从预设(语义)输入目录挑选(**只增删当前 pass 的项**); 依赖的引擎资源会自动加入并锁定。"""
+        """从预设(语义)输入目录挑选(**全局一份**; 主/深度/顶点共用); 依赖的引擎资源自动加入并锁定。"""
         self._load_decls_from_src()
-        _pass = self._cur_pass()
-        _own = [n for n in self._presets if self._pass_belongs("preset", n, _pass)]
-        # 初选 = 本 pass 已添加项(不夹带另一 pass, 否则会“显示成已添加但实际没加”)。
-        d = PresetDialog(self, selected=set(_own))
+        d = PresetDialog(self, selected=set(self._presets))
         if d.exec() != QDialog.Accepted:
             return
-        self._apply_presets(_pass, d.selected_names())
+        self._apply_presets(d.selected_names())
 
-    def _apply_presets(self, pass_name, selected):
-        """把某 pass 的预设选择结果落到全局 `_presets`: **其它 pass 的项保持不变**。
-
-        回归保护: 之前对话框初选=全部预设、且直接覆盖 `_presets` ⇒ 在深度页添加的项会
-        “显示成”主 pass 已添加(实际未加)。本方法保证三页(主/深度/顶点)各自独立增删。
-        """
+    def _apply_presets(self, selected):
+        """设置**全局启用集**(主/深度/顶点共用)。保序: 已有项保持相对顺序, 新项追加。"""
         self._load_decls_from_src()
-        _own = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
-        _old = set(_own)
-        _sel = [n for n in selected]
+        _sel = list(selected)
         _sel_set = set(_sel)
-        for n in (_old - _sel_set):               # 本页取消的项: 删标签(等价删除)
-            self._tags.pop(("preset", n), None)
-        for n in _sel:                            # 本页选中的项: 打本页标签
-            self._tags[("preset", n)] = pass_name
-        _res, _seen = [], set()                   # 重排(保序): 其它 pass 的项 + 本页结果
-        for n in self._presets:
-            if n in _old:
-                if n in _sel_set:
-                    _res.append(n)
-                    _seen.add(n)
-            else:
-                _res.append(n)
-                _seen.add(n)
+        _res = [n for n in self._presets if n in _sel_set]
         for n in _sel:
-            if n not in _seen:
+            if n not in _res:
                 _res.append(n)
-                _seen.add(n)
         self._presets = _res
         self._rewrite_decls()
         return list(self._presets)

@@ -371,38 +371,46 @@ def _assemble(infields, outs, cbs, srvs, body_lines, extra_global=""):
     return "\n".join(L) + "\n"
 
 
-def build_from_spec(spec, hook=None):
+def build_from_spec(spec, hook=None, vs_in=None):
     """按 spec(来自 spec_from_blob)生成 VS 源。
 
-    hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入(填 VertexInput -> 取世界偏移 ->
-    施加到 wp, 并把同一偏移加到“上一帧世界位置”以保持运动矢量一致)。None => 不注入(现状)。
+    hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入。
+    vs_in: 顶点 stage 的预设解析结果(`SI.resolve(stage="vs", struct_name="VertexInput",
+           recv="v")`): `def` = `struct VertexInput` 定义, `impl` = 构造行(`v.xxx = ...`),
+           `values` = 用到的阶段值。None = 空预设(生成空 VertexInput)。
+    在**世界变换(+shadow)之后、打包之前**构造 VertexInput -> 取世界偏移(`_dv`) -> `wp += _dv`;
+    并把同一偏移加到“上一帧世界位置”以保持运动矢量一致。
     """
     world = spec["world"]
     pack, interp = spec["pack"], spec["interp"]
     clip, shadow = spec["clip"], spec["shadow"]
     nointerp0 = spec.get("nointerp0", False)
-    in_names = {n for (_t, n, _s) in _BASE_IN[spec["family"]]}
-    has_nrm, has_tan = "nrm" in in_names, "tan" in in_names
-    has_uv0, has_uv1 = "uv0" in in_names, "uv1" in in_names
-    need_n = (pack == "mat") or shadow
-    need_t = (pack == "mat")
-    need_prev = (pack == "mat")
-    if hook:
-        # 钩子需要这些量 -> 按可用性补算(未用则被 DCE)
-        need_n = need_n or has_nrm
-        need_t = need_t or has_tan
+    if vs_in is None:
+        from . import semantic_inputs as SI
+        vs_in = SI.resolve([], stage="vs", struct_name="VertexInput", recv="v")
+    _vals = set(vs_in.get("values") or [])
+    _has_vi = bool(hook) or bool(vs_in.get("impl"))
+    # 用到哪些阶段值 -> 决定是否补算世界法线/切线/上一帧(未用则被 DCE)
+    need_n = (pack == "mat") or shadow or ("worldNormal" in _vals)
+    need_t = (pack == "mat") or ("worldTangent" in _vals)
+    need_prev = (pack == "mat") or ("prevClip" in _vals)
     L, prevw = _emit_world(world, need_n, need_t, need_prev)
     if shadow:
         L.extend(shadow_offset(wp="wp", n="wN").splitlines())
+    # 预设供值: svpos 由 clip 算(与 PS 的 SV_Position 语义一致); prevClip = 上一帧裁剪坐标
+    if "svpos" in _vals:
+        L.append("float4 _vs_clip = mul(float4(wp, 1.0), viewProjMat);")
+        L.append("float2 _vs_ndc = _vs_clip.xy / _vs_clip.w;")
+        L.append("float4 _vs_svpos = float4((_vs_ndc.x * 0.5 + 0.5) * screenSize.x,"
+                 " (0.5 - _vs_ndc.y * 0.5) * screenSize.y,"
+                 " _vs_clip.z / _vs_clip.w, _vs_clip.w);")
+    if "prevClip" in _vals:
+        L.append("float4 _vs_pclip = mul(%s, prevViewProjMat);" % prevw)
+    if _has_vi:
+        L.append("VertexInput v;")
+        L.extend(vs_in.get("impl") or [])
     if hook:
-        # 世界变换(+shadow)之后、打包之前: 填输入 -> 取世界偏移 -> 施加(并同步到上一帧)
-        L.append("VertexInput _vi;")
-        L.append("_vi.worldPos = wp;")
-        L.append("_vi.worldNormal = %s;" % ("wN" if has_nrm else "float3(0.0, 0.0, 0.0)"))
-        L.append("_vi.worldTangent = %s;" % ("wT" if has_tan else "float3(0.0, 0.0, 0.0)"))
-        L.append("_vi.uv0 = %s;" % ("i.uv0" if has_uv0 else "float2(0.0, 0.0)"))
-        L.append("_vi.uv1 = %s;" % ("i.uv1" if has_uv1 else "float2(0.0, 0.0)"))
-        L.append("float3 _dv = MaterialVertex(_vi);")
+        L.append("float3 _dv = MaterialVertex(v);")
         L.append("wp += _dv;")
     if pack == "mat":
         if hook:
@@ -433,9 +441,21 @@ def build_from_spec(spec, hook=None):
     infields = list(_BASE_IN[spec["family"]])
     if spec["svid"]:
         infields.append(("uint", "svid", "SV_InstanceID"))
-    extra = (VERTEX_INPUT_STRUCT + "\n" + hook) if hook else ""
-    return _assemble(infields, outs, spec["cbuffers"], spec["srvs"], L,
-                     extra_global=extra)
+    # 接口 = 银行 cbuffer/srv + 预设新增的引擎资源(cbuffer; 结构化 SRV 按 SRV_STRUCTS)
+    from . import material_inputs as INP
+    cbs, srvs = list(spec["cbuffers"]), list(spec["srvs"])
+    for nm in (vs_in.get("engine") or []):
+        e = INP.find(nm)
+        if not e:
+            continue
+        if e["kind"] == "cbuffer" and nm not in cbs:
+            cbs.append(nm)
+        elif e["kind"] == "texture" and nm in SRV_STRUCTS and nm not in srvs:
+            srvs.append(nm)
+    extra = ""
+    if _has_vi:
+        extra = vs_in.get("def", "") + "\n" + (hook or "")
+    return _assemble(infields, outs, cbs, srvs, L, extra_global=extra)
 
 
 def compile_vs(src):

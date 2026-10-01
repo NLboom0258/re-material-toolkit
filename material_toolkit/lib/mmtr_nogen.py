@@ -160,6 +160,27 @@ def require_fn(material_src, name):
                          % name)
 
 
+# 材质源**只允许**这三个函数(MaterialMain/MaterialDepth/MaterialVertex)。
+# 额外的用户函数一律拒绝 —— 因为编译某一 pass 时会保留其它函数, 它们可能引用别的 pass 的
+# 类型/资源 ⇒ 造成 pass 间“串味”。暂不支持用户自定义辅助函数(之后若需要, 须带“按 pass 归属”
+# 另行设计)。匹配形如 `TYPE NAME(...) {` 的函数定义(行首; 行内 `//` 注释天然不匹配)。
+_ALLOWED_FUNCS = ("MaterialMain", "MaterialDepth", "MaterialVertex")
+_FUNC_DEF_RE = re.compile(r"(?m)^\s*[A-Za-z_][\w<>]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{")
+
+
+def enforce_functions(material_src, allowed=_ALLOWED_FUNCS):
+    """材质源不得定义除 `allowed` 外的函数; 否则报错(保证三 pass 完全独立)。"""
+    extra = []
+    for m in _FUNC_DEF_RE.finditer(material_src or ""):
+        nm = m.group(1)
+        if nm not in allowed and nm not in extra:
+            extra.append(nm)
+    if extra:
+        raise ValueError(
+            "材质源出现不允许的函数: %s\n  仅允许 %s(用户自定义辅助函数暂不支持, "
+            "以免某 pass 编译时保留其它函数导致串味)。" % (", ".join(extra), "/".join(allowed)))
+
+
 def strip_line_map(src, name):
     """删除 `void name(...) {...}` 并返回 (新源, 行映射函数)。
 
@@ -264,7 +285,10 @@ def build_standard_vs(material_src, bank_key):
     spec = VG.spec_from_blob(ref)
     if not spec or not spec.get("family"):
         return "", None, "无法从银行 blob 反推 spec"
-    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None)
+    from . import semantic_inputs as SI
+    vs_in = SI.resolve(SI.parse_preset_decls(material_src), set(), stage="vs",
+                       struct_name="VertexInput", recv="v")
+    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None, vs_in=vs_in)
     dxbc, err = VG.compile_vs(src)
     return src, dxbc, err
 
@@ -318,7 +342,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                             spec_used = dict(spec)
                             spec_used["family"] = VG.FULLMAP[orig_fam]
                         gen, _err = VG.compile_vs(
-                            VG.build_from_spec(spec_used, hook=vs_hook_src or None))
+                            VG.build_from_spec(spec_used, hook=vs_hook_src or None,
+                                               vs_in=vs_in))
                 except Exception:
                     gen = None
                 c = (("gen", gen, spec_used, orig_fam) if gen
@@ -335,6 +360,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     require_fn(material_src, "MaterialMain")
     require_fn(material_src, "MaterialDepth")
     require_fn(material_src, "MaterialVertex")
+    # 只允许这三个函数(多余函数 -> 报错): 保证三 pass 组装完全独立、不串。
+    enforce_functions(material_src)
     # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
     _confl = MG.param_name_conflicts(MG.parse_decls(material_src)[0])
     if _confl:
@@ -347,10 +374,17 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     vs_hook_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"),
                                  "MaterialDepth")
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
-    # "补输入": 是否把 reduced 族(深度/阴影/拾取)换到完整族。
-    # 由手动开关(force_full_inputs 参数)或源码里的 `//! vertex force_full_inputs` 指令决定;
-    # 之后由"预设输入依赖"自动触发(缺值被依赖时)。
-    _upg = bool(force_full_inputs) or bool(
+    # 顶点预设(stage="vs"): 全局启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
+    #   同时给出 vs_attrs(需用到的顶点属性) 供"补输入"依赖判定。
+    from . import semantic_inputs as SI
+    vs_in = SI.resolve(SI.parse_preset_decls(material_src), set(), stage="vs",
+                       struct_name="VertexInput", recv="v")
+    if vs_in.get("unsupported"):
+        raise ValueError("顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"])
+    # "补输入": reduced 族(深度/阴影/拾取)换到完整族。
+    # 触发 = 手动开关(force_full_inputs) / 顶点预设依赖缺属性(自动) / 源码指令。
+    _auto_upg = bool(vs_in.get("vs_attrs"))
+    _upg = bool(force_full_inputs) or _auto_upg or bool(
         re.search(r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", material_src or ""))
     # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
@@ -742,9 +776,12 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "vs_gen": vs_stat["gen"], "vs_bank": vs_stat["bank"],
         "vs_missing": vs_stat["none"], "vs_cache": len(_vs_cache),
         "vs_upgrade": _upg, "vs_upgraded": vs_stat["upgraded"],
+        "vs_attrs": list(vs_in.get("vs_attrs") or []),
+        "vs_full_inputs_auto": _auto_upg,
         "iface_tex": [t["name"] for t in (iface or {}).get("textures", [])],
         "depth_ps": "material",
         "presets": _rep.get("presets") or [],
         "preset_unknown": _rep.get("preset_unknown") or [],
+        "preset_unsupported": _rep.get("preset_unsupported") or [],
         "lock": _rep.get("lock") or {},
     }

@@ -26,20 +26,8 @@ struct DepthInput
     //__DEPTH_UV0_DI__
 };
 
-// ---- 材质主 pass 输入/输出(材质源可能同时含 MaterialMain; 缺省不使用) ----
-//__MINPUT_DEF__
-struct MaterialOutput
-{
-    float3 BaseColor;
-    float  Metallic;
-    float  Roughness;
-    float3 NormalTS;
-    float3 Emissive;
-    float  Occlusion;
-    float  Translucency;
-};
-
-// ---- 材质函数(必须提供 MaterialDepth; 可选 MaterialMain) ----
+// ---- 材质函数(只允许 3 个函数: MaterialMain/MaterialDepth/MaterialVertex; 本 pass 用 MaterialDepth) ----
+// 注: 不再声明 MaterialInput/MaterialOutput —— 材质源只含这 3 个函数 ⇒ 深度 PS 不会串入主 pass 的类型。
 //__MATERIAL_MAIN__
 
 void main(PSIn i)

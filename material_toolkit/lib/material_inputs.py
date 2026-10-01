@@ -553,7 +553,7 @@ def all_params(material_src):
 
 
 def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None,
-                              all_params=None):
+                              all_params=None, stage=None):
     """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, "", report)。
 
     第 2 个返回值(保活文本)**已退役**, 恒为 ""(仅为兼容调用方签名; 寄存器改由编译器自动紧凑)。
@@ -601,14 +601,18 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     textures = [n for n in textures if _belongs(n)]
     eng_names = [n for n in eng_names if _belongs(n)]
 
-    # 预设(语义)输入: 解析 `//! preset` -> 依赖的引擎资源(并入 eng_names, 走同一"声明即保活"
-    #   路径) + 动态生成 MaterialInput 定义/构造文本(供 build_source 注入)。
+    # 预设(语义)输入: **全局(材质级)一份启用集** —— 不按 pass 过滤; 各 pass 从同一份目录
+    #   生成**各自**的输入结构体(MaterialInput/DepthInput/VertexInput)。依赖的引擎资源并入 eng_names。
     from . import semantic_inputs as SI
-    _presets = [n for n in SI.parse_preset_decls(material_src) if _belongs(n)]
-    _si = SI.resolve(_presets, _iface_names(base_iface))
+    _stage = stage or ("depth" if pass_name == "depth" else "ps")
+    _sn, _rc = ("DepthInput", "di") if _stage == "depth" else ("MaterialInput", "mi")
+    _presets = SI.parse_preset_decls(material_src)
+    _si = SI.resolve(_presets, _iface_names(base_iface), stage=_stage,
+                     struct_name=_sn, recv=_rc)
     eng_names = list(eng_names) + list(_si["engine"])
     report["presets"] = _si["presets"]
     report["preset_unknown"] = _si["unknown"]
+    report["preset_unsupported"] = _si["unsupported"]
     report["lock"] = _si["lock"]
     report["minput"] = {"def": _si["def"], "build": _si["build"]}
 
