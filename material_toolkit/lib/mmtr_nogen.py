@@ -300,8 +300,10 @@ def build_standard_vs(material_src, bank_key, inputs=None):
     vs_in = SI.resolve(MIM.presets(inputs, "vertex"), _union, stage="vs",
                        struct_name="VertexInput", recv="vi")
     vs_iface, _, _ = _vs_iface(inputs, vs_in)
-    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None,
-                             vs_in=vs_in, vs_iface=vs_iface)
+    from . import custom_functions as CF
+    _hook = CF.injection_text(MIM.funcs(inputs, "vertex"), "vs", "vertex") + \
+        (vs_hook_source(material_src) or "")
+    src = VG.build_from_spec(spec, hook=_hook or None, vs_in=vs_in, vs_iface=vs_iface)
     dxbc, err = VG.compile_vs(src)
     return src, dxbc, err
 
@@ -432,24 +434,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                     "  (请在输入页的「函数」里导入到该 pass)" % (p, ", ".join(miss)))
 
     def _funcs_text(pass_name, stage):
-        """该 pass 要注入的定义文本(导入闭包, 依赖在前); 逐函数按阶段校验(含依赖)。"""
-        names = CF.topo_order(MIM.funcs(inputs, pass_name))
-        if not names:
-            return ""
-        parts = []
-        for n in names:
-            s = CF.get(n)
-            if s is None:
-                raise ValueError("pass '%s': 导入的自定义函数不存在: %s" % (pass_name, n))
-            st = CF.check(n)
-            if not st[stage]["ok"]:
-                _e = (st[stage]["err"] or "").strip().splitlines()
-                raise ValueError(
-                    "自定义函数 %s 在 %s 阶段检查不通过(pass '%s'; 若它由别的函数依赖引入, "
-                    "即为依赖问题):\n  %s"
-                    % (n, stage, pass_name, _e[0] if _e else "?"))
-            parts.append(s.rstrip())
-        return "\n\n".join(parts) + "\n\n"
+        """该 pass 要注入的定义文本(导入闭包, 依赖在前; 分阶段校验, 含依赖)。"""
+        return CF.injection_text(MIM.funcs(inputs, pass_name), stage, pass_name)
     # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
     _confl = MG.param_name_conflicts(MIM.params(inputs))
     if _confl:

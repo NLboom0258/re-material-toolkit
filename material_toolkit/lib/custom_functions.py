@@ -351,8 +351,40 @@ def check(name, source=None):
     return res
 
 
+def cached(name):
+    """已缓存的检查结果(内容未变); 未检查/已失效返回 None(供列表展示, 不触发编译)。"""
+    src = get(name)
+    if src is None:
+        return None
+    h = hashlib.md5(src.encode("utf-8")).hexdigest()
+    hit = _cache.get(name)
+    return hit[1] if (hit and hit[0] == h) else None
+
+
 def _st(target):
     return "ps" if target.startswith("ps") else "vs"
+
+
+def injection_text(names, stage, pass_name=None):
+    """函数名列表 -> 注入文本(依赖在前); 逐函数按 stage 校验, 不通过即抛错。
+
+    生成端与 GUI 共用; 错误信息指明"哪个函数在哪个阶段不过"(若它由别的函数依赖引入=依赖问题)。
+    """
+    parts = []
+    for n in topo_order(names):
+        s = get(n)
+        if s is None:
+            raise ValueError("导入的自定义函数不存在: %s%s"
+                             % (n, (" (pass '%s')" % pass_name) if pass_name else ""))
+        st = check(n)
+        if not st[stage]["ok"]:
+            _e = (st[stage]["err"] or "").strip().splitlines()
+            raise ValueError(
+                "自定义函数 %s 在 %s 阶段检查不通过%s(若它由别的函数依赖引入, 即为依赖问题):\n  %s"
+                % (n, stage, (" (pass '%s')" % pass_name) if pass_name else "",
+                   _e[0] if _e else "?"))
+        parts.append(s.rstrip())
+    return ("\n\n".join(parts) + "\n\n") if parts else ""
 
 
 def clear_cache():
