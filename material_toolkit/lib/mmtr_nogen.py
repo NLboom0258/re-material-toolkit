@@ -405,6 +405,51 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     require_fn(material_src, "MaterialVertex")
     # 只允许这三个函数(多余函数 -> 报错): 保证三 pass 组装完全独立、不串。
     enforce_functions(material_src)
+    # --- 自定义函数(纯函数库; 逐 pass 显式导入) ---
+    from . import custom_functions as CF
+
+    def _entry_body(name):
+        sp = _hlsl_fn_span(material_src, name)
+        return material_src[sp[0]:sp[1]] if sp else ""
+
+    def _check_missing_funcs():
+        """入口调用了库函数却未导入到该 pass -> 清晰报错(而非 HLSL 未声明报错)。"""
+        known = set(CF.list_names())
+        if not known:
+            return
+        _ent = {"main": "MaterialMain", "depth": "MaterialDepth",
+                "vertex": "MaterialVertex"}
+        for p in ("main", "depth", "vertex"):
+            direct = CF.calls_in(_entry_body(_ent[p]), known)
+            if not direct:
+                continue
+            need = CF.closure(direct)
+            imported = set(MIM.funcs(inputs, p))
+            miss = sorted(n for n in need if n not in imported)
+            if miss:
+                raise ValueError(
+                    "pass '%s' 调用了**未导入**的自定义函数: %s\n"
+                    "  (请在输入页的「函数」里导入到该 pass)" % (p, ", ".join(miss)))
+
+    def _funcs_text(pass_name, stage):
+        """该 pass 要注入的定义文本(导入闭包, 依赖在前); 逐函数按阶段校验(含依赖)。"""
+        names = CF.topo_order(MIM.funcs(inputs, pass_name))
+        if not names:
+            return ""
+        parts = []
+        for n in names:
+            s = CF.get(n)
+            if s is None:
+                raise ValueError("pass '%s': 导入的自定义函数不存在: %s" % (pass_name, n))
+            st = CF.check(n)
+            if not st[stage]["ok"]:
+                _e = (st[stage]["err"] or "").strip().splitlines()
+                raise ValueError(
+                    "自定义函数 %s 在 %s 阶段检查不通过(pass '%s'; 若它由别的函数依赖引入, "
+                    "即为依赖问题):\n  %s"
+                    % (n, stage, pass_name, _e[0] if _e else "?"))
+            parts.append(s.rstrip())
+        return "\n\n".join(parts) + "\n\n"
     # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
     _confl = MG.param_name_conflicts(MIM.params(inputs))
     if _confl:
@@ -416,6 +461,11 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # VS 钩子源 = 材质源剥掉两个 PS 函数(`MaterialVertex` + 辅助函数; `//!` 是注释, 无害)。
     vs_hook_src = _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"),
                                  "MaterialDepth")
+    # 自定义函数(逐 pass 导入): 先查"调用了未导入的函数", 再注入"导入闭包(依赖在前)"。
+    _check_missing_funcs()
+    mp_src = _funcs_text("main", "ps") + mp_src
+    d_src = _funcs_text("depth", "ps") + d_src
+    vs_hook_src = _funcs_text("vertex", "vs") + vs_hook_src
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
     # 顶点预设(stage="vs"): 归属 `@vertex` 的启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
     #   同时给出 vs_attrs(需用到的顶点属性) 供"补输入"依赖判定。

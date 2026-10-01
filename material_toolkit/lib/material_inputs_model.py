@@ -10,6 +10,7 @@ param/tex`, 带 `@pass` 标签, 无标签归 main) ⇒ 解析脆弱(多解析器
         "preset": {"main": [...], "depth": [...], "vertex": [...]},   # 语义(预设)输入名(**按 pass**)
         "engine": {"main": [...], "depth": [...], "vertex": [...]},   # 引擎资源名(**按 pass**)
         "tex":    {"main": [...], "depth": [...], "vertex": [...]},   # 材质贴图槽名(**按 pass**)
+        "func":   {"main": [...], "depth": [...], "vertex": [...]},   # 自定义函数名(**按 pass**; 自动带依赖闭包)
         "param":  [{"name","type"}, ...],                             # 材质参数(**全局**, 非 per-pass)
     }
 
@@ -24,7 +25,7 @@ param/tex`, 带 `@pass` 标签, 无标签归 main) ⇒ 解析脆弱(多解析器
 """
 
 PASSES = ("main", "depth", "vertex")
-_PER_PASS = ("preset", "engine", "tex")
+_PER_PASS = ("preset", "engine", "tex", "func")
 
 
 def empty():
@@ -85,6 +86,11 @@ def textures(inputs, p):
     return list(((inputs or {}).get("tex") or {}).get(p) or [])
 
 
+def funcs(inputs, p):
+    """该 pass 导入的自定义函数名(已含依赖闭包, 依赖在前)。"""
+    return list(((inputs or {}).get("func") or {}).get(p) or [])
+
+
 def params(inputs):
     """材质参数 [(name,type)] —— **全局**(非 per-pass)。"""
     out = []
@@ -107,15 +113,18 @@ def all_params(inputs):
 
 
 def normalize(inputs):
-    """补齐自动依赖: 预设依赖的引擎资源 -> 写进**同 pass** 的 engine(去重保序)。返回新 dict。
+    """补齐自动依赖: "预设依赖的引擎资源"->同 pass engine; "函数依赖闭包"->同 pass func(依赖在前)。
 
-    仅**补**, 不删(GUI 侧据当前预设判定锁定; 不再是依赖的项会解锁, 用户可手动删)。
+    仅**补**, 不删(GUI 侧据当前预设判定锁定; 不再是依赖的项会解锁, 用户可手动删)。返回新 dict。
     """
     out = from_dict(inputs)
     from . import semantic_inputs as SI
+    from . import custom_functions as CF
     for p in PASSES:
         res = SI.resolve(out["preset"][p], set())
         for nm in res["engine"]:
             if nm not in out["engine"][p]:
                 out["engine"][p].append(nm)
+        if out["func"][p]:
+            out["func"][p] = CF.topo_order(out["func"][p])   # 展开依赖闭包 + 依赖在前
     return out
