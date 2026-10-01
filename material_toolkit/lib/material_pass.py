@@ -15,10 +15,8 @@ KEEPALIVE = "//__KEEPALIVE__"
 # 预设(语义)输入动态生成的两块: 结构定义(文件域) + main 内构造代码
 MINPUT_DEF = "//__MINPUT_DEF__"
 MINPUT_BUILD = "//__MINPUT_BUILD__"
-# 插值声明(真驱动): 由 passes.json 生成(主 pass 全量; 深度 uv0 条件化)。
+# 插值声明(真驱动): 由 passes.json / 预设生成(主 pass 全量; 深度按是否需插值决定)。
 INTERP_DECL = "//__INTERP_DECL__"
-DEPTH_UV0_DI = "//__DEPTH_UV0_DI__"
-DEPTH_UV0_BUILD = "//__DEPTH_UV0_BUILD__"
 _TDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "pass_templates")
 
@@ -65,7 +63,7 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     minput: {"def":..., "build":...} 预设(语义)输入动态生成的 MaterialInput 定义/构造;
                None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
     style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
-    subs: 额外标记替换 {标记: 文本}(如深度模板的 `//__DEPTH_UV0_*__`, 按需声明插值)。
+    subs: 额外标记替换 {标记: 文本}(模板里自定义的 `//__XXX__` 占位)。
     """
     tpl = _read(template + ".hlsl")
     if subs:
