@@ -66,8 +66,8 @@ from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QFontMetrics, QPainter, QPalette, QSyntaxHighlighter,
-    QTextCharFormat, QTextCursor,
+    QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPalette,
+    QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
@@ -76,8 +76,8 @@ from PySide6.QtWidgets import (  # noqa: E402
     QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTabBar, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QStyleOptionViewItem, QTabBar, QTabWidget, QTextEdit, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 TYPENAME = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler", 0xFF: "cbuffer"}
@@ -518,8 +518,51 @@ class _LineNumberArea(QWidget):
         self._ed.line_number_area_paint_event(event)
 
 
+class _FindBar(QWidget):
+    """编辑器内嵌查找栏(Ctrl+F): 上一个/下一个 + 全部高亮 + 区分大小写。"""
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self._ed = editor
+        self.setObjectName("reFindBar")
+        self.setStyleSheet(
+            "#reFindBar { background: palette(window);"
+            " border-bottom: 1px solid palette(mid); }")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(4)
+        self.ed_find = QLineEdit()
+        self.ed_find.setPlaceholderText("查找\u2026")
+        self.ed_find.setFixedWidth(200)
+        self.lbl = QLabel("")
+        self.lbl.setMinimumWidth(52)
+        self.btn_prev = QPushButton("上一个")
+        self.btn_next = QPushButton("下一个")
+        self.btn_case = QPushButton("Aa")
+        self.btn_case.setCheckable(True)
+        self.btn_case.setToolTip("区分大小写")
+        self.btn_close = QPushButton("\u2715")
+        self.btn_close.setFixedWidth(28)
+        for w in (self.ed_find, self.lbl, self.btn_prev, self.btn_next,
+                  self.btn_case, self.btn_close):
+            lay.addWidget(w)
+        lay.addStretch(1)
+        self.btn_close.clicked.connect(self._ed.hide_find)
+        self.btn_next.clicked.connect(lambda: self._ed.find_next(True))
+        self.btn_prev.clicked.connect(lambda: self._ed.find_next(False))
+        self.btn_case.toggled.connect(lambda _=False: self._ed._refresh_matches())
+        self.ed_find.textChanged.connect(lambda _t: self._ed._refresh_matches())
+        self.ed_find.returnPressed.connect(lambda: self._ed.find_next(True))
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._ed.hide_find()
+            return
+        super().keyPressEvent(event)
+
+
 class CodeEdit(QPlainTextEdit):
-    """代码编辑器: 行号 + Tab 缩进(空格) + 等宽字体。
+    """代码编辑器: 行号 + Tab 缩进(空格) + 等宽字体 + Ctrl+F 查找。
 
     indent = Tab 插入空格数(asm=2 / HLSL=4); Shift+Tab 反缩进。
     """
@@ -549,14 +592,25 @@ class CodeEdit(QPlainTextEdit):
             self.blockCountChanged.connect(lambda *_: self._update_lnarea_width())
             self.updateRequest.connect(self._update_lnarea)
             self._update_lnarea_width()
+        self._find_open = False
+        self._find = _FindBar(self)
+        self._find.hide()
+        self.textChanged.connect(self._on_text_for_find)
 
     # ---- 行号区 ----
     def line_number_area_width(self):
         digits = max(2, len(str(max(1, self.blockCount()))))
         return 10 + self.fontMetrics().horizontalAdvance("9") * digits
 
+    def _find_height(self):
+        """查找栏停靠带高度(未打开=0)。"""
+        if not self._find_open:
+            return 0
+        return self._find.sizeHint().height()
+
     def _update_lnarea_width(self):
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+        ft = self._find_height() if getattr(self, "_find", None) is not None else 0
+        self.setViewportMargins(self.line_number_area_width(), ft, 0, 0)
 
     def _update_lnarea(self, rect, dy):
         if dy:
@@ -568,7 +622,9 @@ class CodeEdit(QPlainTextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._has_numbers:
+        if getattr(self, "_find", None) is not None:
+            self._apply_find_layout()
+        elif self._has_numbers:
             cr = self.contentsRect()
             self._lnarea.setGeometry(cr.left(), cr.top(),
                                      self.line_number_area_width(), cr.height())
@@ -597,6 +653,15 @@ class CodeEdit(QPlainTextEdit):
 
     # ---- Tab 缩进 ----
     def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Find):
+            self.show_find()
+            return
+        if event.key() == Qt.Key_Escape and self._find_open:
+            self.hide_find()
+            return
+        if event.key() == Qt.Key_F3:
+            self.find_next(not (event.modifiers() & Qt.ShiftModifier))
+            return
         if event.key() == Qt.Key_Tab and not (event.modifiers() & Qt.ControlModifier):
             self._indent_sel(bool(event.modifiers() & Qt.ShiftModifier))
             return
@@ -641,6 +706,100 @@ class CodeEdit(QPlainTextEdit):
                 break
             block = block.next()
         cursor.endEditBlock()
+
+    # ---- 查找(Ctrl+F) ----
+    def _find_flags(self):
+        f = QTextDocument.FindFlags()
+        if self._find.btn_case.isChecked():
+            f |= QTextDocument.FindCaseSensitively
+        return f
+
+    def _all_matches(self, text):
+        """全部匹配的 (起点, 终点) 位置。"""
+        out = []
+        if not text:
+            return out
+        doc = self.document()
+        cur = QTextCursor(doc)
+        while True:
+            cur = doc.find(text, cur, self._find_flags())
+            if cur.isNull():
+                break
+            out.append((cur.selectionStart(), cur.selectionEnd()))
+        return out
+
+    def _on_text_for_find(self):
+        """文本变化时刷新高亮(仅查找栏打开时)。"""
+        if self._find_open:
+            self._refresh_matches()
+
+    def _refresh_matches(self):
+        """重算全部匹配并高亮(全部=黄底, 当前选中由光标高亮)。"""
+        text = self._find.ed_find.text()
+        sels = []
+        for (s, e) in self._all_matches(text):
+            c = QTextCursor(self.document())
+            c.setPosition(s)
+            c.setPosition(e, QTextCursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#6b5a00"))
+            fmt.setForeground(QColor("#ffffff"))
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = c
+            sel.format = fmt
+            sels.append(sel)
+        self.setExtraSelections(sels)
+        self._find.lbl.setText("" if not text else "%d \u5904" % len(sels))
+
+    def _apply_find_layout(self):
+        """查找栏**停靠在顶部边框**(非悬浮): 预留一条固定区域并放置。
+
+        打开: 顶部让出 `_find_height()`, 查找栏占满该条(代码在其下方滚动);
+        关闭: 边距归零, 代码区恢复。
+        """
+        ft = self._find_height()
+        cr = self.contentsRect()
+        self.setViewportMargins(self.line_number_area_width(), ft, 0, 0)
+        if self._has_numbers:
+            self._lnarea.setGeometry(cr.left(), cr.top() + ft,
+                                     self.line_number_area_width(), cr.height() - ft)
+        if self._find_open:
+            self._find.setGeometry(cr.left(), cr.top(), cr.width(), ft)
+            self._find.raise_()
+
+    def show_find(self):
+        """显示查找栏; 若有单行选中的文本则预填。"""
+        sel = self.textCursor().selectedText()
+        if sel and "\u2029" not in sel and "\n" not in sel:
+            self._find.ed_find.setText(sel)
+        self._find_open = True
+        self._find.show()
+        self._apply_find_layout()
+        self._find.ed_find.setFocus()
+        self._find.ed_find.selectAll()
+        self._refresh_matches()
+
+    def hide_find(self):
+        self._find_open = False
+        self._find.hide()
+        self._apply_find_layout()
+        self.setExtraSelections([])
+        self.setFocus()
+
+    def find_next(self, forward=True):
+        """查找下一个/上一个(到头则回绕)。"""
+        text = self._find.ed_find.text()
+        if not text:
+            self.show_find()
+            return
+        flags = self._find_flags()
+        if not forward:
+            flags |= QTextDocument.FindBackward
+        if not self.find(text, flags):
+            c = self.textCursor()
+            c.movePosition(QTextCursor.Start if forward else QTextCursor.End)
+            self.setTextCursor(c)
+            self.find(text, flags)
 
 
 class HlslHighlighter(QSyntaxHighlighter):
