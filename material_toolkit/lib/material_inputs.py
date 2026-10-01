@@ -404,43 +404,6 @@ def _add_engine(iface, e, reg):
 
 
 # ---------------------------------------------------------------- 组装
-def parse_engine_decls(material_src):
-    out = []
-    for line in (material_src or "").splitlines():
-        m = _ENGINE_RE.match(_PASS_TAG_RE.sub("", line))
-        if m:
-            out.append(m.group(1))
-    return out
-
-
-# ---- per-pass 声明归属 ----
-_DECL_RE = re.compile(r"^\s*//!\s*(\w+)\s+(.+?)\s*$")
-_PASS_TAG_RE = re.compile(r"@([A-Za-z_]\w*)\s*$")
-
-
-def _decl_name_tags(material_src):
-    """从 `//!` 声明行解析 {资源名: 显式 `@pass` 标签或 None}。"""
-    out = {}
-    for line in (material_src or "").splitlines():
-        m = _DECL_RE.match(line)
-        if not m:
-            continue
-        rest = m.group(2)
-        tm = _PASS_TAG_RE.search(rest)
-        tag = tm.group(1) if tm else None
-        if tm:
-            rest = rest[:tm.start()].strip()
-        parts = rest.split()
-        if parts:                       # param: <type> <name>; 其余: <name> ⇒ 取末token
-            out[parts[-1]] = tag
-    return out
-
-
-def _code_only(material_src):
-    """去掉 `//!` 声明行后的代码(供"按引用归属"判定; 声明行本身不算引用)。"""
-    return "\n".join(l for l in (material_src or "").splitlines()
-                     if not l.lstrip().startswith("//!"))
-
 
 # 插值输入的用途说明(供界面展示; 非资源)。
 INTERP_DESC = {
@@ -452,7 +415,7 @@ INTERP_DESC = {
 }
 
 
-def _interp_specs_for(pass_name, material_src):
+def _interp_specs_for(pass_name, presets):
     """该 pass **实际**的插值声明规格。
 
     主 pass -> passes.json 全量(材质族); 深度 -> 仅当该 pass 预设需要插值时用材质族(Phase 3);
@@ -462,15 +425,14 @@ def _interp_specs_for(pass_name, material_src):
         return interp_specs("main")
     if pass_name == "depth":
         from . import semantic_inputs as SI
-        dep = SI.presets_for_pass(material_src or "", "depth")
-        return interp_specs("main") if SI.presets_need_interp(dep) else []
+        return interp_specs("main") if SI.presets_need_interp(presets or []) else []
     return []
 
 
-def interp_inputs(pass_name="main", material_src=None):
+def interp_inputs(pass_name="main", presets=()):
     """该 pass 声明依赖的插值输入 [(名, 用途)]。非资源(只读展示)。"""
     return [(s["name"], INTERP_DESC.get(s["name"], ""))
-            for s in _interp_specs_for(pass_name, material_src)]
+            for s in _interp_specs_for(pass_name, presets)]
 
 
 # 插值掩码 -> HLSL 类型(4->float4 ... 1->float)
@@ -486,19 +448,19 @@ def interp_specs(pass_name="main"):
     return out
 
 
-def interp_decls(pass_name="main", material_src=None):
+def interp_decls(pass_name="main", presets=()):
     """生成该 pass 的 `PSIn` 插值声明行(缩进 4)。供模板注入(真驱动)。"""
     lines = []
-    for s in _interp_specs_for(pass_name, material_src):
+    for s in _interp_specs_for(pass_name, presets):
         lines.append("    %s %s : %s;" % (_MASK_TYPE.get(s.get("mask", 4), "float4"),
                                           s.get("var"), s.get("name")))
     return "\n".join(lines)
 
 
-def interp_has(pass_name, name, material_src=None):
-    """该 pass 是否(按当前材质源)声明某插值输入。"""
+def interp_has(pass_name, name, presets=()):
+    """该 pass 是否(按当前预设)声明某插值输入。"""
     return any(s.get("name") == name
-               for s in _interp_specs_for(pass_name, material_src))
+               for s in _interp_specs_for(pass_name, presets))
 
 
 def pass_dep_names(pass_name="main", template=None):
@@ -538,89 +500,53 @@ def _apply_canonical_order(iface, pass_name):
         iface[kind] = reordered
 
 
-def all_params(material_src):
-    """全部材质参数 [(name,type)] (按序去重)。
+def build_iface_and_keepalive(base_iface, engine_names=(), params=(), textures=(),
+                              presets=(), stage="ps", struct_name="MaterialInput",
+                              recv="mi", all_params=None, pass_name=None):
+    """**统一入口**: 基座 + 该 pass 的声明(engine/param/tex/preset) -> (iface, "", report)。
 
-    UserMaterial 成员表是 **mmtr 级共享一套** ⇒ 必须是各 pass 参数的**并集**
-    (多 pass 重复出现的算一个), 以保证各 PS 的 UserMaterial 定义一致。
-    """
-    from . import material_gen as MG
-    out, seen = [], set()
-    for n, t in MG.parse_decls(material_src)[0]:
-        if n not in seen:
-            seen.add(n)
-            out.append((n, t))
-    return out
+    第 2 个返回值(保活文本)**已退役**, 恒为 ""(寄存器改由编译器自动紧凑)。
 
-
-def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_code=None,
-                              all_params=None, stage=None):
-    """**统一入口**: 基础接口 + 材质声明(param/tex) + 引擎资源(engine) -> (iface, "", report)。
-
-    第 2 个返回值(保活文本)**已退役**, 恒为 ""(仅为兼容调用方签名; 寄存器改由编译器自动紧凑)。
-
-    pass_name: 当前 pass 名(如 "main"/"depth"); 非 None 时按 pass 过滤声明
-               (带 `@pass` 的按标签; 无标签的按"该 pass 代码是否引用其名")。None = 不过滤(旧行为)。
-    other_code: 另一个 pass 的代码(仅主 pass 传); 无标签且两边都未引用 ⇒ 归本 pass(默认家)。
+    engine_names/params/textures/presets: 该 pass 的**显式清单**(来自结构化 inputs)。
+    stage: "ps" / "vs" / "depth" —— 决定预设 `G.<值>` 的供值来源与生成的结构体(名/接收者)。
     all_params: 全部材质参数 (name,type) —— UserMaterial 成员表用**并集**(全局共享一套)。
-    **始终**返回接口(模板已无写死 IFACE): 无 `//!` 声明时接口 = 基座(该 pass 的引擎依赖)。
+    pass_name: 用于 `_apply_canonical_order` 的规范声明序(main/depth/vertex)。
+    **始终**返回接口: 无声明时接口 = 基座(该 pass 的引擎依赖)。
     """
-    from . import material_gen as MG
     from . import material_iface as MI
     import copy
-    params, textures = MG.parse_decls(material_src)
-    eng_names = parse_engine_decls(material_src)
     report = {"engine": [], "params": [], "textures": [], "regs": {},
-              "presets": [], "preset_unknown": [], "lock": {}, "minput": None}
+              "presets": [], "preset_unknown": [], "preset_unsupported": [],
+              "lock": {}, "minput": None}
 
     if base_iface is None:
         base_iface = {"cbuffers": [{"name": "UserMaterial", "reg": "b3", "members": []}],
                       "textures": [],
                       "samplers": [{"name": "AutomaticWrap", "reg": "s0", "cmp": False}]}
 
-    # pass 归属(per-pass 输入)
-    if pass_name is None:
-        def _belongs(_nm):
-            return True
-    else:
-        _tags = _decl_name_tags(material_src)
-        _code = _code_only(material_src)
-
-        def _ref(nm, text):
-            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(nm),
-                             text) is not None
-
-        def _belongs(nm):
-            tg = _tags.get(nm)
-            if tg:
-                return tg == pass_name
-            if _ref(nm, _code):
-                return True
-            # 未被本 pass 引用: 若给了"另一 pass 的代码"且那边也没引用 ⇒ 归本 pass(默认家)
-            return other_code is not None and not _ref(nm, other_code)
-    params = [(n, t) for (n, t) in params if _belongs(n)]
-    textures = [n for n in textures if _belongs(n)]
-    eng_names = [n for n in eng_names if _belongs(n)]
-
-    # 预设(语义)输入: 目录**全局**(任何 pass 都可添加); 启用集**按 pass 各自**(`@pass` 标签; 无标签归 main).
-    #   各 pass 从同一目录生成**各自**的输入结构体(MaterialInput/DepthInput/VertexInput)。依赖的引擎资源并入 eng_names.
+    # 预设(语义)输入: 目录**全局**; 启用集**按 pass 各自**(由调用方给出本 pass 名单)。
+    #   各 pass 从同一目录生成**各自**的结构体(MaterialInput/DepthInput/VertexInput)。
     from . import semantic_inputs as SI
     _stage = stage or ("depth" if pass_name == "depth" else "ps")
-    _sn, _rc = ("DepthInput", "di") if _stage == "depth" else ("MaterialInput", "mi")
-    _presets = SI.presets_for_pass(material_src, pass_name or "main")
+    _sn, _rc = struct_name, recv
+    if _stage == "depth" and struct_name == "MaterialInput":
+        _sn, _rc = "DepthInput", "di"
+    _presets = list(presets or [])
     _bad = SI.unsupported_in_stage(_presets, _stage)   # 该 stage 拿不到的值所依赖的预设
     if _bad:
         _presets = [n for n in _presets if n not in _bad]
     _si = SI.resolve(_presets, _iface_names(base_iface), stage=_stage,
                      struct_name=_sn, recv=_rc)
-    eng_names = list(eng_names) + list(_si["engine"])
+    eng_names = list(engine_names or []) + list(_si["engine"])
     report["presets"] = _si["presets"]
     report["preset_unknown"] = _si["unknown"]
     report["preset_unsupported"] = _bad
     report["lock"] = _si["lock"]
     report["minput"] = {"def": _si["def"], "build": _si["build"]}
 
-    # 注: **始终**返回接口(模板已无写死 IFACE); 无 `//!` 声明时接口 = 基座(该 pass 的引擎依赖)。
+    # 材质参数/贴图(该 pass): UserMaterial 成员表用**并集**(mmtr 级共享一套)。
+    params = list(params or [])
+    textures = list(textures or [])
     known_p = {m["name"] for c in base_iface["cbuffers"] for m in c["members"]}
     known_t = {t["name"] for t in base_iface["textures"]}
     params = [(n, t) for (n, t) in params if n not in known_p]
@@ -660,3 +586,4 @@ def build_iface_and_keepalive(material_src, base_iface, pass_name=None, other_co
     # 保活已退役(2026-09-30): 寄存器改由 d3dcompiler“自动紧凑”分配(寄存器号 ≡ RDEF 位置,
     #   结构上无空洞), 无需再靠死分支引用维持 RDEF。
     return iface, "", report
+

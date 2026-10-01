@@ -54,15 +54,16 @@ def material_line_offset(template="deferred_env"):
 
 
 def build_source(material_src=None, template="deferred_env", iface=None,
-                 style="cbuffer", keepalive=None, minput=None, subs=None):
+                 style="cbuffer", keepalive=None, minput=None, subs=None, presets=None):
     """组装完整 HLSL。material_src 为 None 时用该模板的默认材质函数。
 
     iface 给定(来自 material_iface)时, 用它**替换**模板里 //__IFACE_BEGIN__~END__ 之间的
     接口声明(否则用模板自带的写死声明, 便于单独编译/测试)。
     keepalive: **已退役**(仅为兼容保留, 恒被忽略): 寄存器交由编译器自动紧凑, 无需保活。
-    minput: {"def":..., "build":...} 预设(语义)输入动态生成的 MaterialInput 定义/构造;
+    minput: {"def":..., "build":...} 预设(语义)输入动态生成的结构体定义/构造;
                None 时用**空**(struct 带占位成员) —— 保证模板标记总被替换。
-    style: "cbuffer"(材质参数走 cbuffer) / "instance"(走结构化缓冲, per-instance)。
+    presets: 该 pass 的预设名列表(仅深度 pass 用于判定是否声明材质族插值; Phase 3)。
+    style: "cbuffer" / "instance"。
     subs: 额外标记替换 {标记: 文本}(模板里自定义的 `//__XXX__` 占位)。
     """
     tpl = _read(template + ".hlsl")
@@ -76,7 +77,7 @@ def build_source(material_src=None, template="deferred_env", iface=None,
     if INTERP_DECL in tpl:
         from . import material_inputs as _INP
         _pn = "depth" if "depth" in template else "main"
-        tpl = tpl.replace(INTERP_DECL, _INP.interp_decls(_pn, material_src))
+        tpl = tpl.replace(INTERP_DECL, _INP.interp_decls(_pn, presets))
     if MARKER not in tpl:
         raise ValueError("模板缺少标记 %s: %s.hlsl" % (MARKER, template))
     if iface is not None:
@@ -99,7 +100,7 @@ def build_source(material_src=None, template="deferred_env", iface=None,
 
 def compile_shading(material_src=None, template="deferred_env",
                     entry="main", target="ps_5_0", iface=None, style="cbuffer",
-                    keepalive=None, minput=None, graft=False, subs=None):
+                    keepalive=None, minput=None, graft=False, subs=None, presets=None):
     """编译为 ps_5_0。返回 (dxbc_bytes, err_text)。
 
     注: **默认不再做"元数据嫁接"**(graft=False)。2026-09-27 已查明: DX12 下材质 pass 被
@@ -108,7 +109,7 @@ def compile_shading(material_src=None, template="deferred_env",
     **无需移植参考块**。graft=True 仅作为旧的兑底手段保留(lib/ps_meta)。
     """
     dxbc, err = B.compile_hlsl(build_source(material_src, template, iface, style,
-                                            keepalive, minput, subs),
+                                            keepalive, minput, subs, presets),
                                entry, target, name="%s.hlsl" % template)
     if err or not graft:
         return dxbc, err

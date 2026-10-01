@@ -25,6 +25,14 @@
       "interp": [
         {"name": "INTERPOLATOR0", "var": "v1", "mask": 4, "when": "uv0"}
       ]
+    },
+    "vertex": {
+      "fn": "MaterialVertex",
+      "depends": [
+        "SceneInfo", "World", "ShadowCastInfo", "RootConstant",
+        "SkinningMatrices", "InstanceWorldInfo", "IndirectIndicesBuffer", "WorldInstances"
+      ],
+      "_note": "标准 VS 引擎资源并集(cbuffer 4 + 结构 SRV 4)。声明序 = 规范序(必须保持, 不可排序): 过滤掉变体未用项后须与银行逐变体声明序一致 —— cb: SceneInfo,World,ShadowCastInfo,RootConstant; srv: SkinningMatrices,InstanceWorldInfo,IndirectIndicesBuffer,WorldInstances。未用项由 d3dcompiler 剔除(离线实证: 并集声明 == 按变体声明, 逐字节一致) => RDEF 等价按变体。变换公式仍按变体(spec)生成。"
     }
   }
 }

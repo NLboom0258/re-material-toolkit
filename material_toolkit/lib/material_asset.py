@@ -1,17 +1,23 @@
 """材质资产(Material Asset) —— 材质系统的“作者源”层(见 analysis/mmtr_input_boundary.md §9)。
 
 分层(参照 UE):
-- 本资产 = 一组“材质函数”(表3a: BaseColor/…)+ 参数 + 贴图槽 + 两个着色选项;
+- 本资产 = 一组“材质函数”(表3a: BaseColor/…)+ 输入注册(preset/engine/param/tex)+ 两个着色选项;
 - pass 模板(系统)调用材质函数并做各 pass 的打包/输出;
 - 本模块只做【模型 + JSON + 校验】, 不含编译/装配(M2/M3)。
 
 两个**正交**选项(可任意组合, 无非法组合):
 - lighting_mode: ``default``(材质只给 PBR; 光照/打包由模板按引擎逻辑做) / ``custom``(材质**直控输出**: 前向=写最终色、延迟=写原始 GBuffer; 最终输出前的后处理也交给材质);
 - shading_type:  ``deferred`` / ``forward``。
+
+输入注册(唯一真源, 2026-10-01 重构):
+- `inputs` = `material_inputs_model` 的结构化 per-pass 注册(preset/engine/param/tex);
+- `shading.source` = **纯 HLSL**(不再含 `//!` 注释声明)。
 """
 import json
 
-FORMAT = "mmat/1"
+from . import material_inputs_model as MIM
+
+FORMAT = "mmat/2"
 
 LIGHTING_MODES = ("default", "custom")
 SHADING_TYPES = ("deferred", "forward")
@@ -51,46 +57,18 @@ MUTEX = [
 PARAM_TYPES = ("float", "float2", "float3", "float4")
 
 
-class MaterialParameter(object):
-    def __init__(self, name, type_="float", value=None):
-        self.name = name
-        self.type = type_
-        self.value = list(value) if value is not None else [0.0]
-
-    def to_dict(self):
-        return {"name": self.name, "type": self.type, "value": list(self.value)}
-
-    @classmethod
-    def from_dict(cls, d):
-        return cls(d["name"], d.get("type", "float"), d.get("value"))
-
-
-class MaterialTexture(object):
-    def __init__(self, name, path=""):
-        self.name = name
-        self.path = path
-
-    def to_dict(self):
-        return {"name": self.name, "path": self.path}
-
-    @classmethod
-    def from_dict(cls, d):
-        return cls(d["name"], d.get("path", ""))
-
-
 class MaterialAsset(object):
-    """材质资产(源)。字段: 两个选项 + 参数 + 贴图槽 + 材质函数(HLSL)。"""
+    """材质资产(源)。字段: 两个选项 + 输入注册(preset/engine/param/tex)+ 材质函数(HLSL)。"""
 
     def __init__(self, name="NewMaterial", lighting_mode="default",
-                 shading_type="deferred", template=None, parameters=None,
-                 textures=None, shading_source=""):
+                 shading_type="deferred", template=None, inputs=None,
+                 shading_source=""):
         self.name = name
         self.lighting_mode = lighting_mode
         self.shading_type = shading_type
         self.template = template or {}          # {"pass_template": "deferred_std", "mmtr_path": "MasterMaterial/..."}
-        self.parameters = list(parameters or [])
-        self.textures = list(textures or [])
-        self.shading_source = shading_source   # 用户写的材质函数(HLSL)
+        self.inputs = MIM.from_dict(inputs)     # 结构化输入注册(唯一真源)
+        self.shading_source = shading_source    # 用户写的材质函数(**纯 HLSL**, 无 `//!`)
 
     @classmethod
     def new_default(cls, name="NewMaterial"):
@@ -122,9 +100,9 @@ class MaterialAsset(object):
             out.append(("error", "未知 lighting_mode: %r" % self.lighting_mode))
         if self.shading_type not in SHADING_TYPES:
             out.append(("error", "未知 shading_type: %r" % self.shading_type))
-        for p in self.parameters:
-            if p.type not in PARAM_TYPES:
-                out.append(("error", "参数 %s 类型未知: %r" % (p.name, p.type)))
+        for (name, typ) in MIM.params(self.inputs):
+            if typ not in PARAM_TYPES:
+                out.append(("error", "参数 %s 类型未知: %r" % (name, typ)))
         return out
 
     def is_ok(self):
@@ -138,23 +116,18 @@ class MaterialAsset(object):
             "lighting_mode": self.lighting_mode,
             "shading_type": self.shading_type,
             "template": dict(self.template),
-            "parameters": [p.to_dict() for p in self.parameters],
-            "textures": [t.to_dict() for t in self.textures],
+            "inputs": MIM.to_dict(self.inputs),
             "shading": {"language": "hlsl", "source": self.shading_source},
         }
 
     @classmethod
     def from_dict(cls, d):
-        a = cls(name=d.get("name", "NewMaterial"),
-                lighting_mode=d.get("lighting_mode", "default"),
-                shading_type=d.get("shading_type", "deferred"),
-                template=dict(d.get("template") or {}),
-                parameters=[MaterialParameter.from_dict(x)
-                            for x in d.get("parameters", [])],
-                textures=[MaterialTexture.from_dict(x)
-                          for x in d.get("textures", [])],
-                shading_source=(d.get("shading") or {}).get("source", ""))
-        return a
+        return cls(name=d.get("name", "NewMaterial"),
+                   lighting_mode=d.get("lighting_mode", "default"),
+                   shading_type=d.get("shading_type", "deferred"),
+                   template=dict(d.get("template") or {}),
+                   inputs=MIM.from_dict(d.get("inputs")),
+                   shading_source=(d.get("shading") or {}).get("source", ""))
 
     def save(self, path):
         with open(path, "w", encoding="utf-8") as f:

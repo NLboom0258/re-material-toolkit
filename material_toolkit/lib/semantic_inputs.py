@@ -5,18 +5,16 @@
 每个条目: `{name, group?, desc?, depends[], field{name,type}, impl[]}`。
 `group` 仅用于界面分组显示 —— **添加单位是单个条目**(如 `camPos`), 不是一整类。
 
-设计(2026-09-29 v2):
-- 材质源码顶部用 `//! preset <Name>` 声明"已添加的语义输入项"(一行一项);
+设计(2026-10-01 v3, 结构化真源):
+- "已添加的语义输入项"由 `.mmat.json` 的 `inputs.preset[pass]` 给出(见 material_inputs_model);
 - 组装时**动态生成** `struct MaterialInput`(字段 = 所有已添加项提供的字段)与 main 内的
-  构造代码(每项的 impl); **依赖的引擎资源**按 `//! engine` 同样路径加入接口(自动分配
-  寄存器 + 保活);
-- 本模块**不 import material_inputs**(避免循环); 依赖判定由调用方传入 `existing_names`。
+  构造代码(每项的 impl); **依赖的引擎资源**由 `resolve()` 返回, 调用方并入该 pass 的接口;
+- 本模块**不 import material_inputs**(避免循环); 只收"名字列表", 不做源码解析。
 
 用法:
     SI.catalog()                         # 全部条目 [{name,group,desc,depends,field,impl}]
     SI.groups()                          # 按 group 聚合(界面用): [{group, items:[...]}]
     SI.find(name)                        # 单个(无则 None)
-    SI.parse_preset_decls(src)           # 源码里的 `//! preset` 名(按序去重)
     SI.resolve(names, existing_names)    # 解析 -> deps/engine/fields/impl/def/build
 """
 
@@ -31,9 +29,6 @@ except ImportError:  # 允许脚本直接 import
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import mmtr_presets as P
 
-_PRESET_RE = re.compile(r"^\s*//!\s*preset\s+(\w+)\s*$")
-_PASS_TAG_RE = re.compile(r"\s+@[A-Za-z_]\w*\s*$")
-_PASS_TAG_G = re.compile(r"@([A-Za-z_]\w*)\s*$")
 _GROUP_NONE = "(未分组)"
 
 # ---- 值层: 每个"阶段值"给 ps/vs/depth 各自的"供值表达式"(真·世界空间/屏幕语义) ----
@@ -109,37 +104,6 @@ def groups():
             out.append({"group": g, "items": []})
         out[idx[g]]["items"].append(e)
     return out
-
-
-def parse_preset_decls(material_src):
-    """材质源码里的 `//! preset <Name>` 声明(按序去重)。行尾可带 `@<pass>` 标签(忽略)。"""
-    out = []
-    for line in (material_src or "").splitlines():
-        m = _PRESET_RE.match(_PASS_TAG_RE.sub("", line))
-        if m and m.group(1) not in out:
-            out.append(m.group(1))
-    return out
-
-
-def parse_preset_decls_tags(material_src):
-    """`//! preset` -> [(name, tag或None)] (按序去重; tag 如 main/depth/vertex)。"""
-    out, seen = [], set()
-    for line in (material_src or "").splitlines():
-        tm = _PASS_TAG_G.search(line)
-        m = _PRESET_RE.match(_PASS_TAG_RE.sub("", line))
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            out.append((m.group(1), tm.group(1) if tm else None))
-    return out
-
-
-def presets_for_pass(material_src, pass_name):
-    """归属于某 pass 的 `//! preset` 名单: `@pass` 优先; 无标签 -> 归 main。
-
-    目录是**全局**的(任何 pass 都可添加任一项); 启用集按 pass 各自维护(降低耦合)。
-    """
-    return [nm for (nm, tag) in parse_preset_decls_tags(material_src)
-            if (tag or "main") == pass_name]
 
 
 def unsupported_in_stage(names, stage):
@@ -289,8 +253,11 @@ def build_text(fields, impl, name="MaterialInput", recv="mi"):
 
 
 def minput_from_src(material_src, existing_names=frozenset()):
-    """便捷入口: 解析源码 `//! preset` -> resolve(...)。"""
-    return resolve(parse_preset_decls(material_src), existing_names)
+    """(已废弃) 旧"从源码 `//! preset` 解析"入口 —— 结构化真源后不再解析源码, 恒空。
+
+    保留仅为兼容旧 donor 路径(其材质源不含声明 ⇒ 结果与空解析一致)。
+    """
+    return resolve([], existing_names)
 
 
 def empty_texts():

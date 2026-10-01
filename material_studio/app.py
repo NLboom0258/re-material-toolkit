@@ -58,6 +58,7 @@ from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
 from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
 from tools.material_toolkit.lib import semantic_inputs as sinp  # noqa: E402
 from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
+from tools.material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
 from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
 
@@ -2522,12 +2523,8 @@ class MaterialSystemPanel(QWidget):
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
         self.tabs.addTab(self.tree_info, "语义输出 / 校验")
         root.addWidget(self.tabs, 1)
-        # 自定义输入(预设/参数/贴图/引擎资源)状态: 与源码 `//!` 声明同步
-        self._presets = []
-        self._params = []
-        self._textures = []
-        self._engine = []
-        self._tags = {}          # (kind, name) -> 显式 `@pass`; 无 = 按引用自动归属
+        # 输入注册 = 结构化真源(self.asset.inputs; 见 lib/material_inputs_model.py)
+        self.asset.inputs = mimp.normalize(self.asset.inputs)
 
     # ---- 状态同步 ----
     def _sync_asset(self):
@@ -2603,7 +2600,7 @@ class MaterialSystemPanel(QWidget):
             return
         src = self.ed_src.toPlainText()
         try:
-            vsrc, dxbc, err = nogen.build_standard_vs(src, key)
+            vsrc, dxbc, err = nogen.build_standard_vs(src, key, inputs=self.asset.inputs)
         except Exception as e:  # noqa: BLE001
             self.ed_full_vs.setPlainText(";; 组装失败: %s" % e)
             self.lbl_vs.setText("[组装失败] %s" % e)
@@ -2698,21 +2695,18 @@ class MaterialSystemPanel(QWidget):
         return self._iface_min[key]
 
     def _effective_inputs(self, pass_name="main"):
-        """基座(该 pass 的引擎依赖) + 自定义输入(**按 pass 过滤**); 返回 (iface, keepalive, minput)。"""
-        src = self.ed_src.toPlainText()
-        if pass_name == "main":
-            own, other = "MaterialDepth", "MaterialMain"
-        else:
-            own, other = "MaterialMain", "MaterialDepth"
-        base = self._base_iface(pass_name)
-        p_src = nogen._strip_hlsl_fn(src, own)
-        o_code = (minp._code_only(nogen._strip_hlsl_fn(src, other))
-                  if pass_name == "main" else None)
+        """基座(该 pass 的引擎依赖) + 该 pass 的输入清单; 返回 (iface, keepalive, minput)。"""
+        _stage = "depth" if pass_name == "depth" else "ps"
+        _sn, _rc = (("DepthInput", "di") if pass_name == "depth"
+                    else ("MaterialInput", "mi"))
         iface, ka, rep = minp.build_iface_and_keepalive(
-            p_src, base, pass_name=pass_name, other_code=o_code,
-            all_params=minp.all_params(src))
-        if iface is None:
-            iface = base
+            self._base_iface(pass_name),
+            engine_names=mimp.engine(self.asset.inputs, pass_name),
+            params=mimp.params(self.asset.inputs),
+            textures=mimp.textures(self.asset.inputs, pass_name),
+            presets=mimp.presets(self.asset.inputs, pass_name),
+            stage=_stage, struct_name=_sn, recv=_rc,
+            all_params=mimp.all_params(self.asset.inputs), pass_name=pass_name)
         return iface, ka, (rep or {}).get("minput")
 
     def _effective_iface(self):
@@ -2728,25 +2722,19 @@ class MaterialSystemPanel(QWidget):
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
 
-    def _on_force_full(self, checked):
-        """「强制完整输入」开关 -> 写/删源码里的 `//! vertex force_full_inputs` 指令。"""
-        self._force_full = bool(checked)
-        self._rewrite_decls()
-
     def _sync_force_full(self):
-        """同步「强制完整输入」勾选框(载入/刷新/增删预设时; 阻断信号防回环)。
+        """同步「强制完整输入」指示框: 由**顶点预设依赖**自动推导(只读)。
 
-        勾选 = 手动指令(`_force_full`) 或 **顶点预设依赖缺失输入**(自动)。
-        自动触发时**锁死**(禁用, 不可取消), 直到不再有预设依赖那些缺失输入。
+        当顶点预设用到 NORMAL/TANGENT/TEXCOORD0 时, 生成端自动把 reduced 族
+        (pos_uv1/skin_min/nrm_uv1/skin_min_nrm) 换到 full/skin_full + d30 重指。
         """
         chk = getattr(self, "chk_force_full", None)
         if chk is None:
             return
-        _forced = sinp.presets_need_upgrade(
-            sinp.presets_for_pass(self.ed_src.toPlainText(), "vertex"))
+        _forced = sinp.presets_need_upgrade(mimp.presets(self.asset.inputs, "vertex"))
         chk.blockSignals(True)
-        chk.setChecked(bool(getattr(self, "_force_full", False)) or _forced)
-        chk.setEnabled(not _forced)
+        chk.setChecked(bool(_forced))
+        chk.setEnabled(False)
         chk.blockSignals(False)
 
     def _inputs_tree(self, with_force=False):
@@ -2759,13 +2747,13 @@ class MaterialSystemPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         if with_force:
             self.chk_force_full = QCheckBox(
-                "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
+                "强制完整输入 (自动: 顶点预设依赖缺失几何输入时)")
             self.chk_force_full.setToolTip(
-                "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
+                "只读指示: 顶点预设用到 NORMAL/TANGENT/TEXCOORD0 时自动开启。\n"
                 "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
                 "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n"
-                "注: 顶点预设用到几何值时也会**自动**开启(锁死, 不可取消)。")
-            self.chk_force_full.toggled.connect(self._on_force_full)
+                "去掉相关顶点预设即自动取消。")
+            self.chk_force_full.setEnabled(False)
             v.addWidget(self.chk_force_full)
         tree = QTreeWidget()
         tree.setHeaderLabels(["类别 / 名", "类型", "说明"])
@@ -2774,7 +2762,7 @@ class MaterialSystemPanel(QWidget):
         for text, cb in (("＋预设输入", self._add_presets), ("＋参数", self._add_param),
                          ("＋贴图", self._add_tex), ("＋引擎资源", self._add_engine),
                          ("删除选中", self._del_custom),
-                         ("从源码重载声明", self._reload_decls_from_src)):
+                         ("重载输入(补依赖)", self._reload_inputs)):
             b = QPushButton(text)
             b.clicked.connect(cb)
             bar.addWidget(b)
@@ -2796,30 +2784,19 @@ class MaterialSystemPanel(QWidget):
             return self.tree_inputs_vs
         return self.tree_inputs
 
-    def _load_decls_from_src(self):
-        src = self.ed_src.toPlainText()
-        self._force_full = bool(re.search(
-            r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", src))
-        self._presets = sinp.parse_preset_decls(src)
-        self._params, self._textures = mgen.parse_decls(src)
-        self._engine = minp.parse_engine_decls(src)
-        tags = minp._decl_name_tags(src)
-        self._tags = {}
-        for n in self._presets:
-            self._tags[("preset", n)] = tags.get(n)
-        for n, _t in self._params:
-            self._tags[("param", n)] = tags.get(n)
-        for n in self._textures:
-            self._tags[("tex", n)] = tags.get(n)
-        for n in self._engine:
-            self._tags[("engine", n)] = tags.get(n)
+    def _sync_inputs(self):
+        """规范化输入(补齐预设依赖)并写回资产(仅内存)。"""
+        self.asset.inputs = mimp.normalize(self.asset.inputs)
+
+    def _after_inputs_changed(self):
+        """增删输入后的统一收尾: 补依赖 -> 刷新输入树/指示框 -> 刷新顶点预览。"""
+        self._sync_inputs()
+        self.refresh_inputs()
+        self._refresh_vs_preview()
 
     def _locked_names(self, pass_name="main"):
-        """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。
-
-        只算该 pass 自己的预设(`@pass` 标签; 无标签归 main)。
-        """
-        _pre = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
+        """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。"""
+        _pre = mimp.presets(self.asset.inputs, pass_name)
         res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)))
         lock = {k: list(v) for k, v in res["lock"].items()}
         _pt = {"depth": "深度 pass", "vertex": "顶点"}.get(pass_name, "主 pass")
@@ -2828,109 +2805,38 @@ class MaterialSystemPanel(QWidget):
             lock.setdefault(nm, [])
             if _pt not in lock[nm]:
                 lock[nm].append(_pt)
-        if any(self._pass_belongs("param", n, pass_name) for n, _t in self._params):
+        if mimp.params(self.asset.inputs):
             lock.setdefault("UserMaterial", [])
             if "材质参数" not in lock["UserMaterial"]:
                 lock["UserMaterial"].append("材质参数")
         return lock
 
-    def normalize_inputs(self):
-        """补齐(幂等): 预设依赖的资源 / 参数所需的 UserMaterial 必须在 _engine 里(锁定)。
-
-        仅改**内存列表**, 不写源码 —— 由 `_rewrite_decls()` 落盘。删除锁定资源会被此步补回。
-        """
-        res = sinp.resolve(self._presets, sinp.names_in(self._base_iface()))
-        for nm in res["engine"]:
-            if nm not in self._engine:
-                self._engine.append(nm)
-        # 注: UserMaterial **不写进源码** —— 由系统按 pass"有材质参数"自动供给 + 锁定
-        #     (成员表 = 各 pass 参数的**并集**; 多 pass 重复出现的算一个)。
-        return res
-
-    def _rewrite_decls(self):
-        """把自定义输入写成源码顶部的 `//!` 声明区(先删旧声明行)。"""
-        self.normalize_inputs()          # 落盘前补齐锁定依赖
-        src = self.ed_src.toPlainText()
-        body = "\n".join(l for l in src.splitlines()
-                         if not l.lstrip().startswith("//!")).lstrip("\n")
-        def _tg(kind, name):
-            t = self._tags.get((kind, name))
-            return (" @%s" % t) if t else ""
-        lines = (["//! vertex force_full_inputs"] if getattr(self, "_force_full", False)
-                 else [])
-        lines += ["//! preset %s%s" % (n, _tg("preset", n)) for n in self._presets]
-        lines += ["//! param %s %s%s" % (t, n, _tg("param", n)) for n, t in self._params]
-        lines += ["//! tex %s%s" % (n, _tg("tex", n)) for n in self._textures]
-        lines += ["//! engine %s%s" % (n, _tg("engine", n)) for n in self._engine]
-        head = ("\n".join(lines) + "\n\n") if lines else ""
-        self.ed_src.setPlainText(head + body)
-        self.refresh_info()   # 内含 refresh_inputs
-
-    def _reload_decls_from_src(self):
-        self._load_decls_from_src()
-        self.normalize_inputs()
-        self.refresh_inputs()
-
-    def _ensure_inputs(self):
-        """从源码重载 + 补齐锁定依赖并写回。载入/编译/生成等关键处调用(防手改源码绕过锁)。"""
-        self._load_decls_from_src()
-        self._rewrite_decls()
+    def _reload_inputs(self):
+        self._after_inputs_changed()
 
     def _add_presets(self):
         """从预设(语义)输入目录挑选(**只增删当前 pass 的项**); 依赖的引擎资源自动加入并锁定。"""
-        self._load_decls_from_src()
         _pass = self._cur_pass()
-        _own = [n for n in self._presets if self._pass_belongs("preset", n, _pass)]
+        _own = mimp.presets(self.asset.inputs, _pass)
         d = PresetDialog(self, selected=set(_own))
         if d.exec() != QDialog.Accepted:
             return
-        self._apply_presets(_pass, d.selected_names())
-
-    def _apply_presets(self, pass_name, selected):
-        """把某 pass 的预设选择结果落到全局 `_presets`: **其它 pass 的项保持不变**。
-
-        回归保护: 之前对话框初选=全部预设、且直接覆盖 `_presets` ⇒ 在深度页添加的项会
-        “显示成”主 pass 已添加(实际未加)。本方法保证三页(主/深度/顶点)各自独立增删。
-        """
-        self._load_decls_from_src()
-        _own = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
-        _old = set(_own)
-        _sel = [n for n in selected]
-        _sel_set = set(_sel)
-        for n in (_old - _sel_set):               # 本页取消的项: 删标签(等价删除)
-            self._tags.pop(("preset", n), None)
-        for n in _sel:                            # 本页选中的项: 打本页标签
-            self._tags[("preset", n)] = pass_name
-        _res, _seen = [], set()                   # 重排(保序): 其它 pass 的项 + 本页结果
-        for n in self._presets:
-            if n in _old:
-                if n in _sel_set:
-                    _res.append(n)
-                    _seen.add(n)
-            else:
-                _res.append(n)
-                _seen.add(n)
-        for n in _sel:
-            if n not in _seen:
-                _res.append(n)
-                _seen.add(n)
-        self._presets = _res
-        self._rewrite_decls()
-        return list(self._presets)
+        self.asset.inputs["preset"][_pass] = list(d.selected_names())
+        self._after_inputs_changed()
 
     def _add_engine(self):
-        """从允许清单挑选引擎资源(cbuffer/texture/sampler); 声明即保活。"""
-        self._load_decls_from_src()
-        lock = self._locked_names(self._cur_pass())
-        d = EngineResDialog(self, selected=set(self._engine), locked=set(lock))
+        """从允许清单挑选引擎资源(cbuffer/texture/sampler); **只增删当前 pass**(其它 pass 不变)。"""
+        _pass = self._cur_pass()
+        lock = self._locked_names(_pass)
+        _own = mimp.engine(self.asset.inputs, _pass)
+        _old = set(_own)
+        d = EngineResDialog(self, selected=_old | set(lock), locked=set(lock))
         if d.exec() != QDialog.Accepted:
             return
-        _old = set(self._engine)
-        self._engine = d.selected_names()
-        for n in self._engine:
-            if n not in _old:
-                self._tags[("engine", n)] = self._cur_pass()
-        self._rewrite_decls()          # normalize 会补回锁定项
+        # 持久化: 保留原本已有的 + 新勾选的非锁定项(结构性/预设依赖由系统自动供给, 不落盘)
+        self.asset.inputs["engine"][_pass] = [
+            n for n in d.selected_names() if (n in _old) or (n not in lock)]
+        self._after_inputs_changed()
 
     def _on_src_changed(self):
         # 源码变动 -> 旧诊断(行号)失效; 防抖后再清(不在 textChanged 内同步 rehighlight,
@@ -2943,37 +2849,17 @@ class MaterialSystemPanel(QWidget):
             self._src_hl.set_diagnostics([])
 
     def refresh_inputs(self):
-        """刷新两个 pass 的输入树(每 pass 独立: 该 pass 的固有输入 + 归属该 pass 的自定义输入)。"""
-        self._load_decls_from_src()
-        self.normalize_inputs()
+        """刷新三个 pass 的输入树(每 pass 独立)。"""
         self._sync_force_full()
         self._fill_input_tree(self.tree_inputs, "main")
         self._fill_input_tree(self.tree_inputs_depth, "depth")
         self._fill_input_tree(self.tree_inputs_vs, "vertex")
 
-    def _pass_belongs(self, kind, name, pass_name):
-        """声明是否归属该 pass: 显式 `@pass` 优先; 否则按引用; 两边都不引用 ⇒ 归主 pass。"""
-        t = self._tags.get((kind, name))
-        if t:
-            return t == pass_name
-        src = self.ed_src.toPlainText()
-
-        def _ref(text):
-            return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(name),
-                             text) is not None
-        if pass_name == "main":
-            this = minp._code_only(nogen._strip_hlsl_fn(src, "MaterialDepth"))
-            other = minp._code_only(nogen._strip_hlsl_fn(src, "MaterialMain"))
-            return _ref(this) or not _ref(other)
-        return _ref(minp._code_only(nogen._strip_hlsl_fn(src, "MaterialMain")))
-
     def _fill_input_tree(self, tree, pass_name):
         tree.clear()
         # 1) 插值输入(pass 依赖; 非资源; 只读展示)
-        _psrc = nogen._strip_hlsl_fn(
-            self.ed_src.toPlainText(),
-            "MaterialDepth" if pass_name == "main" else "MaterialMain")
-        _interps = minp.interp_inputs(pass_name, _psrc)
+        _presets = mimp.presets(self.asset.inputs, pass_name)
+        _interps = minp.interp_inputs(pass_name, _presets)
         if _interps:
             itop = QTreeWidgetItem(["插值输入 (pass 依赖, 只读)", "",
                                     "由 pass 声明依赖; 系统自动添加, 不锁定(无依赖自动去除)"])
@@ -2982,19 +2868,17 @@ class MaterialSystemPanel(QWidget):
                 ti = QTreeWidgetItem([_n, "", _d])
                 ti.setData(0, Qt.UserRole, ("copy", _n))
                 itop.addChild(ti)
-        # 2) 自定义输入(归属该 pass 的: 预设/参数/贴图/引擎资源; 会写进 mmtr)
-        presets = [n for n in self._presets if self._pass_belongs("preset", n, pass_name)]
-        params = [(n, t) for n, t in self._params
-                  if self._pass_belongs("param", n, pass_name)]
-        textures = [n for n in self._textures if self._pass_belongs("tex", n, pass_name)]
-        engine = [n for n in self._engine if self._pass_belongs("engine", n, pass_name)]
-        # pass 依赖的引擎资源: 系统自动添加 + 锁定(不出现在材质源)
+        # 2) 自定义输入(该 pass: 预设/参数/贴图/引擎资源; 会写进 mmtr)
+        presets = list(_presets)
+        params = mimp.params(self.asset.inputs)
+        textures = mimp.textures(self.asset.inputs, pass_name)
+        engine = mimp.engine(self.asset.inputs, pass_name)
+        # pass 结构依赖的引擎资源: 系统自动添加 + 锁定(只读展示; 不出现在资产)
         for nm in minp.pass_dep_names(pass_name):
             if nm != "UserMaterial" and nm not in engine:
                 engine.append(nm)
         # 有材质参数的 pass: UserMaterial 由系统自动供给 + 锁定
-        if (any(self._pass_belongs("param", n, pass_name) for n, _t in self._params)
-                and "UserMaterial" not in engine):
+        if params and "UserMaterial" not in engine:
             engine.append("UserMaterial")
         lock = self._locked_names(pass_name)
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图)", "", "写进 mmtr 参数表/绑定"])
@@ -3133,32 +3017,29 @@ class MaterialSystemPanel(QWidget):
         typ = pick_type(self, "参数类型", "float4")
         if typ is None:
             return
-        self._load_decls_from_src()
         # 命名校验: RDEF 名唯一 + 裸名唯一(防 `A`/`VAR_A` 撞同一 mdf2/参数表名)。
-        confl = mgen.param_name_conflicts(self._params + [(name, typ)])
+        confl = mgen.param_name_conflicts(mimp.params(self.asset.inputs) + [(name, typ)])
         if confl:
             QMessageBox.warning(self, "命名冲突", "\n".join(confl))
             return
-        self._params.append((name, typ))
-        self._tags[("param", name)] = self._cur_pass()
-        self._rewrite_decls()
+        self.asset.inputs["param"].append({"name": name, "type": typ})
+        self._after_inputs_changed()
 
     def _add_tex(self):
         name, ok = QInputDialog.getText(self, "新增贴图", "贴图槽名(如 BaseMetalMap):")
         if not ok or not name.strip():
             return
         name = name.strip()
-        self._load_decls_from_src()
-        if name in self._textures:
+        _pass = self._cur_pass()
+        if name in self.asset.inputs["tex"][_pass]:
             QMessageBox.warning(self, "重复", "贴图已存在: %s" % name)
             return
-        self._textures.append(name)
-        self._tags[("tex", name)] = self._cur_pass()
-        self._rewrite_decls()
+        self.asset.inputs["tex"][_pass].append(name)
+        self._after_inputs_changed()
 
     def _rename_custom(self, kind):
         cat, name = kind
-        self._load_decls_from_src()
+        _pass = self._cur_pass()
         if cat == "param":
             # 改名: 编辑**裸名** + 是否带 `VAR_` 前缀; RDEF 名自动 = 前缀 + 裸名。
             got = self._param_dialog("改名参数", mgen.param_base_name(name),
@@ -3169,23 +3050,25 @@ class MaterialSystemPanel(QWidget):
             new = mgen.param_rdef_name(base, pre)
             if new == name:
                 return
-            confl = mgen.param_name_conflicts(
-                [(new if n == name else n, t) for n, t in self._params])
+            _all = [(new if n == name else n, t) for (n, t) in mimp.params(self.asset.inputs)]
+            confl = mgen.param_name_conflicts(_all)
             if confl:
                 QMessageBox.warning(self, "命名冲突", "\n".join(confl))
                 return
-            self._params = [(new if n == name else n, t) for n, t in self._params]
+            self.asset.inputs["param"] = [
+                {"name": (new if e["name"] == name else e["name"]), "type": e["type"]}
+                for e in self.asset.inputs["param"]]
         else:
             new, ok = QInputDialog.getText(self, "改名", "新名字:", text=name)
             if not ok or not new.strip() or new.strip() == name:
                 return
             new = new.strip()
-            if new in self._textures:
+            if new in self.asset.inputs["tex"][_pass]:
                 QMessageBox.warning(self, "重复", "贴图已存在: %s" % new)
                 return
-            self._textures = [new if n == name else n for n in self._textures]
-        self._tags[(cat, new)] = self._tags.pop((cat, name), None)
-        self._rewrite_decls()
+            self.asset.inputs["tex"][_pass] = [
+                new if n == name else n for n in self.asset.inputs["tex"][_pass]]
+        self._after_inputs_changed()
 
     def _del_custom(self):
         it = self._active_input_tree().currentItem()
@@ -3193,8 +3076,8 @@ class MaterialSystemPanel(QWidget):
         if not kind:
             return
         cat, name = kind
-        self._load_decls_from_src()
-        lock = self._locked_names(self._cur_pass())
+        _pass = self._cur_pass()
+        lock = self._locked_names(_pass)
         if cat == "engine" and name in lock:
             QMessageBox.information(
                 self, "已锁定",
@@ -3202,15 +3085,18 @@ class MaterialSystemPanel(QWidget):
                 % (name, " / ".join(lock[name])))
             return
         if cat == "preset":
-            self._presets = [n for n in self._presets if n != name]
+            self.asset.inputs["preset"][_pass] = [
+                n for n in mimp.presets(self.asset.inputs, _pass) if n != name]
         elif cat == "param":
-            self._params = [(n, t) for n, t in self._params if n != name]
+            self.asset.inputs["param"] = [
+                e for e in self.asset.inputs["param"] if e["name"] != name]
         elif cat == "engine":
-            self._engine = [n for n in self._engine if n != name]
+            self.asset.inputs["engine"][_pass] = [
+                n for n in mimp.engine(self.asset.inputs, _pass) if n != name]
         else:
-            self._textures = [n for n in self._textures if n != name]
-        self._tags.pop((cat, name), None)
-        self._rewrite_decls()
+            self.asset.inputs["tex"][_pass] = [
+                n for n in mimp.textures(self.asset.inputs, _pass) if n != name]
+        self._after_inputs_changed()
 
     # ---- 编译诊断 ----
     def _err_diags(self, err_text, tmpl, lmap=None):
@@ -3244,6 +3130,7 @@ class MaterialSystemPanel(QWidget):
             return
         self.ed_src.setPlainText(src)
         self.asset.shading_source = src
+        self.asset.inputs = mimp.empty()
         self.refresh_info()
 
     def _new_asset(self):
@@ -3268,12 +3155,13 @@ class MaterialSystemPanel(QWidget):
             QMessageBox.critical(self, "打开失败", str(e))
             return
         self._last_mmtr_bytes = None
+        self._sync_inputs()
         self._apply_asset()
-        self._ensure_inputs()
         self.lbl_status.setText("已打开 %s" % os.path.basename(path))
 
     def save_asset(self):
         self._sync_asset()
+        self._sync_inputs()
         path, _ = QFileDialog.getSaveFileName(self, "保存材质资产",
                                               self.asset.name + ".mmat.json",
                                               "材质资产 (*.mmat.json);;All (*)")
@@ -3287,8 +3175,8 @@ class MaterialSystemPanel(QWidget):
         self.lbl_status.setText("已保存 %s" % os.path.basename(path))
 
     def compile_check(self):
-        self._ensure_inputs()
         self._sync_asset()
+        self._sync_inputs()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
         src = self.asset.shading_source or ""
         # ---- 必需函数校验(每个 pass 都必须提供; 缺则报错, 不静默回退默认) ----
@@ -3326,11 +3214,13 @@ class MaterialSystemPanel(QWidget):
         try:
             self.ed_full_depth.setPlainText(
                 mpass.build_source(d_src, "deferred_depth", iface=iface_d,
-                                   keepalive="", minput=minput_d))
+                                   keepalive="", minput=minput_d,
+                                   presets=mimp.presets(self.asset.inputs, "depth")))
         except Exception as e:  # noqa: BLE001
             self.ed_full_depth.setPlainText(";; 组装失败: %s" % e)
         d_dxbc, d_err = mpass.compile_shading(d_src, "deferred_depth", iface=iface_d,
-                                              keepalive="", minput=minput_d)
+                                              keepalive="", minput=minput_d,
+                                              presets=mimp.presets(self.asset.inputs, "depth"))
         # ---- 报错(优先主 pass) ----
         if m_err:
             diags = self._err_diags(m_err, tmpl, m_map)
@@ -3380,8 +3270,8 @@ class MaterialSystemPanel(QWidget):
 
     def _generate(self):
         """生成 mmtr: 无 donor(版本预设 + 我们的材质 PS; 不接任何 master)。"""
-        self._ensure_inputs()
         self._sync_asset()
+        self._sync_inputs()
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
         if not self.asset.is_ok():
             errs = "\n".join(m for lv, m in self.asset.validate() if lv == "error")
@@ -3389,7 +3279,8 @@ class MaterialSystemPanel(QWidget):
                 return None, None
         try:
             data, rp = nogen.build(self.asset.shading_source or "",
-                                   _pass_of_template(tmpl), tmpl)
+                                   _pass_of_template(tmpl), tmpl,
+                                   inputs=self.asset.inputs)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))
             return None, None

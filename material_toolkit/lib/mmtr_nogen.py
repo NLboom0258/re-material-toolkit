@@ -19,6 +19,7 @@ try:
     from . import mmtr_presets as P
     from . import material_pass as MP
     from . import material_gen as MG
+    from . import material_inputs_model as MIM
     from . import rdef as R
     from . import mmtr_tail as T
     from . import vs_gen as VG
@@ -33,6 +34,7 @@ except ImportError:  # 允许脚本直接 import
     import mmtr_presets as P
     import material_pass as MP
     import material_gen as MG
+    import material_inputs_model as MIM
     import rdef as R
     import mmtr_tail as T
     import vs_gen as VG
@@ -66,14 +68,14 @@ def _variant_name(r):
     return (r.get("prefix") or "") + r["tech"]
 
 
-def _iface_from_decls(material_src):
-    """按材质源码里的 `//! param/tex/engine` 声明生成接口(**规范发射**)。
-
-    委托 `material_inputs.build_iface_and_keepalive`(基础 = **默认基座**(固有输入));
-    无声明时返回 None。保活由 build 单独取(此处忽略)。
-    """
+def _iface_from_decls(material_src, inputs=None):
+    """(兼容)按结构化 inputs 生成主 pass 接口。"""
     from . import material_inputs as INP
-    iface, _ka, _rep = INP.build_iface_and_keepalive(material_src, INP.default_iface())
+    iface, _ka, _rep = INP.build_iface_and_keepalive(
+        INP.default_iface(), engine_names=MIM.engine(inputs, "main"),
+        params=MIM.params(inputs, "main"), textures=MIM.textures(inputs, "main"),
+        presets=MIM.presets(inputs, "main"), all_params=MIM.all_params(inputs),
+        pass_name="main")
     return iface
 
 
@@ -108,21 +110,21 @@ def has_depth_hook(material_src):
     return bool(_DEPTH_HOOK_RE.search(material_src or ""))
 
 
-def depth_hook_ps(material_src, iface, minput=None):
+def depth_hook_ps(material_src, iface, minput=None, presets=None):
     """编译深度族 PS(deferred_depth 模板 + MaterialDepth 函数)。
 
     效果的资源绑定由钩子自身的引用决定; 插值声明由 `material_pass.build_source`
-    按 passes.json 注入(uv0 条件化)。寄存器由编译器自动紧凑(见 `material_pass` 文件头)。
-    minput: `{def, build}`(DepthInput 由本 pass 预设生成); None 时**自动**按 `@depth` 预设生成。
+    按 passes.json + 本 pass 预设注入(uv0 条件化 / Phase 3 材质族)。
+    minput: `{def, build}`(DepthInput 由本 pass 预设生成); None 时按 `presets` 自动生成。
     """
     if minput is None:
         from . import semantic_inputs as SI
-        _p = SI.presets_for_pass(material_src, "depth")
-        _p = [n for n in _p if n not in SI.unsupported_in_stage(_p, "depth")]
+        _p = [n for n in (presets or [])
+              if n not in SI.unsupported_in_stage(presets or [], "depth")]
         _d = SI.resolve(_p, set(), stage="depth", struct_name="DepthInput", recv="di")
         minput = {"def": _d["def"], "build": _d["build"]}
     ps, err = MP.compile_shading(material_src, "deferred_depth", iface=iface,
-                                 keepalive="", minput=minput)
+                                 keepalive="", minput=minput, presets=presets)
     if err:
         raise ValueError("深度钩子 PS 编译失败:\n%s" % err)
     return ps
@@ -282,7 +284,7 @@ def d30_map():
     return _d30_map_cache
 
 
-def build_standard_vs(material_src, bank_key):
+def build_standard_vs(material_src, bank_key, inputs=None):
     """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
     data, idx = _load_bank()
     e = idx.get(bank_key)
@@ -293,23 +295,38 @@ def build_standard_vs(material_src, bank_key):
     if not spec or not spec.get("family"):
         return "", None, "无法从银行 blob 反推 spec"
     from . import semantic_inputs as SI
-    vs_in = SI.resolve(SI.presets_for_pass(material_src, "vertex"), set(), stage="vs",
-                       struct_name="VertexInput", recv="v")
-    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None, vs_in=vs_in)
+    _union = set(VG.union_resources()[0]) | set(VG.union_resources()[1])
+    vs_in = SI.resolve(MIM.presets(inputs, "vertex"), _union, stage="vs",
+                       struct_name="VertexInput", recv="vi")
+    vs_iface, _, _ = _vs_iface(inputs, vs_in)
+    src = VG.build_from_spec(spec, hook=vs_hook_source(material_src) or None,
+                             vs_in=vs_in, vs_iface=vs_iface)
     dxbc, err = VG.compile_vs(src)
     return src, dxbc, err
 
 
+def _vs_iface(inputs, vs_in):
+    """顶点 pass 的**用户新增**资源接口(engine/param/tex)。与内置并集在 vs_gen 按名去重。"""
+    from . import material_inputs as INP
+    return INP.build_iface_and_keepalive(
+        {"cbuffers": [], "textures": [], "samplers": []},
+        engine_names=list(MIM.engine(inputs, "vertex")) + list(vs_in.get("engine") or []),
+        params=MIM.params(inputs), textures=MIM.textures(inputs, "vertex"),
+        presets=[], stage="vs", struct_name="VertexInput", recv="vi",
+        all_params=MIM.all_params(inputs), pass_name="vertex")
+
+
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None,
-          force_full_inputs=False):
+          force_full_inputs=False, inputs=None):
     """-> (mmtr bytes, report)。
 
-    iface: 接口(来自 material_iface); None 时按材质源码的 `//! param/tex` 声明自动生成
-           (无声明则保持零声明)。
+    inputs: 结构化输入注册(`material_inputs_model`; = `.mmat.json` 的 `inputs`)。None = 空。
+    iface: 主 pass 接口覆写(来自 material_iface); None 时按 inputs 自动生成。
     force_full_inputs: 为 True 时**强制**把 reduced 族(depth/shadow/pick)补输入到完整族
-           (`full`/`skin_full`); 默认 False(仅当顶点钩子引用了缺属性字段时自动补)。
+           (`full`/`skin_full`); 默认 False(仅当顶点预设依赖缺属性时自动补)。
     寄存器由 d3dcompiler **自动紧凑**分配(不写 `register`; 见 `material_pass` 文件头)。
     """
+    inputs = MIM.from_dict(inputs)
     if not P.has_preset():
         raise RuntimeError("缺少预设: 先跑 scripts/gen_presets.py <ref.mmtr>")
     skeleton = P.skeleton()
@@ -351,7 +368,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                             spec_used["family"] = VG.FULLMAP[orig_fam]
                         gen, _err = VG.compile_vs(
                             VG.build_from_spec(spec_used, hook=vs_hook_src or None,
-                                               vs_in=vs_in, depth_full=full))
+                                               vs_in=vs_in, depth_full=full,
+                                               vs_iface=vs_iface))
                 except Exception:
                     gen = None
                 c = (("gen", gen, spec_used, orig_fam) if gen
@@ -371,7 +389,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 只允许这三个函数(多余函数 -> 报错): 保证三 pass 组装完全独立、不串。
     enforce_functions(material_src)
     # 材质参数命名校验: RDEF 名(声明名)唯一 + 裸名(mdf2/参数表)唯一。
-    _confl = MG.param_name_conflicts(MG.parse_decls(material_src)[0])
+    _confl = MG.param_name_conflicts(MIM.params(inputs))
     if _confl:
         raise ValueError("材质参数命名冲突:\n  " + "\n  ".join(_confl))
     # 每 pass 一份源(剥掉别的 pass 的函数: 未调用函数里的资源引用既不被 DCE、也会影响保活)。
@@ -385,24 +403,26 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 顶点预设(stage="vs"): 归属 `@vertex` 的启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
     #   同时给出 vs_attrs(需用到的顶点属性) 供"补输入"依赖判定。
     from . import semantic_inputs as SI
-    vs_in = SI.resolve(SI.presets_for_pass(material_src, "vertex"), set(), stage="vs",
-                       struct_name="VertexInput", recv="v")
+    _vp = MIM.presets(inputs, "vertex")
+    _union = set(VG.union_resources()[0]) | set(VG.union_resources()[1])
+    vs_in = SI.resolve(_vp, _union, stage="vs", struct_name="VertexInput", recv="vi")
     if vs_in.get("unsupported"):
         raise ValueError("顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"])
+    vs_iface, _, _vrep = _vs_iface(inputs, vs_in)
     # "补输入": reduced 族(深度/阴影/拾取)换到完整族。
-    # 触发 = 手动开关 / 顶点预设依赖缺属性(NORMAL/TANGENT/UV0) / 深度族需插值 / 源码指令。
-    _auto_upg = SI.presets_need_upgrade(SI.presets_for_pass(material_src, "vertex"))
+    # 触发 = 手动开关 / 顶点预设依赖缺属性(NORMAL/TANGENT/UV0) / 深度族需插值。
+    _auto_upg = SI.presets_need_upgrade(_vp)
     # Phase 3: 深度族预设若依赖插值值(几何值), 深度 VS 改为输出材质族插值(需 NORMAL/TANGENT ⇒ 补输入)。
-    _depth_full = SI.presets_need_interp(SI.presets_for_pass(material_src, "depth"))
-    _upg = bool(force_full_inputs) or _auto_upg or _depth_full or bool(
-        re.search(r"(?m)^\s*//!\s*vertex\s+force_full_inputs\b", material_src or ""))
-    # 主 pass: 基座 = 固有输入(默认模式); 声明/保活**按 main 过滤**(不再夹带别的 pass 的资源)。
+    _dp = MIM.presets(inputs, "depth")
+    _depth_full = SI.presets_need_interp(_dp)
+    _upg = bool(force_full_inputs) or _auto_upg or _depth_full
+    # 主 pass: 基座 = 该 pass 的引擎资源依赖(默认模式); 声明/参数**按 main 的 inputs**。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
     iface, ka, _rep = INP.build_iface_and_keepalive(
-        mp_src, base, pass_name="main", other_code=INP._code_only(d_src),
-        all_params=INP.all_params(material_src))
-    if iface is None:
-        iface = base
+        base, engine_names=MIM.engine(inputs, "main"), params=MIM.params(inputs),
+        textures=MIM.textures(inputs, "main"), presets=MIM.presets(inputs, "main"),
+        stage="ps", struct_name="MaterialInput", recv="mi",
+        all_params=MIM.all_params(inputs), pass_name="main")
     minput = _rep.get("minput")
     ps_blob, err = MP.compile_shading(mp_src, template, iface=iface,
                                       keepalive=ka, minput=minput)
@@ -430,10 +450,13 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 基座 = **空**(depth 未声明引擎资源依赖); 声明/接口按 depth 过滤; 保活为空
     #     (深度无颜色输出, 用不了主 pass 的 o0 保活语句)。
     iface_d, _ka_d, _rep_d = INP.build_iface_and_keepalive(
-        d_src, INP.base_iface_for_pass("depth"), pass_name="depth",
-        all_params=INP.all_params(material_src))
-    # 深度 stage 预设: DepthInput 由本 pass 预设生成(几何值在深度 stage 不支持 -> 已剔除并记录)
-    ps_depth = depth_hook_ps(d_src, iface_d, _rep_d.get("minput"))
+        INP.base_iface_for_pass("depth"),
+        engine_names=MIM.engine(inputs, "depth"), params=MIM.params(inputs),
+        textures=MIM.textures(inputs, "depth"), presets=_dp,
+        stage="depth", struct_name="DepthInput", recv="di",
+        all_params=MIM.all_params(inputs), pass_name="depth")
+    # 深度 stage 预设: DepthInput 由本 pass 预设生成
+    ps_depth = depth_hook_ps(d_src, iface_d, _rep_d.get("minput"), _dp)
 
     # 2) 逐槽解析程序
     slots = []

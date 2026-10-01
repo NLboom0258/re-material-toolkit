@@ -94,6 +94,33 @@ def _iface_for(cbuffer_names):
     return iface
 
 
+def union_resources():
+    """标准 VS 的引擎资源**并集**(`passes.json` vertex.depends; 规范声明序)。
+
+    返回 (cbuffer 名列表, 结构化 SRV 名列表)。未用项由编译器剔除 ⇒ RDEF 等价按变体
+    (离线实证: 并集声明 == 按变体声明, 逐字节一致; 见 scripts/_probe_strip_unused.py)。
+    """
+    from . import material_inputs as INP
+    names = INP.pass_dep_names("vertex")
+    cbs = [n for n in names if (INP.find(n) or {}).get("kind") == "cbuffer"]
+    srvs = [n for n in names if n in SRV_STRUCTS]
+    return cbs, srvs
+
+
+def _merge_iface(a, b):
+    """把接口 b 的 cbuffer/texture/sampler **按名**并入 a(b 中与 a 同名的跳过)。"""
+    import copy
+    out = copy.deepcopy(a)
+    seen = {k: {e["name"] for e in out[k]}
+            for k in ("cbuffers", "textures", "samplers")}
+    for k in ("cbuffers", "textures", "samplers"):
+        for e in (b or {}).get(k, []):
+            if e["name"] not in seen[k]:
+                seen[k].add(e["name"])
+                out[k].append(dict(e))
+    return out
+
+
 def _srv_decl(name):
     """引擎结构化缓冲声明(PS 的 _texture_decl 会跳过 struct, 故这里显式声明)。"""
     sn, mem, _st = SRV_STRUCTS[name]
@@ -346,9 +373,9 @@ def _emit_world(world, need_n, need_t, need_prev):
     raise ValueError("unknown world %r" % world)
 
 
-def _assemble(infields, outs, cbs, srvs, body_lines, extra_global=""):
+def _assemble(infields, outs, iface, srvs, body_lines, extra_global=""):
     from . import material_iface as MI
-    L = [MI.hlsl_of(_iface_for(cbs))]
+    L = [MI.hlsl_of(iface)]
     for n in srvs:
         L.append(_srv_decl(n))
     if extra_global:
@@ -371,15 +398,19 @@ def _assemble(infields, outs, cbs, srvs, body_lines, extra_global=""):
     return "\n".join(L) + "\n"
 
 
-def build_from_spec(spec, hook=None, vs_in=None, depth_full=False):
+def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None):
     """按 spec(来自 spec_from_blob)生成 VS 源。
 
     hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入。
     vs_in: 顶点 stage 的预设解析结果(`SI.resolve(stage="vs", struct_name="VertexInput",
-           recv="v")`): `def` = `struct VertexInput` 定义, `impl` = 构造行(`v.xxx = ...`),
+           recv="vi")`): `def` = `struct VertexInput` 定义, `impl` = 构造行(`vi.xxx = ...`),
            `values` = 用到的阶段值。None = 空预设(生成空 VertexInput)。
+    vs_iface: 顶点 pass 的**用户新增**资源接口(engine/param/tex; 来自
+           `material_inputs.build_iface_and_keepalive(stage="vs")`)。与内置并集**按名去重**。
     depth_full: 深度族槽专用 —— 为 True 时深度 VS 也输出**材质族插值**(pack=mat),
            使深度 PS 能解包几何值(Phase 3)。
+    资源声明 = **版本级并集**(passes.json vertex.depends; 规范序) ∪ vs_iface; 未用项由编译器
+    剔除 ⇒ RDEF 等价按变体。变换公式仍由 **spec**(family/world/shadow)驱动。
     在**世界变换(+shadow)之后、打包之前**构造 VertexInput -> 取世界偏移(`_dv`) -> `wp += _dv`;
     并把同一偏移加到“上一帧世界位置”以保持运动矢量一致。
     """
@@ -411,10 +442,10 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False):
     if "prevClip" in _vals:
         L.append("float4 _vs_pclip = mul(%s, prevViewProjMat);" % prevw)
     if _has_vi:
-        L.append("VertexInput v;")
+        L.append("VertexInput vi;")
         L.extend(vs_in.get("impl") or [])
     if hook:
-        L.append("float3 _dv = MaterialVertex(v);")
+        L.append("float3 _dv = MaterialVertex(vi);")
         L.append("wp += _dv;")
     if _use_mat:
         if hook:
@@ -445,21 +476,16 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False):
     infields = list(_BASE_IN[spec["family"]])
     if spec["svid"]:
         infields.append(("uint", "svid", "SV_InstanceID"))
-    # 接口 = 银行 cbuffer/srv + 预设新增的引擎资源(cbuffer; 结构化 SRV 按 SRV_STRUCTS)
-    from . import material_inputs as INP
-    cbs, srvs = list(spec["cbuffers"]), list(spec["srvs"])
-    for nm in (vs_in.get("engine") or []):
-        e = INP.find(nm)
-        if not e:
-            continue
-        if e["kind"] == "cbuffer" and nm not in cbs:
-            cbs.append(nm)
-        elif e["kind"] == "texture" and nm in SRV_STRUCTS and nm not in srvs:
-            srvs.append(nm)
+    # 资源声明 = **版本级并集**(passes.json vertex.depends; 规范声明序) ∪ 用户/preset 项。
+    #   未用项由 d3dcompiler 剔除 ⇒ RDEF 等价按变体(离线实证: 逐字节一致)。
+    union_cbs, union_srvs = union_resources()
+    iface = _iface_for(union_cbs)
+    if vs_iface:
+        iface = _merge_iface(iface, vs_iface)
     extra = ""
     if _has_vi:
         extra = vs_in.get("def", "") + "\n" + (hook or "")
-    return _assemble(infields, outs, cbs, srvs, L, extra_global=extra)
+    return _assemble(infields, outs, iface, union_srvs, L, extra_global=extra)
 
 
 def compile_vs(src):
