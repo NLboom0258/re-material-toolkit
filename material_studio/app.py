@@ -2720,25 +2720,13 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 输入页 ----
     def _wrap_inputs(self):
-        """输入页: 顶部「强制完整输入」开关 + 按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
+        """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
         _w1, self.tree_inputs = self._inputs_tree()
         _w2, self.tree_inputs_depth = self._inputs_tree()
         _w3 = self._vs_inputs_view()
         page, self._in_btns, self._in_stack = _seg_switch(
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
-        box = QWidget()
-        bv = QVBoxLayout(box)
-        bv.setContentsMargins(0, 0, 0, 0)
-        self.chk_force_full = QCheckBox(
-            "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
-        self.chk_force_full.setToolTip(
-            "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
-            "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
-            "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n默认关 ⇒ 逐字节与现状一致。")
-        self.chk_force_full.toggled.connect(self._on_force_full)
-        bv.addWidget(self.chk_force_full)
-        bv.addWidget(page, 1)
-        return box
+        return page
 
     def _on_force_full(self, checked):
         """「强制完整输入」开关 -> 写/删源码里的 `//! vertex force_full_inputs` 指令。"""
@@ -2755,10 +2743,18 @@ class MaterialSystemPanel(QWidget):
         chk.blockSignals(False)
 
     def _vs_inputs_view(self):
-        """顶点(VS) 输入视图: **只读**(输入固定, 由变体决定; 不可增删)。"""
+        """顶点(VS) 输入视图: 只读输入说明 + 「强制完整输入」开关(材质级)。"""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
+        self.chk_force_full = QCheckBox(
+            "强制完整输入 (深度/阴影/拾取族补 NORMAL/TANGENT/UV0)")
+        self.chk_force_full.setToolTip(
+            "顶点效果(如法线外扩)要显示/投影/阴影都正确时打开。\n"
+            "开启后把精简族(pos_uv1/skin_min/nrm_uv1/skin_min_nrm)换成 full/skin_full"
+            "(其余 world/pack/绑定不变), 输入布局码(d30)同步。\n默认关 ⇒ 逐字节与现状一致。")
+        self.chk_force_full.toggled.connect(self._on_force_full)
+        v.addWidget(self.chk_force_full)
         t = QTreeWidget()
         t.setHeaderLabels(["类别 / 名", "类型", "说明"])
         root = QTreeWidgetItem(["顶点输入(固定; 由变体决定; 只读)", "", ""])
