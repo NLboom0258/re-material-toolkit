@@ -3720,6 +3720,40 @@ class PresetDialog(QDialog):
         return out
 
 
+class _CheckResultDialog(QDialog):
+    """编译检查结果: 上=测试 shader(合成的调用者), 下=报错。方便排错。"""
+
+    def __init__(self, parent, name, stage_label, harness, err):
+        super().__init__(parent)
+        self.setWindowTitle("编译检查: %s" % name)
+        self.resize(920, 660)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("阶段: %s" % stage_label))
+        sp = QSplitter(Qt.Vertical)
+        self.ed_shader = QPlainTextEdit()
+        self.ed_shader.setReadOnly(True)
+        self.ed_shader.setPlainText(harness)
+        sp.addWidget(self._pane("测试 shader (检查时实际编译的内容)", self.ed_shader))
+        self.ed_err = QPlainTextEdit()
+        self.ed_err.setReadOnly(True)
+        self.ed_err.setPlainText(err or "(无报错)")
+        sp.addWidget(self._pane("报错", self.ed_err))
+        sp.setSizes([430, 200])
+        v.addWidget(sp, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok)
+        bb.accepted.connect(self.accept)
+        v.addWidget(bb)
+
+    @staticmethod
+    def _pane(title, w):
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(QLabel(title))
+        v.addWidget(w, 1)
+        return box
+
+
 class FuncDialog(QDialog):
     """自定义函数选择器: 列出函数库(带 PS/VS 检查状态); 目标阶段不通过的禁用。"""
 
@@ -3919,11 +3953,28 @@ class FunctionLibPanel(QWidget):
                               "%s %s: %s" % (m.group(3), m.group(4), m.group(5))))
         self._hl.set_diagnostics(diags)
 
+    def _harness_for(self, name, target):
+        """合成该阶段的测试 shader(依赖 + 函数 + 调用者)。"""
+        src = cfun.get(name) or ""
+        order = cfun.topo_order([name])
+        deps = order[:-1]
+        pre = "\n\n".join((cfun.get(d) or "").rstrip() for d in deps) if deps else ""
+        hs, _unsup = cfun.build_harness(name, src, target, prelude=pre)
+        return hs or ";; 无法解析函数签名(检查函数定义是否完整)"
+
     def check_one(self):
         if not self._name:
             return
-        self._show(cfun.check(self._name))
-        self.reload(keep=self._name)
+        r = cfun.check(self._name)
+        self.reload(keep=self._name)     # 先刷新列表(reload 会触发选中变化, 勿在此前设标签)
+        self._show(r)
+        if not (r["ps"]["ok"] and r["vs"]["ok"]):
+            if not r["ps"]["ok"]:
+                tgt, key, lbl = "ps_5_0", "ps", "PS (主/深度)"
+            else:
+                tgt, key, lbl = "vs_5_0", "vs", "VS (顶点)"
+            _CheckResultDialog(self, self._name, lbl,
+                               self._harness_for(self._name, tgt), r[key]["err"]).exec()
 
     def check_all(self):
         self.lbl.setText("检查中…")

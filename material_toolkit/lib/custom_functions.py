@@ -117,9 +117,10 @@ _COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
 _COMMENT_LINE = re.compile(r"//[^\n]*")
 # 调用语法: 名字后紧跟 '('; 前导不能是 标识符字符/'.'/'>'(排除成员访问与更长标识符)
 _CALL_RE = re.compile(r"(?<![\w.>])([A-Za-z_]\w*)\s*\(")
-# 顶层函数定义: 行首 `TYPE NAME(`...`)` `{`
+# 顶层函数定义: 行首 `TYPE NAME(`...`)` `{`; **允许 `)` 与 `{` 之间夹注释/换行**
+# (如 `float f(float2 uv)  // 注释`), 否则解析不到签名 -> 编译检查误报"无法解析"。
 _FUNC_DEF_RE = re.compile(
-    r"(?m)^[ \t]*([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*\{")
+    r"(?m)^[ \t]*([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\(([^;{}]*)\)[^{};]*\{")
 
 
 def strip_comments(src):
