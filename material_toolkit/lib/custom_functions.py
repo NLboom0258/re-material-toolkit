@@ -277,15 +277,17 @@ def _use(type_name, var):
     return "float4(0,0,0,0)"
 
 
-def build_harness(name, source, target):
-    """合成"注册函数 + 一个使用其结果的入口"。返回 (harness_src, unsupported:bool)。
+def build_harness(name, source, target, prelude=None):
+    """合成"(依赖定义) + 注册函数 + 一个使用其结果的入口"。返回 (harness_src, unsupported:bool)。
 
+    prelude: 依赖的函数定义(依赖在前), 否则调用库函数的函数会因"未声明"误报。
     unsupported=True 表示参数含无法合成的类型(如 struct/数组) ⇒ 该阶段只能"尽力"检查。
     """
     sig = parse_signature(source)
     if not sig:
         return None, True
-    lines = [source.rstrip(), ""]
+    lines = ([prelude.rstrip(), ""] if (prelude and prelude.strip()) else [])
+    lines += [source.rstrip(), ""]
     args, outs, locals_ = [], [], []
     unsup = False
     for i, p in enumerate(sig["params"]):
@@ -339,8 +341,12 @@ def check(name, source=None):
         return hit[1]
     from . import mmtr_blobs as B
     res = {"unsupported": False}
+    # 依赖闭包(依赖在前), 否则调用库函数的函数会因"未声明"误报
+    _order = topo_order([name])
+    _deps = _order[:-1]
+    _pre = "\n\n".join((get(d) or "").rstrip() for d in _deps) if _deps else ""
     for target in ("ps_5_0", "vs_5_0"):
-        hs, unsup = build_harness(name, src, target)
+        hs, unsup = build_harness(name, src, target, prelude=_pre)
         res["unsupported"] = res["unsupported"] or unsup
         if hs is None:
             res[_st(target)] = {"ok": False, "err": "无法解析函数签名"}
