@@ -4,11 +4,12 @@
 
 ## 1. D3D_Shaders(3Dmigoto)—— GPL-3.0,含修改
 
-- 位置:`third_party/D3D_Shaders/`(源码);发布包另附编译产物 `material_toolkit/bin/D3D_Shaders.exe`。
 - 来源:3Dmigoto 项目(https://github.com/bo3b/3Dmigoto)的 `D3D_Shaders`(着色器反汇编/汇编器)子项目。
 - 许可:**GNU GPL-3.0**(见 `LICENSE`)。
 - **本项目对其进行了修改**(例如新增 `asm2cbo` 逐步汇编模式,以适配 RE Engine mmtr 工作流)。
-  依 GPL-3.0,随本项目的二进制一并提供其**修改后源码**(即 `third_party/D3D_Shaders/`)。
+- **源码位置**:本仓库 `third_party/D3D_Shaders/`(依 GPL-3.0,随二进制提供对应**修改后源码**)。
+  **发布包为精简运行时,不含该源码**;需要时请到本仓库获取。
+- **发布包**内含其编译产物 `material_toolkit/bin/D3D_Shaders.exe`。
 - 本项目整体亦以 **GPL-3.0** 分发(见 `LICENSE`)。
 
 ## 2. d3dcompiler_47.dll —— Microsoft DirectX 可再分发组件
@@ -18,14 +19,15 @@
 - 性质:微软**可再分发**运行时组件,**无对应源码**;以微软的再分发条款使用。
 - 用途:本项目用它将 HLSL 编译为 DXBC(ps_5_0/vs_5_0) 并做反射/校验。
 
-## 3. hlsl_blend_dxbc_translator(可选,外部依赖,不随本项目)
+## 3. hlsl_blend_dxbc_translator(可选功能)
 
 - 本项目支持一个**可选**功能:把"DXBC asm + HLSL 标记"的混合文本翻回纯 asm。
-- 该翻译器为**独立开源项目**,不包含在本仓库内(既不随仓,也不随发布包)。
-- 获取/构建:https://github.com/NLboom0258/hlsl-blend-dxbc-translator
-- 使用:构建后将 `hlsl_blend_dxbc_translator.exe` 放入 `material_toolkit/bin/`,
-  或用环境变量 `HLSL_BLEND_TRANSLATOR_EXE` 指定其路径(exe 需要的 `data/` 目录可用
-  `HLSL_BLEND_TRANSLATOR_DATA` 指定)。**缺失该 exe 时,其余功能不受影响**(纯 asm 照常)。
+- 该翻译器为**独立开源项目**:https://github.com/NLboom0258/hlsl-blend-dxbc-translator
+- **发布包已内置**其编译产物 `material_toolkit/bin/hlsl_blend_dxbc_translator.exe` 与运行所需的
+  函数库 `material_toolkit/bin/data/`(`rules.txt` + `functions/lib.txt`)。
+- **仓库不含其 exe**;从仓库运行如需该功能,请按上述仓库自行构建并放入 `material_toolkit/bin/`。
+  可用环境变量 `HLSL_BLEND_TRANSLATOR_EXE` / `HLSL_BLEND_TRANSLATOR_DATA` 指定。
+- 缺失该 exe 时,其余功能不受影响(纯 asm 照常)。
 - 许可:见其自身仓库。
 
 ## 4. `presets/v01100004/*.bin` —— 游戏派生数据(版本预设)

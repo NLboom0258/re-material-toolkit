@@ -385,17 +385,17 @@ def run_translator(asm_text, exe=None, workdir=None):
     if own:
         workdir = tempfile.mkdtemp(prefix="mmtr_translator_")
     try:
-        # data 目录: 环境变量优先, 否则取 exe 的 <proj>/data(翻译器自带函数库)
-        data_dir = os.environ.get("HLSL_BLEND_TRANSLATOR_DATA")
-        if not data_dir:
-            data_dir = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(exe))), "data")
+        # data 目录(翻译器自带函数库): 环境变量 > exe 同级 data/ > 旧版 <proj>/data
+        cands = (os.environ.get("HLSL_BLEND_TRANSLATOR_DATA"),
+                 os.path.join(os.path.dirname(exe), "data"),
+                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(exe))), "data"))
+        data_dir = next((c for c in cands if c and os.path.isdir(c)), None)
         inp = os.path.join(workdir, "in.asm")
         outp = os.path.join(workdir, "out.asm")
         with open(inp, "w", encoding="utf-8") as f:
             f.write(asm_text)
         args = [exe, "-input", inp, "-output", outp]
-        if os.path.isdir(data_dir):
+        if data_dir:
             args += ["-data", data_dir]
         p = subprocess.run(args, capture_output=True, text=True, timeout=600)
         if not os.path.exists(outp):
