@@ -156,8 +156,14 @@ def rdef_uav_names(blob):
 
 
 # RDEF target(profile token) -> stage (逆向 DMC5 exe; 见 mmtr_blobs.TARGET_STAGE)
-TARGET_STAGE = {0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x43530500: "CS",
-                0xFFFE0501: "VS", 0xFFFF0501: "PS", 0x43530501: "CS"}
+# 低16位=版本(major<<8|minor): ...0500=SM5.0(DX11) / ...0501=SM5.1(DX12)。
+# 高16位=类型 token(ASCII 大类; VS/PS 为特殊码): GS='GS' HS='HS' DS='DS' CS='CS'。
+TARGET_STAGE = {
+    0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x47530500: "GS",
+    0x48530500: "HS", 0x44530500: "DS", 0x43530500: "CS",
+    0xFFFE0501: "VS", 0xFFFF0501: "PS", 0x47530501: "GS",
+    0x48530501: "HS", 0x44530501: "DS", 0x43530501: "CS",
+}
 
 
 def _rdef_of(blob):

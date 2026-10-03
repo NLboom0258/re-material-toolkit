@@ -55,7 +55,13 @@ _ASSEMBLER_CANDS = (
 # exe 枚举约定: ????????????????-??.bin/.txt/.cbo (16 字符 + '-' + 2 字符)
 SHADER_NAME = "aaaaaaaaaaaaaaaa-01"
 
-TARGET_STAGE = {0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x43530500: "CS"}
+# 阶段 token(与 rdef.TARGET_STAGE 同源): ...0500=SM5.0 / ...0501=SM5.1。
+TARGET_STAGE = {
+    0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x47530500: "GS",
+    0x48530500: "HS", 0x44530500: "DS", 0x43530500: "CS",
+    0xFFFE0501: "VS", 0xFFFF0501: "PS", 0x47530501: "GS",
+    0x48530501: "HS", 0x44530501: "DS", 0x43530501: "CS",
+}
 
 
 def _u32(b, o):
