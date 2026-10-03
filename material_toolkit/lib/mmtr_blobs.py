@@ -36,14 +36,21 @@ except ImportError:  # 允许脚本直接 import
     from dxilhash import dxil_hash
     from binding import blob_list
 
-# 工作区根: lib/ -> material_toolkit/ -> tools/ -> 根
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+# 包根 material_toolkit/ 与仓库根(其上级); 外部二进制统一放 <pkg>/bin/ 或 <repo>/bin/
+_PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # material_toolkit/
+_REPO = os.path.dirname(_PKG)                                        # 仓库根
 
-# 外部汇编器(3Dmigoto, 带 asm2cbo 单步模式)候选位置
+
+def _bin(name):
+    """外部二进制候选: <pkg>/bin/ 优先, 其次 <repo>/bin/。"""
+    return os.path.join(_PKG, "bin", name)
+
+
+# 外部汇编器(3Dmigoto 改版, 带 asm2cbo 单步模式)候选位置:
+#   bin/D3D_Shaders.exe —— 发布包已内置; 从源码运行需自行编译后放入(见 README)。
 _ASSEMBLER_CANDS = (
-    os.path.join(_ROOT, "reference", "D3D_Shaders", "bin", "x64", "Release", "D3D_Shaders.exe"),
-    os.path.join(_ROOT, "tools", "mmtr_editor", "utils", "bin", "D3D_Shaders.exe"),
+    _bin("D3D_Shaders.exe"),
+    os.path.join(_REPO, "bin", "D3D_Shaders.exe"),
 )
 # exe 枚举约定: ????????????????-??.bin/.txt/.cbo (16 字符 + '-' + 2 字符)
 SHADER_NAME = "aaaaaaaaaaaaaaaa-01"
@@ -142,13 +149,13 @@ _d3d = None
 
 
 def _load_d3d():
-    """优先用工作区自带 libs/d3dcompiler_47.dll, 否则用系统。"""
+    """优先用随包的 bin/d3dcompiler_47.dll, 否则用系统。"""
     global _d3d
     if _d3d is not None:
         return _d3d
     import ctypes
-    for cand in (os.path.join(_ROOT, "libs", "d3dcompiler_47.dll"),
-                 os.path.join(_ROOT, "tools", "mmtr_editor", "utils", "bin", "d3dcompiler_47.dll")):
+    for cand in (_bin("d3dcompiler_47.dll"),
+                 os.path.join(_REPO, "bin", "d3dcompiler_47.dll")):
         if os.path.exists(cand):
             try:
                 _d3d = ctypes.WinDLL(cand)
@@ -251,8 +258,9 @@ def find_assembler():
         if c and os.path.exists(c):
             return c
     raise FileNotFoundError(
-        "未找到 D3D_Shaders.exe(带 asm2cbo)。请用 MSBuild 编译 "
-        "reference/D3D_Shaders/src (Release|x64), 或设置环境变量 D3D_SHADERS_EXE。")
+        "未找到 D3D_Shaders.exe(带 asm2cbo)。请把编译好的 exe 放到 "
+        "<material_toolkit>/bin/ 或 <repo>/bin/, 或用环境变量 D3D_SHADERS_EXE 指定。"
+        "发布包已内置该 exe; 从源码构建见 README「获取 D3D_Shaders.exe」。")
 
 
 def _run_exe(exe, args, workdir):
@@ -350,16 +358,16 @@ def check_asm(asm_text, ref_dxbc=None):
 # hlsl_blend_dxbc_translator: 把“DXBC asm + HLSL 标记”混合文本翻回纯 asm(非标记行透传)。
 # 纯 asm 是它的子集 ⇒ 无需“切换逻辑”: 有 exe 就把编辑文本过一遍再汇编, 没有则直接用原 asm。
 _TRANSLATOR_CANDS = (
-    os.path.normpath(os.path.join(_ROOT, "..", "..", "Cpp",
-                                  "hlsl_blend_dxbc_translator", "x64", "Release",
-                                  "hlsl_blend_dxbc_translator.exe")),
+    _bin("hlsl_blend_dxbc_translator.exe"),
+    os.path.join(_REPO, "bin", "hlsl_blend_dxbc_translator.exe"),
 )
 
 
 def find_translator():
     """定位 hlsl_blend_dxbc_translator.exe; 缺失返回 None(纯 asm 仍可用)。
 
-    查找: 环境变量 HLSL_BLEND_TRANSLATOR_EXE -> 约定相对路径(<工作区>/../Cpp/...)。
+    可选功能。exe 不随仓(见 README 链接自行构建), 放入 bin/ 或用
+    环境变量 HLSL_BLEND_TRANSLATOR_EXE 指定。
     """
     env = os.environ.get("HLSL_BLEND_TRANSLATOR_EXE")
     for c in ([env] if env else []) + list(_TRANSLATOR_CANDS):
@@ -377,8 +385,11 @@ def run_translator(asm_text, exe=None, workdir=None):
     if own:
         workdir = tempfile.mkdtemp(prefix="mmtr_translator_")
     try:
-        data_dir = os.path.dirname(os.path.dirname(os.path.dirname(exe)))  # <proj>/data
-        data_dir = os.path.join(data_dir, "data")
+        # data 目录: 环境变量优先, 否则取 exe 的 <proj>/data(翻译器自带函数库)
+        data_dir = os.environ.get("HLSL_BLEND_TRANSLATOR_DATA")
+        if not data_dir:
+            data_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(exe))), "data")
         inp = os.path.join(workdir, "in.asm")
         outp = os.path.join(workdir, "out.asm")
         with open(inp, "w", encoding="utf-8") as f:

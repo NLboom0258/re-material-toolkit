@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Material Studio — RE Engine 材质(mmtr/mdf2)底层检视/编辑器(PySide6)。
 
-定位: 一个"底层材质编辑器"薄壳; 核心读写全部复用 tools/material_toolkit/lib
+定位: 一个"底层材质编辑器"薄壳; 核心读写全部复用 material_toolkit/lib
 (binding / rdef / mdf2 / mmtr / mmtr_info)。将来换 UI 或升级为更完整的编辑器时, 逻辑不动。
 
 布局: 每页 = 左「列表」 + 右「内容区(标签页)」, 标签名即"栏名"。
@@ -25,43 +25,43 @@ import sys
 from collections import namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))  # 仓库根(tools 的上级)
+ROOT = os.path.dirname(HERE)  # 仓库根(material_studio 的上级)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from tools.material_toolkit.lib.binding import (  # noqa: E402
+from material_toolkit.lib.binding import (  # noqa: E402
     add_texture_slot, group_summary,
     name_vocabulary, rename_name_global, _blob_rdef_names,
 )
-from tools.material_toolkit.lib.mdf2 import (  # noqa: E402
+from material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
     encode_material_flags, shading_type_value,
 )
-from tools.material_toolkit.lib.mmtr import Mmtr  # noqa: E402
-from tools.material_toolkit.lib.mmtr_info import (  # noqa: E402
+from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
+from material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, group_mode, type_label,
 )
-from tools.material_toolkit.lib.mmtr_blobs import (  # noqa: E402
+from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler, BlobSource,
 )
-from tools.material_toolkit.lib.mmtr_assemble import (  # noqa: E402
+from material_toolkit.lib.mmtr_assemble import (  # noqa: E402
     assemble as assemble_mmtr, ProgramInstall,
 )
-from tools.material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
-from tools.material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
-from tools.material_toolkit.lib.rdef import replace_blob  # noqa: E402
-from tools.material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
-from tools.material_toolkit.lib import material_pass as mpass  # noqa: E402
-from tools.material_toolkit.lib import material_gen as mgen  # noqa: E402
-from tools.material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
-from tools.material_toolkit.lib import material_inputs as minp  # noqa: E402
-from tools.material_toolkit.lib import semantic_inputs as sinp  # noqa: E402
-from tools.material_toolkit.lib import material_asset as masset  # noqa: E402
-from tools.material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
-from tools.material_toolkit.lib import custom_functions as cfun  # noqa: E402
-from tools.material_toolkit.lib import material_instance as minst  # noqa: E402
-from tools.material_toolkit.lib import material_iface as miface  # noqa: E402
+from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
+from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
+from material_toolkit.lib.rdef import replace_blob  # noqa: E402
+from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
+from material_toolkit.lib import material_pass as mpass  # noqa: E402
+from material_toolkit.lib import material_gen as mgen  # noqa: E402
+from material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
+from material_toolkit.lib import material_inputs as minp  # noqa: E402
+from material_toolkit.lib import semantic_inputs as sinp  # noqa: E402
+from material_toolkit.lib import material_asset as masset  # noqa: E402
+from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
+from material_toolkit.lib import custom_functions as cfun  # noqa: E402
+from material_toolkit.lib import material_instance as minst  # noqa: E402
+from material_toolkit.lib import material_iface as miface  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
