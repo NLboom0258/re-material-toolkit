@@ -121,6 +121,8 @@ _CALL_RE = re.compile(r"(?<![\w.>])([A-Za-z_]\w*)\s*\(")
 # (如 `float f(float2 uv)  // 注释`), 否则解析不到签名 -> 编译检查误报"无法解析"。
 _FUNC_DEF_RE = re.compile(
     r"(?m)^[ \t]*([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\(([^;{}]*)\)[^{};]*\{")
+# 数组声明: `name[N]` 或 `name[]`(名/类型后缀均可)。
+_ARR_NAME_RE = re.compile(r"^([A-Za-z_]\w*)\s*\[(\d*)\]$")
 
 
 def strip_comments(src):
@@ -145,9 +147,10 @@ def _fn_body(src, start):
 
 
 def parse_signature(src):
-    """解析**首个**顶层函数 -> {ret, name, params:[{mod,type,name}], body} 或 None。
+    """解析**首个**顶层函数 -> {ret, name, params:[{mod,type,name,array}], body} 或 None。
 
-    参数: `[in|out|inout] <type> <name>`(类型限单 token; 复杂类型暂不支持, 返回时尽力而为)。
+    参数: `[in|out|inout] [const] <type> <name>[ [N]]`(类型单 token)。数组尺寸记为 `array`
+    (整数, 0=未定长, None=非数组); 名后缀与类型后缀(`float[4] x`)两种写法都认。
     """
     m = _FUNC_DEF_RE.search(src or "")
     if not m:
@@ -163,9 +166,21 @@ def parse_signature(src):
         if toks[0] in ("in", "out", "inout"):
             mod = toks[0]
             toks = toks[1:]
-        if len(toks) < 2:
+        if toks and toks[0] == "const":          # 去 const 限定符
+            toks = toks[1:]
+        if not toks:
             continue
-        params.append({"mod": mod, "type": toks[0], "name": toks[-1]})
+        arr = None
+        t = toks[0]
+        nm = toks[-1] if len(toks) >= 2 else "_arg"
+        am = _ARR_NAME_RE.match(nm)                 # 名后缀形式: `float x[4]`
+        if am:
+            nm, arr = am.group(1), (int(am.group(2)) if am.group(2) else 0)
+        else:
+            am = _ARR_NAME_RE.match(t)              # 类型后缀形式: `float[4] x`
+            if am:
+                t, arr = am.group(1), (int(am.group(2)) if am.group(2) else 0)
+        params.append({"mod": mod, "type": t, "name": nm, "array": arr})
     return {"ret": ret, "name": name, "params": params, "body": body}
 
 
@@ -282,7 +297,9 @@ def build_harness(name, source, target, prelude=None):
     """合成"(依赖定义) + 注册函数 + 一个使用其结果的入口"。返回 (harness_src, unsupported:bool)。
 
     prelude: 依赖的函数定义(依赖在前), 否则调用库函数的函数会因"未声明"误报。
-    unsupported=True 表示参数含无法合成的类型(如 struct/数组) ⇒ 该阶段只能"尽力"检查。
+    参数实参合成: 标量用字面量; **其余(资源/采样器/结构体/矩阵/数组)一律“全局声明”**
+    (HLSL 全局默认零初始化, 比局部声明更稳 —— 局部未初始化会被 FXC 拒)。`unsupported=True`
+    仅当遇到无法合成的形态(如未定长数组 ``x[]``)。
     """
     sig = parse_signature(source)
     if not sig:
@@ -292,19 +309,21 @@ def build_harness(name, source, target, prelude=None):
     args, outs, locals_ = [], [], []
     unsup = False
     for i, p in enumerate(sig["params"]):
-        t, nm, mod = p["type"], p["name"], p["mod"]
+        t, mod, arr = p["type"], p["mod"], p.get("array")
+        suf = ("[%d]" % arr) if arr else ""
         if mod in ("out", "inout"):
-            locals_.append("%s _a%d;" % (t, i))   # 须在 main 内(全局不可作 out 实参)
+            locals_.append("%s _a%d%s;" % (t, i, suf))   # 须在 main 内(全局不可作 out 实参)
             args.append("_a%d" % i)
-            outs.append((t, "_a%d" % i))
-        elif t in _RES or t in _SMP:
-            lines.append("%s _p%d;" % (t, i))     # 资源做全局
-            args.append("_p%d" % i)
-        elif t in _SCAL:
-            args.append(_SCAL[t])
+            outs.append((t, ("_a%d[0]" % i) if arr else ("_a%d" % i)))
+        elif t in _SCAL and not arr:
+            args.append(_SCAL[t])                        # 标量字面量
         else:
-            unsup = True
-            args.append("(%s)0" % t)          # 尽力而为
+            # 资源/采样器/结构体/矩阵/数组/未知类型 -> **全局声明**(HLSL 全局默认零初始化);
+            # 未定长数组(``x[]``)无法合成全局尺寸 -> 记为 unsupported。
+            if arr == 0:
+                unsup = True
+            lines.append("%s _p%d%s;" % (t, i, suf))
+            args.append("_p%d" % i)
     call = "%s(%s)" % (sig["name"], ", ".join(args))
     body = list(locals_)
     if sig["ret"] == "void":
