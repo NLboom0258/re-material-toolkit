@@ -272,6 +272,21 @@ _SCAL = {"float": "0.0", "float2": "float2(0,0)", "float3": "float3(0,0,0)",
 _RES = {"Texture1D", "Texture1DArray", "Texture2D", "Texture2DArray", "Texture2DMS",
         "Texture2DMSArray", "Texture3D", "TextureCube", "TextureCubeArray", "Buffer"}
 _SMP = {"SamplerState", "SamplerComparisonState"}
+# 内建标量/向量/矩阵类型(非结构体): float / float4 / float4x4 / int / bool / min16float …
+_BUILTIN_RE = re.compile(
+    r"^(?:void|matrix|float|half|double|int|uint|bool|dword|min\d+(?:float|int|uint))(?:\d(?:x\d)?)?$")
+
+
+def _is_struct_type(t):
+    """类型名是否为“结构体/自定义类型”(非内建、非资源/sampler)。
+
+    函数库**不支持**结构体(签名里出现即拒) —— 结构体既难复用, 又会使“合成调用者”
+    无法消费其返回值/out 而被 DCE, 导致阶段检查不可靠。结构体请改用「附加内容」页。
+    """
+    t = t or ""
+    return not (_BUILTIN_RE.match(t) or t in _RES or t in _SMP)
+
+
 ENTRY_SEM = {"ps_5_0": "SV_Target", "vs_5_0": "SV_Position"}
 
 
@@ -355,6 +370,21 @@ def check(name, source=None):
     if src is None:
         return {"ps": {"ok": False, "err": "函数不存在"}, "vs": {"ok": False, "err": "函数不存在"},
                 "unsupported": False}
+    # 结构体/自定义类型: 函数库不支持(签名里出现即拒) -> 引导改用「附加内容」。
+    _sig = parse_signature(src)
+    if _sig:
+        _bad = []
+        if _is_struct_type(_sig["ret"]):
+            _bad.append("返回类型 %s" % _sig["ret"])
+        for _p in _sig["params"]:
+            if _is_struct_type(_p["type"]):
+                _bad.append("%s 参数 %s" % (_p["name"], _p["type"]))
+        if _bad:
+            _msg = ("函数库不支持结构体/自定义类型(签名里出现即拒绝): %s\n"
+                    "  结构体请改用「附加内容」页(每 pass 各写各的, 可直接引用引擎资源)。"
+                    % "; ".join(_bad))
+            return {"ps": {"ok": False, "err": _msg}, "vs": {"ok": False, "err": _msg},
+                    "unsupported": False}
     h = hashlib.md5(src.encode("utf-8")).hexdigest()
     hit = _cache.get(name)
     if hit and hit[0] == h:
