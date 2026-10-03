@@ -872,8 +872,7 @@ class HlslHighlighter(QSyntaxHighlighter):
 
 def _template_struct_fields(template_name, struct_name):
     """从 pass 模板文件抽 struct 成员: [(类型, 名, 说明), ...]。"""
-    path = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates",
-                        template_name + ".hlsl")
+    path = os.path.join(mpass._TDIR, template_name + ".hlsl")
     if not os.path.isfile(path):
         return []
     with open(path, encoding="utf-8") as f:
@@ -2539,7 +2538,7 @@ def _pass_template_names(shading=None, lighting=None):
     shading/lighting 给定时只返回匹配 (着色类型, 光照模式) 的模板。
     """
     import glob
-    d = os.path.join(ROOT, "tools", "material_toolkit", "pass_templates")
+    d = mpass._TDIR
     out = []
     for p in sorted(glob.glob(os.path.join(d, "*.hlsl"))):
         n = os.path.basename(p)[:-5]
@@ -2650,6 +2649,23 @@ class MaterialSystemPanel(QWidget):
         self._src_timer.timeout.connect(self._clear_src_diags)
         self.ed_src.textChanged.connect(self._on_src_changed)
         self.tabs.addTab(self.ed_src, "材质源 (HLSL)")
+        # 附加内容(per-pass): 拼在材质源之前的 HLSL(struct/typedef/helper); 模板不主动使用,
+        #   由用户在入口函数里调用; 可引用接口作用域内的引擎资源/参数/贴图。
+        self.ed_extra = {}
+        self._ex_hl = {}
+        _ex_items = []
+        for _p, _t in (("main", "主 pass"), ("depth", "深度 pass"), ("vertex", "顶点 (VS)")):
+            _e = CodeEdit(indent=4)
+            _e.setPlaceholderText(
+                "在此写该 pass 的附加 HLSL(struct / typedef / helper 函数)。\n"
+                "会拼在材质源之前(接口声明之后); 模板不会主动调用 —— 需你在入口函数里调用。\n"
+                "可直接用接口作用域里的引擎资源/材质参数/贴图; 预设输入(uv/NormalWS…)需由入口传参。")
+            self._ex_hl[_p] = HlslHighlighter(_e.document())
+            _e.textChanged.connect(self._on_src_changed)
+            self.ed_extra[_p] = _e
+            _ex_items.append((_t, _e))
+        self._extra_page, self._extra_btns, self._extra_stack = _seg_switch(_ex_items)
+        self.tabs.addTab(self._extra_page, "附加内容")
         self.ed_full = CodeEdit(indent=4)
         self.ed_full.setReadOnly(True)
         self._full_hl = HlslHighlighter(self.ed_full.document())
@@ -2697,6 +2713,8 @@ class MaterialSystemPanel(QWidget):
         self.asset.template["mmtr_path"] = self.ed_mmtr.text().strip()
         self.asset.name = self.ed_name.text().strip() or "NewMaterial"
         self.asset.shading_source = self.ed_src.toPlainText()
+        if getattr(self, "ed_extra", None):
+            self.asset.shading_extra = {p: e.toPlainText() for p, e in self.ed_extra.items()}
 
     def _apply_asset(self):
         self._loading = True
@@ -2711,6 +2729,10 @@ class MaterialSystemPanel(QWidget):
             self.ed_name.setText(self.asset.name)
             if self.ed_src.toPlainText() != self.asset.shading_source:
                 self.ed_src.setPlainText(self.asset.shading_source)
+            for _p, _e in getattr(self, "ed_extra", {}).items():
+                _v = self.asset.extra_for(_p)
+                if _e.toPlainText() != _v:
+                    _e.setPlainText(_v)
         finally:
             self._loading = False
         self.refresh_info()
@@ -2761,7 +2783,8 @@ class MaterialSystemPanel(QWidget):
             return
         src = self.ed_src.toPlainText()
         try:
-            vsrc, dxbc, err = nogen.build_standard_vs(src, key, inputs=self.asset.inputs)
+            vsrc, dxbc, err = nogen.build_standard_vs(src, key, inputs=self.asset.inputs,
+                                                      extra=self.asset.shading_extra)
         except Exception as e:  # noqa: BLE001
             self.ed_full_vs.setPlainText(";; 组装失败: %s" % e)
             self.lbl_vs.setText("[组装失败] %s" % e)
@@ -3055,6 +3078,9 @@ class MaterialSystemPanel(QWidget):
         # 仅在确实有旧诊断时才重绘(无错误时不触发整篇 rehighlight)
         if self._src_hl._diags:
             self._src_hl.set_diagnostics([])
+        for _h in getattr(self, "_ex_hl", {}).values():
+            if _h._diags:
+                _h.set_diagnostics([])
 
     def refresh_inputs(self):
         """刷新三个 pass 的输入树(每 pass 独立)。"""
@@ -3332,27 +3358,32 @@ class MaterialSystemPanel(QWidget):
         self._after_inputs_changed()
 
     # ---- 编译诊断 ----
-    def _err_diags(self, err_text, tmpl, lmap=None, extra_off=0):
-        """把 D3DCompile 报错行(组装文行号)映射回用户源码行。返回 [(行1基,start,end,msg)]。
+    def _split_diags(self, err_text, off_tmpl, fmain_n, ex_n, lmap=None):
+        """把组装报错按区域拆成 (材质源诊断, 附加内容诊断)。
 
-        lmap: 用户编译源(可能已剥离某钩子)行号 -> 编辑器源码(ed_src)行号 的映射。
-        extra_off: 注入的自定义函数占用的额外行数(它们插在材质源之前)。
+        区域布局(材质源之前): 模板(<=off_tmpl) | 库函数注入段 | 附加内容 | 材质源。
+        lmap: 材质源(已剥离某钩子)行号 -> ed_src 行号 的映射。
+        行号分别映射回 ed_src(经 lmap) 与对应附加内容编辑器。
         """
-        off = mpass.material_line_offset(tmpl) + extra_off
-        out = []
+        out_src, out_ex = [], []
+        base = off_tmpl + fmain_n
         for line in (err_text or "").splitlines():
             m = _HLSL_ERR_RE.search(line)
             if not m:
                 continue
             aln = int(m.group(1))
-            if aln <= off:
-                continue   # 模板内的错(非用户源码)
-            uln = aln - off
-            if lmap is not None:
-                uln = lmap(uln)
-            out.append((uln, max(0, int(m.group(2)) - 1), 10 ** 6,
-                        "%s %s: %s" % (m.group(4), m.group(5), m.group(6))))
-        return out
+            col = max(0, int(m.group(2)) - 1)
+            msg = "%s %s: %s" % (m.group(4), m.group(5), m.group(6))
+            if aln <= base:
+                continue     # 模板 / 库函数注入段(库函数另有「函数库页」检查)
+            if aln <= base + ex_n:
+                out_ex.append((aln - base, col, 10 ** 6, msg))     # 附加内容编辑器行号
+            else:
+                uln = aln - (base + ex_n)
+                if lmap is not None:
+                    uln = lmap(uln)
+                out_src.append((uln, col, 10 ** 6, msg))
+        return out_src, out_ex
 
     # ---- 操作 ----
     def _load_default_material(self):
@@ -3365,6 +3396,9 @@ class MaterialSystemPanel(QWidget):
         self.ed_src.setPlainText(src)
         self.asset.shading_source = src
         self.asset.inputs = mimp.empty()
+        self.asset.shading_extra = {p: "" for p in mimp.PASSES}
+        for _e in getattr(self, "ed_extra", {}).values():
+            _e.setPlainText("")
         self.refresh_info()
 
     def _new_asset(self):
@@ -3445,12 +3479,14 @@ class MaterialSystemPanel(QWidget):
             self.lbl_status.setText("[自定义函数检查不通过] %s" % str(e).replace("\n", "  "))
             self.lbl_status.setStyleSheet("color:#c0392b")
             return
-        _n_main = _fmain.count("\n")
-        _n_depth = _fdepth.count("\n")
+        _ex_main = nogen.extra_text(self.asset.shading_extra, "main")
+        _ex_depth = nogen.extra_text(self.asset.shading_extra, "depth")
+        for _h in self._ex_hl.values():
+            _h.set_diagnostics([])
         iface, ka, minput = self._effective_inputs("main")
         # ---- 主 pass(剥掉 MaterialDepth/MaterialVertex: 未调用函数/VS 类型会污染主 PS) ----
         m_src, m_map = nogen.strip_line_map_multi(src, ("MaterialDepth", "MaterialVertex"))
-        m_src = _fmain + m_src
+        m_src = _fmain + _ex_main + m_src
         try:
             self.ed_full.setPlainText(mpass.build_source(m_src, tmpl, iface=iface,
                                                          keepalive=ka, minput=minput))
@@ -3464,7 +3500,7 @@ class MaterialSystemPanel(QWidget):
                                               keepalive=ka, minput=minput)
         # ---- 深度 pass(恒组装; 剥掉 MaterialMain/MaterialVertex) ----
         d_src, d_map = nogen.strip_line_map_multi(src, ("MaterialMain", "MaterialVertex"))
-        d_src = _fdepth + d_src
+        d_src = _fdepth + _ex_depth + d_src
         iface_d, _, minput_d = self._effective_inputs("depth")
         try:
             self.ed_full_depth.setPlainText(
@@ -3478,25 +3514,43 @@ class MaterialSystemPanel(QWidget):
                                               presets=mimp.presets(self.asset.inputs, "depth"))
         # ---- 报错(优先主 pass) ----
         if m_err:
-            diags = self._err_diags(m_err, tmpl, m_map, extra_off=_n_main)
-            self._src_hl.set_diagnostics(diags)
-            self.tabs.setCurrentIndex(0)   # 跳回材质源看红线
-            first = diags[0][3] if diags else (m_err.strip().splitlines()[0] if m_err.strip() else "?")
+            _sd, _ed = self._split_diags(
+                m_err, mpass.material_line_offset(tmpl),
+                _fmain.count("\n"), _ex_main.count("\n"), m_map)
+            self._src_hl.set_diagnostics(_sd)
+            self._ex_hl["main"].set_diagnostics(_ed)
+            if _sd:
+                self.tabs.setCurrentWidget(self.ed_src)       # 材质源红线
+            elif _ed:
+                self.tabs.setCurrentWidget(self._extra_page)  # 附加内容红线
+                self._extra_stack.setCurrentIndex(0)
+            _all = _sd + _ed
+            first = _all[0][3] if _all else (m_err.strip().splitlines()[0] if m_err.strip() else "?")
             self.lbl_status.setText("[主 pass 编译失败] %d 处%s: %s"
-                                    % (len(diags),
-                                       ("(第%d行)" % diags[0][0]) if diags else "",
+                                    % (len(_all),
+                                       ("(第%d行)" % _all[0][0]) if _all else "",
                                        first[:90]))
             self.lbl_status.setStyleSheet("color:#c0392b")
             self.lbl_status.setToolTip(m_err[:4000])
             return
         if d_err:
-            diags = self._err_diags(d_err, "deferred_depth", d_map, extra_off=_n_depth)
-            self._src_hl.set_diagnostics(diags)
-            self._seg_show(1)              # 切到"深度 pass"视图
-            first = diags[0][3] if diags else (d_err.strip().splitlines()[0] if d_err.strip() else "?")
+            _sd, _ed = self._split_diags(
+                d_err, mpass.material_line_offset("deferred_depth"),
+                _fdepth.count("\n"), _ex_depth.count("\n"), d_map)
+            self._src_hl.set_diagnostics(_sd)
+            self._ex_hl["depth"].set_diagnostics(_ed)
+            if _sd:
+                self.tabs.setCurrentWidget(self.ed_src)
+            elif _ed:
+                self.tabs.setCurrentWidget(self._extra_page)
+                self._extra_stack.setCurrentIndex(1)
+            else:
+                self._seg_show(1)          # 切到"深度 pass"视图
+            _all = _sd + _ed
+            first = _all[0][3] if _all else (d_err.strip().splitlines()[0] if d_err.strip() else "?")
             self.lbl_status.setText("[深度 pass 编译失败] %d 处%s: %s"
-                                    % (len(diags),
-                                       ("(第%d行)" % diags[0][0]) if diags else "",
+                                    % (len(_all),
+                                       ("(第%d行)" % _all[0][0]) if _all else "",
                                        first[:90]))
             self.lbl_status.setStyleSheet("color:#c0392b")
             self.lbl_status.setToolTip(d_err[:4000])
@@ -3535,7 +3589,8 @@ class MaterialSystemPanel(QWidget):
         try:
             data, rp = nogen.build(self.asset.shading_source or "",
                                    _pass_of_template(tmpl), tmpl,
-                                   inputs=self.asset.inputs)
+                                   inputs=self.asset.inputs,
+                                   extra=self.asset.shading_extra)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))
             return None, None

@@ -233,6 +233,16 @@ def vs_hook_source(material_src):
     return _strip_hlsl_fn(_strip_hlsl_fn(material_src, "MaterialMain"), "MaterialDepth")
 
 
+def extra_text(extra, pass_name):
+    """某 pass 的“附加内容”文本(拼在材质源之前; 规范化: 去尾空行 + 后接空行); 空则 ""。
+
+    附加内容 = 用户在该 pass 写的额外 HLSL(struct/typedef/helper 函数); 模板**不主动使用**,
+    由用户在入口函数里调用; 可引用接口作用域内的引擎资源/参数/贴图。
+    """
+    s = ((extra or {}).get(pass_name) or "").rstrip("\n")
+    return (s + "\n\n") if s else ""
+
+
 def _load_bank():
     data = open(P.standard_path(), "rb").read()
     idx = json.load(open(P.standard_index_path(), encoding="utf-8"))
@@ -285,7 +295,7 @@ def d30_map():
     return _d30_map_cache
 
 
-def build_standard_vs(material_src, bank_key, inputs=None):
+def build_standard_vs(material_src, bank_key, inputs=None, extra=None):
     """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
     data, idx = _load_bank()
     e = idx.get(bank_key)
@@ -302,7 +312,7 @@ def build_standard_vs(material_src, bank_key, inputs=None):
     vs_iface, _, _ = _vs_iface(inputs, vs_in)
     from . import custom_functions as CF
     _hook = CF.injection_text(MIM.funcs(inputs, "vertex"), "vs", "vertex") + \
-        (vs_hook_source(material_src) or "")
+        extra_text(extra, "vertex") + (vs_hook_source(material_src) or "")
     src = VG.build_from_spec(spec, hook=_hook or None, vs_in=vs_in, vs_iface=vs_iface)
     dxbc, err = VG.compile_vs(src)
     return src, dxbc, err
@@ -320,13 +330,14 @@ def _vs_iface(inputs, vs_in):
 
 
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None,
-          force_full_inputs=False, inputs=None):
+          force_full_inputs=False, inputs=None, extra=None):
     """-> (mmtr bytes, report)。
 
     inputs: 结构化输入注册(`material_inputs_model`; = `.mmat.json` 的 `inputs`)。None = 空。
     iface: 主 pass 接口覆写(来自 material_iface); None 时按 inputs 自动生成。
     force_full_inputs: 为 True 时**强制**把 reduced 族(depth/shadow/pick)补输入到完整族
            (`full`/`skin_full`); 默认 False(仅当顶点预设依赖缺属性时自动补)。
+    extra: 每 pass 的“附加内容”(`{pass: HLSL}`; `.mmat.json` 的 `shading.extra`)——拼在材质源之前。
     寄存器由 d3dcompiler **自动紧凑**分配(不写 `register`; 见 `material_pass` 文件头)。
     """
     inputs = MIM.from_dict(inputs)
@@ -449,9 +460,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                                  "MaterialDepth")
     # 自定义函数(逐 pass 导入): 先查"调用了未导入的函数", 再注入"导入闭包(依赖在前)"。
     _check_missing_funcs()
-    mp_src = _funcs_text("main", "ps") + mp_src
-    d_src = _funcs_text("depth", "ps") + d_src
-    vs_hook_src = _funcs_text("vertex", "vs") + vs_hook_src
+    mp_src = _funcs_text("main", "ps") + extra_text(extra, "main") + mp_src
+    d_src = _funcs_text("depth", "ps") + extra_text(extra, "depth") + d_src
+    vs_hook_src = _funcs_text("vertex", "vs") + extra_text(extra, "vertex") + vs_hook_src
     _hook_h = hashlib.md5(vs_hook_src.encode("utf-8")).hexdigest()
     # 顶点预设(stage="vs"): 归属 `@vertex` 的启用集 -> 生成 VertexInput(字段=已启用预设) + 构造行(v.xxx=...);
     #   同时给出 vs_attrs(需用到的顶点属性) 供"补输入"依赖判定。

@@ -325,17 +325,19 @@ def main():
         tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_std"
         pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
         inputs = None
+        extra = None
         if "--asset" in a:                        # 从 .mmat.json 读源 + 结构化输入
             from lib import material_asset as _masset
             asset = _masset.MaterialAsset.load(a[a.index("--asset") + 1])
             material_src = asset.shading_source
             inputs = asset.inputs
+            extra = asset.shading_extra
             tpl = asset.template.get("pass_template") or tpl
             pname = "Deferred" if tpl.startswith("deferred") else pname
             mat = mat or a[a.index("--asset") + 1]
         else:
             material_src = open(mat, encoding="utf-8").read() if mat else None
-        data, rep = nogen.build(material_src, pname, tpl, inputs=inputs)
+        data, rep = nogen.build(material_src, pname, tpl, inputs=inputs, extra=extra)
         open(out, "wb").write(data)
         print(f"OK: mat-nogen {mat or '(默认材质)'} --template {tpl} -> {out} "
               f"({len(data)} bytes, PS {rep['ps_size']}B, blobs={rep['n_blobs']}, "

@@ -57,18 +57,27 @@ MUTEX = [
 PARAM_TYPES = ("float", "float2", "float3", "float4")
 
 
+def _norm_extra(d):
+    """规范化 per-pass 附加内容 -> {"main":str, "depth":str, "vertex":str}。"""
+    src = d or {}
+    return {p: str(src.get(p) or "") for p in MIM.PASSES}
+
+
 class MaterialAsset(object):
     """材质资产(源)。字段: 两个选项 + 输入注册(preset/engine/param/tex)+ 材质函数(HLSL)。"""
 
     def __init__(self, name="NewMaterial", lighting_mode="default",
                  shading_type="deferred", template=None, inputs=None,
-                 shading_source=""):
+                 shading_source="", shading_extra=None):
         self.name = name
         self.lighting_mode = lighting_mode
         self.shading_type = shading_type
         self.template = template or {}          # {"pass_template": "deferred_std", "mmtr_path": "MasterMaterial/..."}
         self.inputs = MIM.from_dict(inputs)     # 结构化输入注册(唯一真源)
         self.shading_source = shading_source    # 用户写的材质函数(**纯 HLSL**, 无 `//!`)
+        # 每 pass 的“附加内容”(拼在材质源之前的 HLSL: struct/typedef/helper 函数)。
+        #   模板**不主动使用**; 由用户在入口函数里调用; 可引用接口作用域内的引擎资源/参数/贴图。
+        self.shading_extra = _norm_extra(shading_extra)
 
     @classmethod
     def new_default(cls, name="NewMaterial"):
@@ -91,6 +100,10 @@ class MaterialAsset(object):
     def post_steps(self):
         """custom 下交给材质的“最终输出前后处理”步骤(default 下由模板/引擎做)。"""
         return list(POST_EXPOSED) if self.lighting_mode == "custom" else []
+
+    def extra_for(self, pass_name):
+        """该 pass 的附加内容(拼在材质源之前的 HLSL; 空则 "")。"""
+        return self.shading_extra.get(pass_name, "")
 
     # ---- 校验 ----
     def validate(self):
@@ -117,7 +130,8 @@ class MaterialAsset(object):
             "shading_type": self.shading_type,
             "template": dict(self.template),
             "inputs": MIM.to_dict(self.inputs),
-            "shading": {"language": "hlsl", "source": self.shading_source},
+            "shading": {"language": "hlsl", "source": self.shading_source,
+                        "extra": dict(self.shading_extra)},
         }
 
     @classmethod
@@ -127,7 +141,8 @@ class MaterialAsset(object):
                    shading_type=d.get("shading_type", "deferred"),
                    template=dict(d.get("template") or {}),
                    inputs=MIM.from_dict(d.get("inputs")),
-                   shading_source=(d.get("shading") or {}).get("source", ""))
+                   shading_source=(d.get("shading") or {}).get("source", ""),
+                   shading_extra=_norm_extra((d.get("shading") or {}).get("extra")))
 
     def save(self, path):
         with open(path, "w", encoding="utf-8") as f:
