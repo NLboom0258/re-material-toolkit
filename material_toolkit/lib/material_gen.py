@@ -176,7 +176,7 @@ def param_name_conflicts(params):
     return out
 
 
-def generate(template, material_src=None, template_name="deferred_env",
+def generate(template, material_src=None, template_name="deferred_std",
              pass_name="Deferred", target="ps_5_0", iface_from_template=True,
              add_inputs=True, instance_template=None):
     """材质函数 + 模板 mmtr -> (新 mmtr bytes, report dict)。
@@ -219,17 +219,24 @@ def generate(template, material_src=None, template_name="deferred_env",
     minput = (_SI.minput_from_src(material_src, _SI.names_in(iface))
               if material_src else None)
 
+    # 主 pass PS 编译须剥掉 `MaterialDepth`/`MaterialVertex`: 它们属别的 pass, 且主 PS 模板
+    #   无 `VertexInput` 类型(与 nogen 路径同一约定)。material_src 为 None 时用模板默认材质。
+    from . import mmtr_nogen as _NG
+    _src0 = material_src if material_src is not None else MP.default_material(template_name)
+    mp_src = _NG._strip_hlsl_fn(_NG._strip_hlsl_fn(_src0, "MaterialDepth"),
+                                "MaterialVertex")
+
     # 先编译“我们的 PS”(cbuffer / instance), 以它作分类与兼容性参照。
     # 不用“基础 PS”作参照: 同一 pass 各变体的原生绑定可能不一致(如前向),
     # 只有“我们的 PS”才是真正要跑的程序。
-    ps, err = MP.compile_shading(material_src, template_name, target=target,
+    ps, err = MP.compile_shading(mp_src, template_name, target=target,
                                  iface=iface, style="cbuffer", minput=minput)
     if err:
         raise ValueError("HLSL 编译失败(cbuffer):\n%s" % err)
     ours_cb = analyze(ps)
     ps_inst, ours_inst = None, None
     if inst_present and instance_template:
-        ps_inst, err2 = MP.compile_shading(material_src, instance_template,
+        ps_inst, err2 = MP.compile_shading(mp_src, instance_template,
                                            target=target, iface=iface,
                                            style="instance", minput=minput)
         if err2:

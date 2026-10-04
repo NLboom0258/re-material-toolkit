@@ -99,6 +99,11 @@ RESOURCE_DESC = {
     "PointClamp": "点采样 + 钳制(Clamp)。",
     # ---- 2026-10-04 从 lighting.sdf(关卡光照)新增; 结构体/数组成员 ----
     "LightParameters": "光照参数数组(点光/面光/阴影/IBL): 结构体数组成员, 声明后可直接读光源。",
+    # ---- 2026-10-04 从 lighting.sdf(关卡光照)新增; GBuffer SRV / GI 系列 ----
+    "BaseColorMetallicSRV": "GBuffer RT1: 基础色+金属度(屏幕空间, 可作自定义光照输入)。",
+    "NormalXNormalYRoughnessMiscSRV": "GBuffer RT2: 法线+粗糙度+杂项。",
+    "OcclusionVelocityXVelocityYSubSurfaceSRV": "GBuffer RT3: 环境光遮蔽/速度/次表面。",
+    "GISSRV": "GI 镜面/球谐相关 SRV(uint/2d)。",
 }
 
 

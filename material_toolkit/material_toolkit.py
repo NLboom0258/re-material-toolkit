@@ -19,9 +19,9 @@
   python material_toolkit.py variant-diff <in.mmtr> [--tech NAME] [--instr]
   python material_toolkit.py model-skeleton <in.mmtr> -o <out.bin>
   python material_toolkit.py mmtr-new    <template.mmtr> -o <out.mmtr>
-  python material_toolkit.py mat-gen    <template.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
+  python material_toolkit.py mat-gen    <template.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_std] [--pass Deferred]
   python material_toolkit.py mat-std    <in.mmtr> [other.mmtr]
-  python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_env] [--pass Deferred]
+  python material_toolkit.py mat-skeleton <donor.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_std] [--pass Deferred]
   python material_toolkit.py mat-synth  <in.mmtr> [other.mmtr]
   python material_toolkit.py mat-rebuild <in.mmtr> -o <out.mmtr>
   python material_toolkit.py mat-self   <base.mmtr> [material.hlsl] -o <out.mmtr> [--template deferred_bare] [--pass Deferred]
@@ -253,7 +253,7 @@ def main():
         src = a[0]
         mat = a[1] if len(a) > 1 and not a[1].startswith("-") else None
         out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr.1808168797"
-        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_env"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_std"
         pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
         material_src = open(mat, encoding="utf-8").read() if mat else None
         data, rep = mgen.generate(open(src, "rb").read(), material_src, tpl, pname)
@@ -272,10 +272,14 @@ def main():
         src = a[0]
         mat = a[1] if len(a) > 1 and not a[1].startswith("-") else None
         out = a[a.index("-o") + 1] if "-o" in a else "out.mmtr.1808168797"
-        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_env"
+        tpl = a[a.index("--template") + 1] if "--template" in a else "deferred_std"
         pname = a[a.index("--pass") + 1] if "--pass" in a else "Deferred"
         material_src = open(mat, encoding="utf-8").read() if mat else None
-        ps, err = mpass.compile_shading(material_src, tpl)
+        # 主 PS 须剥掉别的 pass 的函数(主模板无 VertexInput) —— 与 mat-gen/nogen 同一约定。
+        _m0 = material_src if material_src is not None else mpass.default_material(tpl)
+        _msrc = nogen._strip_hlsl_fn(nogen._strip_hlsl_fn(_m0, "MaterialDepth"),
+                                     "MaterialVertex")
+        ps, err = mpass.compile_shading(_msrc, tpl)
         if err:
             print("编译失败:\n%s" % err)
             sys.exit(1)
