@@ -96,6 +96,7 @@ RESOURCE_DESC = {
     "BilinearBorder": "双线性 + Border。",
     "TrilinearBorder": "三线性 + Border(含 mip)。",
     "TrilinearWrap": "三线性 + 环绕(Wrap)。",
+    "TrilinearClamp": "三线性 + 钳制(Clamp, 含 mip)。(自 SDF lighting 新增)",
     "PointClamp": "点采样 + 钳制(Clamp)。",
     # ---- 2026-10-04 从 lighting.sdf(关卡光照)新增; 结构体/数组成员 ----
     "LightParameters": "光照参数数组(点光/面光/阴影/IBL): 结构体数组成员, 声明后可直接读光源。",

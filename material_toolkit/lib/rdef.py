@@ -23,6 +23,14 @@ FLAGS_TEX = 0xC
 NSAMP = 0xFFFFFFFF
 
 
+def _br_stride(target):
+    """RDEF bound-resource 条目步长: SM5.0=32 字节; **SM5.1=40 字节**(每条 entry 额外 8 字节: space/ID)。
+
+    ⚠ 不区分会导致 SM5.1(DX12) blob 的资源名偏移错位(乱码)。cbuffer 定义步长不受影响(恒 24)。
+    """
+    return 40 if (target & 0xFFFF) == 0x0501 else 32
+
+
 def _u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
 
@@ -71,9 +79,10 @@ def rdef_resources(blob):
         cs = _u32(blob, rdef_ci + 4)
         r = blob[rdef_ci + 8:rdef_ci + 8 + cs]
         _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+        st = _br_stride(_t)
         cb, smp, srv = set(), set(), set()
         for k in range(n_br):
-            p = br_off + k * 32
+            p = br_off + k * st
             t = _u32(r, p + 4)
             nm = _cstr(r, _u32(r, p))
             (cb if t == 0 else smp if t == 3 else srv).add(nm)
@@ -94,9 +103,10 @@ def rdef_bind_info(blob):
         _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
     except Exception:
         return None
+    st = _br_stride(_t)
     out = []
     for k in range(n_br):
-        p = br_off + k * 32
+        p = br_off + k * st
         out.append((_cstr(r, _u32(r, p)), _u32(r, p + 4), _u32(r, p + 20),
                     _u32(r, p + 12), _u32(r, p + 8)))
     return out
@@ -118,8 +128,9 @@ def rdef_bind_order(blob):
     except Exception:
         return None
     out = {"cb": [], "smp": [], "tex": []}
+    st = _br_stride(_t)
     for k in range(n_br):
-        p = br_off + k * 32
+        p = br_off + k * st
         nm = _cstr(r, _u32(r, p))
         t = _u32(r, p + 4)
         if t == 0:
@@ -148,8 +159,9 @@ def rdef_uav_names(blob):
     except Exception:
         return set()
     out = set()
+    st = _br_stride(_t)
     for k in range(n_br):
-        p = br_off + k * 32
+        p = br_off + k * st
         if _u32(r, p + 4) in _UAV:
             out.add(_cstr(r, _u32(r, p)))
     return out
