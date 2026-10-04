@@ -97,6 +97,8 @@ RESOURCE_DESC = {
     "TrilinearBorder": "三线性 + Border(含 mip)。",
     "TrilinearWrap": "三线性 + 环绕(Wrap)。",
     "PointClamp": "点采样 + 钳制(Clamp)。",
+    # ---- 2026-10-04 从 lighting.sdf(关卡光照)新增; 结构体/数组成员 ----
+    "LightParameters": "光照参数数组(点光/面光/阴影/IBL): 结构体数组成员, 声明后可直接读光源。",
 }
 
 
@@ -222,6 +224,12 @@ MEMBER_DESC = {
         "WriteAddress": "写地址",
         "PickPosition": "拾取位置",
         "OptionalTag": "可选标签",
+    },
+    "LightParameters": {
+        "LightParameterSRV[256]": "点光源参数数组(位置/范围/方向/衰减/颜色; 结构体)",
+        "AreaLightParameterSRV[256]": "面光源参数数组(同点光结构)",
+        "ShadowParameterSRV[128]": "阴影参数数组(视投影/方差/索引/偏置)",
+        "IBLCubemapArrayList2SRV[128]": "IBL 立方图数组信息(OBB 测试/中心索引)",
     },
 }
 

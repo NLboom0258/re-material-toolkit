@@ -157,8 +157,30 @@ def _material_cbuffer(iface, name="UserMaterial"):
     return None
 
 
-def _flat_cbuffer(out, cb):
+def _emit_struct_defs(out, cb, seen):
+    """发射该 cbuffer 成员引用的**结构体定义**(按类型名去重; 供 cbuffer 使用的前置类型)。
+
+    成员可带内联 `struct`(字段列表; 支持 标量/向量/矩阵/数组, 不嵌套) —— 用于建模引擎
+    cbuffer 里的“结构体/数组成员”(如 `LightParameters` 的 `LightParameter[256]`)。若成员
+    无 `struct` 则不发射(类型同名的结构体已在别处发射)。
+    """
+    for m in cb.get("members", []):
+        st = m.get("struct")
+        tn = m.get("type")
+        if not st or not tn or tn in seen:
+            continue
+        seen.add(tn)
+        out.append("struct %s" % tn)
+        out.append("{")
+        for sm in st:
+            out.append("    %s %s;" % (sm["type"], sm["name"]))
+        out.append("};")
+        out.append("")
+
+
+def _flat_cbuffer(out, cb, struct_seen=None):
     # 不写 `register(...)`: 寄存器交由编译器**自动紧凑**分配(见 material_pass 文件头说明)。
+    _emit_struct_defs(out, cb, struct_seen if struct_seen is not None else set())
     out.append("cbuffer %s" % cb["name"])
     out.append("{")
     for m in cb["members"]:
@@ -214,8 +236,9 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
     """
     out = ["// ===== 自动生成: 引擎/材质接口(来自模板 mmtr 的 Deferred PS) ====="]
     if style == "cbuffer":
+        _seen = set()
         for cb in iface["cbuffers"]:
-            _flat_cbuffer(out, cb)
+            _flat_cbuffer(out, cb, _seen)
         for t in iface["textures"]:
             out.append(_texture_decl(t))
         for s in iface["samplers"]:
@@ -225,12 +248,14 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
 
     # ---- style == "instance" ----
     mc = _material_cbuffer(iface, material_cbuffer)
+    _seen = set()
     for cb in iface["cbuffers"]:
         if cb is not mc:
-            _flat_cbuffer(out, cb)
+            _flat_cbuffer(out, cb, _seen)
 
     # 非 byte 纹理无需再手动占位(寄存器由编译器自动分配)
     if mc is not None:
+        _emit_struct_defs(out, mc, _seen)
         out.append("struct %s" % struct_name)
         out.append("{")
         if mc["members"]:
