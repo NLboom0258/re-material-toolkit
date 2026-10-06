@@ -68,7 +68,23 @@ foreach ($f in @("__init__.py", "material_toolkit.py")) {
 }
 Copy-Tree (Join-Path $tkSrc "lib") (Join-Path $tkDst "lib")
 Copy-Tree (Join-Path $tkSrc "presets") (Join-Path $tkDst "presets")
-Copy-Tree (Join-Path $tkSrc "functions") (Join-Path $tkDst "functions")
+# functions/: 只打包"已被 git 跟踪"的函数(排除本地未提交的临时/实验函数)
+$fnSrc = Join-Path $tkSrc "functions"
+$fnDst = Join-Path $tkDst "functions"
+New-Item -ItemType Directory -Force -Path $fnDst | Out-Null
+$trackedFn = @()
+try { $trackedFn = @(& git -C $root ls-files "material_toolkit/functions" 2>$null) } catch { }
+if ($trackedFn.Count -gt 0) {
+    foreach ($rel in $trackedFn) {
+        $src = Join-Path $root $rel
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $fnDst (Split-Path $rel -Leaf)) -Force
+        }
+    }
+    Write-Host ("  functions: " + $trackedFn.Count + " (git-tracked only)")
+} else {
+    Copy-Tree $fnSrc $fnDst
+}
 Copy-Tree (Join-Path $tkSrc "pass_templates") (Join-Path $tkDst "pass_templates") @("_archive")
 
 # ---- binaries into package bin/ ----
