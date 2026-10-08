@@ -1234,7 +1234,7 @@ class MmtrPanel(QWidget):
         self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
-        self.tabs.addTab(self.tree_variant, "变体(材质)")
+        self.tabs.addTab(self.tree_variant, "变体")
         self.tabs.addTab(self.tab_blob, "Blob(shader)")
 
         split = QSplitter(Qt.Horizontal)
@@ -1328,38 +1328,58 @@ class MmtrPanel(QWidget):
             self.tree_blob.setCurrentItem(self.tree_blob.topLevelItem(row))
 
     def refresh_variant(self):
-        """变体(材质)页: 按 pass 分组的技术 × 标志变体 -> 程序集(只读, 来自 MaterialModel)。"""
+        """变体页(通用): 技术 -> 程序集(PS·VS·CS)。
+
+        - 通用: 列出每个技术的程序集(第1列=变体名, 便于按名定位 blob);
+        - 若识别出材质"pass"(mmtr): 按 pass 分组; 否则(SDF/未识别)直接平铺;
+        - 前缀列仅对材质有意义(mdf2 flags); 无标志时显示 (无标志)。
+        """
         tree = self.tree_variant
         tree.clear()
         if self.data is None:
             return
         mm = MaterialModel(self.data)
         s = mm.summary()
+        prefs = s["prefix_counts"]
+        pre_txt = ("前缀: " + " ".join("%s=%d" % (k or "''", v) for k, v in prefs.items())
+                   if prefs and set(prefs) - {""} else "")
         info = QTreeWidgetItem(
-            ["材质: 技术=%d  记录=%d(空槽=%d)  blob=%d"
+            ["容器: 技术=%d  记录=%d(空槽=%d)  blob=%d"
              % (s["technologies"], s["records"], s["empty_records"], s["blobs"]),
-             "变体记录=%d" % s["variant_records"],
-             "前缀: ''=无 / A=AlphaTest / TS=TwoSide / ATS=两者 (+Direct)"])
-        info.setToolTip(2, "前缀由 mdf2 flags 决定: bit1(BaseAlphaTestEnable)->A, "
-                           "bit0(BaseTwoSideEnable)->TS")
+             "变体记录=%d" % s["variant_records"], pre_txt])
+        info.setToolTip(2, "前缀(mdf2 flags): bit1(BaseAlphaTestEnable)->A, "
+                           "bit0(BaseTwoSideEnable)->TS; 空=无标志")
         tree.addTopLevelItem(info)
-        for p, techs in mm.by_pass().items():
-            pitem = QTreeWidgetItem(["pass: %s" % p, "%d 技术" % len(techs), ""])
-            tree.addTopLevelItem(pitem)
-            for tech in techs:
-                d = parse_technology(tech)
-                sets = mm.program_sets(tech)
-                titem = QTreeWidgetItem(
-                    [tech, "程序集=%d  真VS=%s" % (len(sets), mm.shared_vs(tech)),
-                     self._dim_label(d)])
-                pitem.addChild(titem)
-                for g in sets:
-                    ps, vs, cs = g["programs"]
-                    citem = QTreeWidgetItem(
-                        ["<- %s" % ",".join(g["prefixes"]),
-                         "PS=%d  VS=%d  CS=%d" % (ps, vs, cs),
-                         "slots=%s" % ",".join(str(x) for x in g["slots"])])
-                    titem.addChild(citem)
+        bp = mm.by_pass()
+        material_like = any(p != "(none)" for p in bp)
+
+        def add_tech(parent, tech):
+            d = parse_technology(tech)
+            sets = mm.program_sets(tech)
+            titem = QTreeWidgetItem(
+                [tech, "程序集=%d  真VS=%s" % (len(sets), mm.shared_vs(tech)),
+                 self._dim_label(d) if material_like else ""])
+            parent.addChild(titem)
+            for g in sets:
+                ps, vs, cs = g["programs"]
+                plab = ",".join(p for p in g["prefixes"] if p and p != "-") or "(无标志)"
+                citem = QTreeWidgetItem(
+                    ["<- %s" % plab,
+                     "PS=%d  VS=%d  CS=%d" % (ps, vs, cs),
+                     "slots=%s" % ",".join(str(x) for x in g["slots"])])
+                titem.addChild(citem)
+
+        if material_like:
+            for p, techs in bp.items():
+                pitem = QTreeWidgetItem(["pass: %s" % p, "%d 技术" % len(techs), ""])
+                tree.addTopLevelItem(pitem)
+                for tech in techs:
+                    add_tech(pitem, tech)
+        else:
+            root = QTreeWidgetItem(["(全部技术)", "%d 技术" % len(mm.technologies()), ""])
+            tree.addTopLevelItem(root)
+            for tech in mm.technologies():
+                add_tech(root, tech)
         tree.expandToDepth(1)
         fit_columns(tree, [0, 1, 2], pad=24, min_w=90, max_w=680)
 
