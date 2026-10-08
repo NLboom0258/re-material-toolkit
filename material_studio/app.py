@@ -145,9 +145,14 @@ class ContentSplitter(QSplitter):
             return
         m = sum(mins)
         if total >= m:
-            extra = total - m
-            sizes = [mins[i] + int(round(extra * mins[i] / m)) for i in range(n)]
+            if n == 2:
+                # 第0栏(左=blob)固定为其最小完整显示宽度(只缩不涨), 余量全给右栏
+                sizes = [mins[0], total - mins[0]]
+            else:
+                extra = total - m
+                sizes = [mins[i] + int(round(extra * mins[i] / m)) for i in range(n)]
         else:
+            # 两栏都已被压到最小仍不够 => 保持比例一起缩
             sizes = [max(1, int(round(mins[i] * total / m))) for i in range(n)]
         sizes[-1] += total - sum(sizes)
         if sizes[-1] < 1:
