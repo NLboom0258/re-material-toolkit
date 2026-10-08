@@ -8,8 +8,8 @@
   文件头(0x00..0x14):
     +0x00 'SDF\\0'; +0x04 version; +0x08 blob 区起点; +0x0c 0; +0x10 字符串指针(->技术名)
   程序表 [0x14, 0x53C): 5 条 x 264B (基础程序: PreTransform*CS / ShadowStatic / AShadowStatic)
-  变体记录 [0x568, 0x46240): 1083 条 x 264B
-  记录后区 [0x46240, blob_start): 名称池 / cbuffer 绑定表 / 参数表 / 字符串池
+  变体记录 [0x568, 0x568+(rows*cols-5)*264): 条数 = rows*cols - 5 (mmtr=1083; 见下方常量注释)
+  记录后区 [记录末, blob_start): 名称池 / cbuffer 绑定表 / 参数表 / 字符串池
   blob 区 [blob_start, EOF): 83 个标准 DXBC
 
 变体记录(264B)关键字段:
