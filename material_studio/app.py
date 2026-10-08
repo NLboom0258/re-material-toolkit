@@ -1151,7 +1151,7 @@ class MmtrPanel(QWidget):
         self.chk_pool_rdef = QCheckBox("仅按 RDEF 声明(视图)")
         self.chk_pool_rdef.setChecked(True)
         self.chk_pool_rdef.setToolTip(
-            "勾选: “贴图绑定”只显示该 blob 的 RDEF 真正声明的资源; “名称池”的引用 blob 也只按 RDEF 归因。\n"
+            "勾选: “资源绑定”只显示该 blob 的 RDEF 真正声明的资源; “名称池”的引用 blob 也只按 RDEF 归因。\n"
             "不勾选: 显示“记录引用的池”原样 —— 池常被记录共享/合并, 会把他人资源(如 VS 的\n"
             "SkinningMatrices, 或与本 shader 无关的 ATOS)一并列出。")
         self.chk_pool_rdef.stateChanged.connect(lambda *_: self._on_rdef_view_changed())
@@ -1160,7 +1160,7 @@ class MmtrPanel(QWidget):
         self.tree_blob = QTreeWidget()
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_grp = QTreeWidget()
-        self.tree_grp.setHeaderLabels(["项 / 组", "名称(池)", "类型 / 说明"])
+        self.tree_grp.setHeaderLabels(["项 / 组", "名称(池)", "类型 / 槽位"])
         self.tree_pool = QTreeWidget()
         self.tree_pool.setHeaderLabels(["贴图名(池)", "引用组数", "引用 blob"])
         self.tree_param = QTreeWidget()
@@ -1230,7 +1230,7 @@ class MmtrPanel(QWidget):
         tv.addWidget(self.ed_asm, 1)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.tree_grp, "贴图绑定")
+        self.tabs.addTab(self.tree_grp, "资源绑定")
         self.tabs.addTab(self.tree_pool, "名称池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
@@ -1242,6 +1242,7 @@ class MmtrPanel(QWidget):
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
+        split.setSizes([430, 720])      # 左栏(blob 列表)默认给足, 便于显示 SRV 列
 
         lay = QVBoxLayout(self)
         lay.addLayout(hb)
@@ -1321,7 +1322,8 @@ class MmtrPanel(QWidget):
                                   str(gcount.get(bi["off"], 0)), str(bi["n_br"])])
             it.setData(0, Qt.UserRole, i)
             self.tree_blob.addTopLevelItem(it)
-        fit_columns(self.tree_blob, [0, 1, 2, 3], pad=24, min_w=56, max_w=140)
+        fit_columns(self.tree_blob, [0, 1, 2, 3], pad=18, min_w=44, max_w=120)
+        self.tree_blob.header().setStretchLastSection(True)   # 末列(SRV)拉伸, 默认可见
         n = self.tree_blob.topLevelItemCount()
         if n:
             row = keep if isinstance(keep, int) and 0 <= keep < n else 0
@@ -1421,6 +1423,11 @@ class MmtrPanel(QWidget):
         self.refresh_params()
 
     def refresh_groups(self):
+        """资源绑定页: 当前 blob 的每个绑定组 -> cbuffer / sampler / SRV 槽。
+
+        cbuffer/sampler 只读展示; SRV(纹理)槽名可改(= 绑定键)。
+        "仅按 RDEF 声明" 过滤三者。
+        """
         self.tree_grp.clear()
         idx = self.cur_blob()
         if idx is None or self.data is None:
@@ -1428,16 +1435,32 @@ class MmtrPanel(QWidget):
         vocab = self._vocab()
         chk = getattr(self, "chk_pool_rdef", None)
         rdef = self._cur_rdef_names() if (chk is not None and chk.isChecked()) else None
+
+        def keep(lst):
+            return lst if rdef is None else [s for s in lst if s["name"] in rdef]
+
         for k, g in enumerate(group_summary(self.data, idx)):
             names = [s["name"] for s in g["srvs"]]      # 组名用全量(便于识别该组)
-            srvs = g["srvs"] if rdef is None else [s for s in g["srvs"] if s["name"] in rdef]
-            hid = len(g["srvs"]) - len(srvs)
+            all_cb, all_sm = g.get("cbufs", []), g.get("smps", [])
+            cbufs, smps, srvs = keep(all_cb), keep(all_sm), keep(g["srvs"])
+            hid = (len(all_cb) - len(cbufs) + len(all_sm) - len(smps)
+                   + len(g["srvs"]) - len(srvs))
             top = QTreeWidgetItem([f"组{k} · {group_mode(names)}", "",
                                    f"desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
-                                   f"n_rec={g['n_rec']} srv={g['b8']}"
+                                   f"n_rec={g['n_rec']} cb={len(cbufs)} smp={len(smps)} srv={len(srvs)}"
                                    + (f"  已隐藏 {hid} 项(非本 shader 声明)" if hid else "")])
             top.setData(0, Qt.UserRole, ("group", k))
             self.tree_grp.addTopLevelItem(top)
+            for s in cbufs:
+                it = QTreeWidgetItem([f"[cb {s['idx']}]", s["name"],
+                                      f"cbuffer  b{s['slot']}"])
+                it.setData(0, Qt.UserRole, ("cb", k, s["slot"], s["name"]))
+                top.addChild(it)
+            for s in smps:
+                it = QTreeWidgetItem([f"[smp {s['idx']}]", s["name"],
+                                      f"sampler  s{s['slot']}"])
+                it.setData(0, Qt.UserRole, ("smp", k, s["slot"], s["name"]))
+                top.addChild(it)
             for s in srvs:
                 tyname = TYPENAME.get(s["type"], f"0x{s['type']:02x}")
                 child = QTreeWidgetItem([f"[{s['idx']}]", "",
