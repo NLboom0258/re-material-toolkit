@@ -135,13 +135,17 @@ def group_summary(data, blob_idx):
     for (desc, pool), recs in sorted(discover_groups(data, blob_off).items(),
                                      key=lambda kv: kv[0][1]):
         r0 = recs[0]
-        cb_cnt = _u32(data, r0 + 0xac)
-        smp_cnt = _u32(data, r0 + 0xb0) >> 16
+        # 引擎的"表计数"(FUN_142b71b00 重定位用): cb=u8@+0xc6, smp=u8@+0xc7, tex=u8@+0xcc。
+        #   ⚠ cb 池长度须用 +0xc6 (=|cb(VS)∪cb(PS)|); +0xac 只是 |cb(PS)|(PS 单侧),
+        #   会漏 VS 侧 cbuffer (实测 shadow: +0xac=4 而池真实 6, 漏 CheckerBoardInfo/UserMaterial)。
+        cb_cnt = data[r0 + 0xc6]
+        smp_cnt = data[r0 + 0xc7]
+        srv_cnt = data[r0 + 0xcc]
         out.append({
             "desc": desc, "pool": pool, "n_rec": len(recs),
             "a4": _u32(data, r0 + 0xa4), "ac": cb_cnt,
-            "b8": _u32(data, r0 + 0xb8), "cc": _u32(data, r0 + 0xcc),
-            "srvs": _srvs(data, desc, pool, _u32(data, r0 + 0xcc)),
+            "b8": _u32(data, r0 + 0xb8), "cc": srv_cnt,
+            "srvs": _srvs(data, desc, pool, srv_cnt),
             "cbufs": _desc_entries(data, bs, _u32(data, r0 + 0x38),
                                    _u32(data, r0 + 0x40), cb_cnt, 32),
             "smps": _desc_entries(data, bs, _u32(data, r0 + 0x48),

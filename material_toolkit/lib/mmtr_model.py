@@ -64,7 +64,9 @@ REC_OFF_CB_DESC, REC_OFF_CB_POOL = 0x38, 0x40
 REC_OFF_SMP_DESC, REC_OFF_SMP_POOL = 0x48, 0x50
 REC_OFF_TEX_DESC, REC_OFF_TEX_POOL = 0x58, 0x60
 REC_OFF_CNT_TOTAL = 0xA4    # 资源总数 + 1
-REC_OFF_CNT_CB = 0xAC       # cbuffer 数
+REC_OFF_CNT_CB = 0xAC       # |cb(PS RDEF)| —— ⚠ PS 单侧, 非池总长(池长见 +0xC6)
+REC_OFF_CNT_CB2 = 0xC6      # u8 |cb(VS)∪cb(PS)| = cb 池条数(引擎表1计数; FUN_142b71b00)
+REC_OFF_CNT_SMP2 = 0xC7     # u8 |smp(VS)∪smp(PS)| = sampler 池条数(表2计数)
 REC_OFF_CNT_SMP_HI = 0xB0   # sampler << 16
 REC_OFF_CNT_SRV = 0xB8      # SRV 数(tex+raw+struct)
 REC_OFF_CNT_SMP_CB = 0xC4   # (sampler<<24)|(cbuffer<<16)
