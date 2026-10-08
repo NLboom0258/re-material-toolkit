@@ -50,7 +50,7 @@ from material_toolkit.lib.mmtr_assemble import (  # noqa: E402
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
-from material_toolkit.lib.rdef import replace_blob  # noqa: E402
+from material_toolkit.lib.rdef import replace_blob, rdef_cbuffers  # noqa: E402
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -110,6 +110,53 @@ def fit_columns(tree, cols, pad=28, min_w=80, max_w=600):
             widths[c] = max(widths[c], indent + fm.horizontalAdvance(item.text(c)))
     for c in cols:
         tree.setColumnWidth(c, max(min_w, min(widths[c] + pad, max_w)))
+
+
+class ContentSplitter(QSplitter):
+    """按“内容完整显示所需最小宽度”分配各栏宽度的分割器。
+
+    每栏给一个 min 提供者(返回该栏完整显示内容所需的最小宽度)。窗口缩放时:
+      - 总宽 >= 各栏最小宽度之和: 每栏至少给到最小宽度, 余量按最小宽度比例分配;
+      - 总宽 <  各栏最小宽度之和: 说明都被压到最小仍放不下 => 按最小宽度比例一起缩。
+    即“变小优先压仍大于最小宽度的栏, 都到最小后一起缩; 变大优先补仍小于最小宽度的栏”。
+    用户手动拖动会在下次窗口缩放时按上述规则重算。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._providers = []
+
+    def set_providers(self, providers):
+        self._providers = list(providers)
+        self.relayout()
+
+    def relayout(self):
+        n = self.count()
+        if n == 0 or len(self._providers) != n:
+            return
+        mins = []
+        for f in self._providers:
+            try:
+                mins.append(max(1, int(f())))
+            except Exception:  # noqa: BLE001
+                mins.append(1)
+        total = self.width() - self.handleWidth() * (n - 1)
+        if total <= 0:
+            return
+        m = sum(mins)
+        if total >= m:
+            extra = total - m
+            sizes = [mins[i] + int(round(extra * mins[i] / m)) for i in range(n)]
+        else:
+            sizes = [max(1, int(round(mins[i] * total / m))) for i in range(n)]
+        sizes[-1] += total - sum(sizes)
+        if sizes[-1] < 1:
+            sizes[-1] = 1
+        self.setSizes(sizes)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.relayout()
 
 
 def attach_menu(tree, build_actions):
@@ -1162,7 +1209,7 @@ class MmtrPanel(QWidget):
         self.tree_grp = QTreeWidget()
         self.tree_grp.setHeaderLabels(["项 / 组", "名称(池)", "类型 / 槽位"])
         self.tree_pool = QTreeWidget()
-        self.tree_pool.setHeaderLabels(["贴图名(池)", "引用组数", "引用 blob"])
+        self.tree_pool.setHeaderLabels(["资源名(池)", "引用组数", "引用 blob"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
         self.tree_variant = QTreeWidget()
@@ -1231,18 +1278,21 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "资源绑定")
-        self.tabs.addTab(self.tree_pool, "名称池")
+        self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
         self.tabs.addTab(self.tree_variant, "变体")
         self.tabs.addTab(self.tab_blob, "Blob(shader)")
 
-        split = QSplitter(Qt.Horizontal)
+        split = ContentSplitter(self)
         split.addWidget(self.tree_blob)
         split.addWidget(self.tabs)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        split.setSizes([430, 720])      # 左栏(blob 列表)默认给足, 便于显示 SRV 列
+        split.set_providers([
+            lambda: self._tree_min_width(self.tree_blob),
+            lambda: self._right_min_width(),
+        ])
+        self._split = split
+        self.tabs.currentChanged.connect(lambda *_: self._relayout())
 
         lay = QVBoxLayout(self)
         lay.addLayout(hb)
@@ -1322,8 +1372,8 @@ class MmtrPanel(QWidget):
                                   str(gcount.get(bi["off"], 0)), str(bi["n_br"])])
             it.setData(0, Qt.UserRole, i)
             self.tree_blob.addTopLevelItem(it)
-        fit_columns(self.tree_blob, [0, 1, 2, 3], pad=18, min_w=44, max_w=120)
-        self.tree_blob.header().setStretchLastSection(True)   # 末列(SRV)拉伸, 默认可见
+        fit_columns(self.tree_blob, [0, 1, 2, 3, 4], pad=12, min_w=36, max_w=150)
+        self._relayout()
         n = self.tree_blob.topLevelItemCount()
         if n:
             row = keep if isinstance(keep, int) and 0 <= keep < n else 0
@@ -1384,6 +1434,7 @@ class MmtrPanel(QWidget):
                 add_tech(root, tech)
         tree.expandToDepth(1)
         fit_columns(tree, [0, 1, 2], pad=24, min_w=90, max_w=680)
+        self._relayout()
 
     @staticmethod
     def _dim_label(d):
@@ -1421,6 +1472,48 @@ class MmtrPanel(QWidget):
         self._sync_editor_to_blob(self.cur_blob())
         self.refresh_groups()
         self.refresh_params()
+        self._relayout()
+
+    # ---- 两栏“内容完整显示所需最小宽度” ----
+    @staticmethod
+    def _tree_min_width(tree, slack=26):
+        """该树“完整显示内容”所需的最小宽度(自然内容宽, 不含当前拉伸)。"""
+        if not isinstance(tree, QTreeWidget):
+            return 0
+        nc = tree.columnCount()
+        if nc == 0:
+            return 0
+        fm = tree.fontMetrics()
+        hdr = tree.headerItem()
+        w = 0
+        for c in range(nc):
+            cw = tree.sizeHintForColumn(c)
+            if hdr is not None:
+                cw = max(cw, fm.horizontalAdvance(hdr.text(c)))
+            w += cw + tree.indentation()
+        w += 2 * tree.frameWidth()
+        sb = tree.verticalScrollBar()
+        if sb is not None:
+            w += sb.sizeHint().width()
+        return w + slack
+
+    def _right_min_width(self):
+        w = self.tabs.currentWidget()
+        mw = self._tree_min_width(w) if isinstance(w, QTreeWidget) else 0
+        return max(mw, 360)
+
+    def _relayout(self):
+        sp = getattr(self, "_split", None)
+        if sp is not None:
+            sp.relayout()
+
+    def _blob_cbuffer_members(self, idx):
+        """当前 blob 的 RDEF cbuffer -> {cbuffer 名: [(成员, offset, size), ...]}。"""
+        try:
+            cbs = rdef_cbuffers(extract_blob(self.data, idx)) or []
+        except Exception:  # noqa: BLE001
+            return {}
+        return {name: mem for (name, _size, mem) in cbs}
 
     def refresh_groups(self):
         """资源绑定页: 当前 blob 的每个绑定组 -> cbuffer / sampler / SRV 槽。
@@ -1439,6 +1532,7 @@ class MmtrPanel(QWidget):
         def keep(lst):
             return lst if rdef is None else [s for s in lst if s["name"] in rdef]
 
+        cb_members = self._blob_cbuffer_members(idx)
         for k, g in enumerate(group_summary(self.data, idx)):
             names = [s["name"] for s in g["srvs"]]      # 组名用全量(便于识别该组)
             all_cb, all_sm = g.get("cbufs", []), g.get("smps", [])
@@ -1456,6 +1550,8 @@ class MmtrPanel(QWidget):
                                       f"cbuffer  b{s['slot']}"])
                 it.setData(0, Qt.UserRole, ("cb", k, s["slot"], s["name"]))
                 top.addChild(it)
+                for (mn, mo, ms) in cb_members.get(s["name"], []):
+                    it.addChild(QTreeWidgetItem(["", mn, f"@off {mo}  size {ms}"]))
             for s in smps:
                 it = QTreeWidgetItem([f"[smp {s['idx']}]", s["name"],
                                       f"sampler  s{s['slot']}"])
