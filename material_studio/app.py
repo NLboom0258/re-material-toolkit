@@ -1292,7 +1292,9 @@ class MmtrPanel(QWidget):
         self._emit_title()
 
     def open_mmtr(self):
-        p, _ = QFileDialog.getOpenFileName(self, "打开 mmtr", "", "mmtr (*.mmtr.*);;所有文件 (*)")
+        p, _ = QFileDialog.getOpenFileName(
+            self, "打开 mmtr/SDF", "",
+            "mmtr/SDF (*.mmtr.* *.sdf.*);;mmtr (*.mmtr.*);;SDF (*.sdf.*);;所有文件 (*)")
         if not p:
             return
         if self._container is not None:
@@ -4044,7 +4046,7 @@ class FunctionLibPanel(QWidget):
 
 
 class MmtrTabs(QTabWidget):
-    """MMTR 多文件容器: 每个打开的 mmtr 一个标签页。
+    """MMTR/SDF 多文件容器: 每个打开的 mmtr/sdf 一个标签页。
 
     - 标签可关闭 / 可拖动重排; 右上角「新建 mmtr…」(从模板克隆) 与「打开 mmtr…」;
     - mmtr 无法真正从 0 新建(与 mdf2 不同), 故“新建”= 选一个现有 mmtr 当模板克隆;
@@ -4066,8 +4068,8 @@ class MmtrTabs(QTabWidget):
         btn_new = QPushButton("新建 mmtr…")
         btn_new.setToolTip("从模板克隆新建 mmtr(选一个现有 mmtr 作为模板)")
         btn_new.clicked.connect(self.new_dialog)
-        btn_open = QPushButton("打开 mmtr…")
-        btn_open.setToolTip("打开一个 mmtr 文件(新标签页)")
+        btn_open = QPushButton("打开 mmtr/SDF…")
+        btn_open.setToolTip("打开一个 mmtr/SDF 文件(新标签页)")
         btn_open.clicked.connect(self.open_dialog)
         btn_asm = QPushButton("装配…")
         btn_asm.setToolTip("以当前(或选定)mmtr 为模板, 按规格装配程序 -> 新标签页")
@@ -4107,7 +4109,9 @@ class MmtrTabs(QTabWidget):
         return self._add_panel(panel)
 
     def open_dialog(self):
-        p, _ = QFileDialog.getOpenFileName(self, "打开 mmtr", "", "mmtr (*.mmtr.*);;所有文件 (*)")
+        p, _ = QFileDialog.getOpenFileName(
+            self, "打开 mmtr/SDF", "",
+            "mmtr/SDF (*.mmtr.* *.sdf.*);;mmtr (*.mmtr.*);;SDF (*.sdf.*);;所有文件 (*)")
         if p:
             self.open_path(p)
 
@@ -4172,8 +4176,8 @@ class MmtrTabs(QTabWidget):
         w = QWidget()
         v = QVBoxLayout(w)
         v.addStretch(1)
-        lab = QLabel("尚未打开 mmtr。\n点击右上角「打开 mmtr…」或「新建 mmtr…」"
-                     "(从模板克隆)，或把 .mmtr 文件拖进窗口。")
+        lab = QLabel("尚未打开 mmtr/SDF。\n点击右上角「打开 mmtr…」或「新建 mmtr…」"
+                     "(从模板克隆)，或把 .mmtr/.sdf 文件拖进窗口。")
         lab.setAlignment(Qt.AlignCenter)
         lab.setStyleSheet("color:#888;")
         v.addWidget(lab)
@@ -4261,14 +4265,14 @@ class Mdf2Tabs(QTabWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Material Studio — mmtr / mdf2")
+        self.setWindowTitle("Material Studio — mmtr/sdf / mdf2")
         self.resize(1150, 720)
         tabs = QTabWidget()
         self.mmtr = MmtrTabs()
         self.mdf2 = Mdf2Tabs()
         self.msys = MaterialSystemPanel()
         self.funcs = FunctionLibPanel()
-        tabs.addTab(self.mmtr, "MMTR")
+        tabs.addTab(self.mmtr, "MMTR/SDF")
         tabs.addTab(self.mdf2, "MDF2")
         tabs.addTab(self.msys, "材质系统")
         tabs.addTab(self.funcs, "函数库")
@@ -4289,7 +4293,7 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, e):
         paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        mmtr = [p for p in paths if ".mmtr." in p.lower()]
+        mmtr = [p for p in paths if ".mmtr." in p.lower() or ".sdf." in p.lower()]
         mdf2 = [p for p in paths if ".mdf2." in p.lower()]
         if mmtr:
             for p in mmtr:

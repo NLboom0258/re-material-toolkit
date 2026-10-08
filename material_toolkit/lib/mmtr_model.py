@@ -27,6 +27,7 @@
 名称池 16B: [name_off(u64)][hash(u32)][0(u32)]。
 """
 import re
+import struct
 
 try:
     from .binding import blob_list, discover_groups, _u32, _u64, _str
@@ -41,7 +42,19 @@ HEADER_MAGIC = b"SDF\0"
 
 # 固定骨架(version 0x01100004)
 PRE_LO, PRE_N, PRE_SIZE = 0x14, 5, 264          # 程序表: [0x14, 0x53C)
-REC_LO, REC_HI, REC_SIZE = 0x568, 0x46240, 264  # 变体记录: [0x568, 0x46240)
+REC_LO, REC_SIZE = 0x568, 264                   # 变体记录基址 / 步长
+REC_HDR_ROWS, REC_HDR_COLS = 0x04, 0x06         # 头部 rows/cols 字段偏移(u16)
+REC_SKIP = 5                                    # 跳过的前 5 条(= PRE_N)
+# 变体记录区(实测逆清, 2026-10-08):
+#   基址 REC_LO=0x568(= 0x40 + 5*264; 跳过头部 5 条“基础程序”), 步长 264;
+#   条数 = rows*cols - 5。对 mmtr: 4*272-5 = 1083(与原硬编码一致);
+#   对任意 SDF 容器均成立(fog 等小文件 n=0) ⇒ 不再因固定末端越界而崩。
+#   (真实完整表基址=0x40/rows*cols; 本只读视图从 0x568 起, 与 mmtr_build 布局口径一致。)
+REC_HI = 0x46240                                # 仅 mmtr 的记录区末端(兼容保留; 不再用于计数)
+
+
+def _u16(d, o):
+    return struct.unpack_from("<H", d, o)[0]
 
 # 变体记录字段偏移
 REC_OFF_BLOB = 0x00
@@ -264,7 +277,7 @@ class MmtrModel:
 
     def parse_records(self):
         if self.records is None:
-            n = (REC_HI - REC_LO) // REC_SIZE
+            n = self.record_count()
             self.records = [VariantRecord(self.data, REC_LO + i * REC_SIZE)
                             for i in range(n)]
         return self.records
@@ -275,7 +288,23 @@ class MmtrModel:
                 yield r
 
     def record_count(self):
-        return (REC_HI - REC_LO) // REC_SIZE
+        """变体记录条数 = rows*cols - 5(见文件头注释)。
+
+        对 mmtr: 4*272-5 = 1083(与原硬编码一致); 对任意 SDF 容器成立(小文件 n=0),
+        不再因固定 REC_HI 越界而崩。头部异常/越界时以 blob_start 收口。
+        """
+        try:
+            rows = _u16(self.data, REC_HDR_ROWS)
+            cols = _u16(self.data, REC_HDR_COLS)
+        except Exception:  # noqa: BLE001
+            return 0
+        n = rows * cols - REC_SKIP
+        maxn = (self.blob_start - REC_LO) // REC_SIZE
+        if maxn < 0:
+            maxn = 0
+        if n > maxn:
+            n = maxn
+        return n if n > 0 else 0
 
     def empty_record_count(self):
         return sum(1 for r in self.parse_records() if r.is_empty)
