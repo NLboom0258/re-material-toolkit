@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """mmtr/blob 摘要辅助(供 CLI/GUI 展示)。
 
-- blob_stage: 由 RDEF 的 Target 字段映射阶段(实测: 0xfffe0500=VS, 0xffff0500=PS,
-  0x43530500=CS; 与已知分布一致: env blob0-3=蒙皮CS, blob33=主GBuffer PS, 其余多为VS)。
+- blob_stage: 由 RDEF 的 Target 字段映射阶段。token 高16位=类型(ASCII 大类, VS/PS 为特殊码),
+  低16位=版本(0x0500=SM5.0 / 0x0501=SM5.1) ⇒ 支持 VS/PS/GS/HS/DS/CS 及 SM5.1(带 "(5.1)" 标注)。
 - group_mode: 由该组池里的"引擎 raw buffer 名"判断该组的顶点处理模式。
 """
 import struct
@@ -14,7 +14,27 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from binding import blob_list
 
-TARGET_STAGE = {0xFFFE0500: "VS", 0xFFFF0500: "PS", 0x43530500: "CS"}
+# 阶段 token: 高16位=类型(ASCII 大类; VS/PS 为特殊码), 低16位=版本(0x0500=SM5.0 / 0x0501=SM5.1)。
+_STAGE_TYPE = {0xFFFE: "VS", 0xFFFF: "PS", 0x4753: "GS",
+               0x4853: "HS", 0x4453: "DS", 0x4353: "CS"}
+
+
+def stage_label(target):
+    """RDEF target -> 阶段标签(带 SM5.1 标注); 未知码则 0x 十六进制。"""
+    if target is None:
+        return "?"
+    name = _STAGE_TYPE.get((target >> 16) & 0xFFFF)
+    if name is None:
+        return "0x%08x" % target
+    lo = target & 0xFFFF
+    if ((lo >> 8) & 0xF) == 5 and (lo & 0xF) == 1:
+        return name + " (5.1)"
+    return name
+
+
+# 兼容保留: 具体 token -> 阶段(不带版本标注)
+TARGET_STAGE = dict({(t << 16) | 0x0500: n for t, n in _STAGE_TYPE.items()})
+TARGET_STAGE.update({(t << 16) | 0x0501: n for t, n in _STAGE_TYPE.items()})
 
 # 组的"顶点处理模式"由这些 raw buffer 名组合决定
 _RAW_MODES = [("SkinningMatrices", "Skinning"),
@@ -42,7 +62,7 @@ def blob_info(data, idx):
     if target is None:
         stage = "?"
     else:
-        stage = TARGET_STAGE.get(target, f"0x{target:08x}")
+        stage = stage_label(target)
     return {"idx": idx, "off": off, "size": size, "stage": stage,
             "n_cb": n_cb, "n_br": n_br, "target": target}
 
