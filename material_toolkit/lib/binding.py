@@ -101,8 +101,32 @@ def _srvs(data, desc, pool, count):
     return out
 
 
+def _desc_entries(data, bs, desc, pool, count, pool_stride):
+    """读 (desc, pool) 对的 count 条绑定 -> [{idx,type,slot,name,hash}]。
+
+    pool_stride: 池条目步长(**cbuffer 池=32B**, sampler/纹理池=16B)。
+    desc 指向"首条前 4B 头"; 描述符 code=(type<<24)|(stage<<16)|slot。
+    """
+    out = []
+    for i in range(min(count, 64)):
+        po = pool + i * pool_stride
+        if po + 16 > len(data):
+            break
+        no = _u64(data, po)
+        h = _u32(data, po + 8)
+        if not (0x1000 <= no < bs):
+            break
+        nm = _str(data, no)
+        if not nm:
+            break
+        code = _u32(data, desc + 4 + i * 8)
+        out.append({"idx": i, "type": (code >> 24) & 0xFF, "slot": code & 0xFFFF,
+                    "name": nm, "hash": h})
+    return out
+
+
 def group_summary(data, blob_idx):
-    """列出某 blob 的所有绑定组(含池名/槽位, 供 CLI/dump)。"""
+    """列出某 blob 的所有绑定组(含 cbuffer / sampler / SRV 槽名与槽位, 供 CLI/GUI)。"""
     bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError(f"blob idx {blob_idx} out of range (0..{len(bl) - 1})")
@@ -111,11 +135,17 @@ def group_summary(data, blob_idx):
     for (desc, pool), recs in sorted(discover_groups(data, blob_off).items(),
                                      key=lambda kv: kv[0][1]):
         r0 = recs[0]
+        cb_cnt = _u32(data, r0 + 0xac)
+        smp_cnt = _u32(data, r0 + 0xb0) >> 16
         out.append({
             "desc": desc, "pool": pool, "n_rec": len(recs),
-            "a4": _u32(data, r0 + 0xa4), "ac": _u32(data, r0 + 0xac),
+            "a4": _u32(data, r0 + 0xa4), "ac": cb_cnt,
             "b8": _u32(data, r0 + 0xb8), "cc": _u32(data, r0 + 0xcc),
             "srvs": _srvs(data, desc, pool, _u32(data, r0 + 0xcc)),
+            "cbufs": _desc_entries(data, bs, _u32(data, r0 + 0x38),
+                                   _u32(data, r0 + 0x40), cb_cnt, 32),
+            "smps": _desc_entries(data, bs, _u32(data, r0 + 0x48),
+                                  _u32(data, r0 + 0x50), smp_cnt, 16),
         })
     return out
 
