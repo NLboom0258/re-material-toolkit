@@ -57,18 +57,41 @@ def blob_offsets(data):
     return [o for o, _ in blob_list(data)[1]]
 
 
+# 记录的程序槽: (指针字段偏移, 大小字段偏移) —— 相对记录基址(以 PS@+0x00 为准)。
+#   VS(-0x20)/HS(-0x18)/DS(-0x10)/GS(-0x08)/PS(+0x00)/CS(+0x08); 大小字段见 analysis/mmtr_record_fields.md。
+_PROG_SLOTS = ((-0x20, 0x8C), (-0x18, 0x90), (-0x10, 0x94),
+               (-0x08, 0x98), (0x00, 0x9C), (0x08, 0xA0))
+# 变体记录区(与 mmtr_model 同约定): 基址 0x568 / 步长 264 / 条数 rows*cols-5。
+_REC_LO, _REC_SIZE, _REC_SKIP = 0x568, 264, 5
+
+
+def _record_bases(data):
+    """变体记录基址列表(按头部 rows/cols 算; 以 blob_start 收口)。"""
+    bs = _u32(data, 8)
+    rows = struct.unpack_from("<H", data, 4)[0]
+    cols = struct.unpack_from("<H", data, 6)[0]
+    n = rows * cols - _REC_SKIP
+    maxn = max(0, (bs - _REC_LO) // _REC_SIZE)
+    if n > maxn:
+        n = maxn
+    return [_REC_LO + i * _REC_SIZE for i in range(n if n > 0 else 0)]
+
+
 def discover_groups(data, blob_off):
-    """返回该 blob 引用的所有唯一 (desc_ptr, pool_ptr) -> [记录偏移, ...]。
+    """返回该 blob 被引用的所有唯一 (desc_ptr, pool_ptr) -> [记录偏移, ...]。
 
     组 = 一个"池+描述符"绑定; 同一 shader 程序可有多个组(不同 pass)。
+    ⚠ blob 可出现在记录的**任意程序槽**(VS/HS/DS/GS/PS/CS); 故按真实记录基址遍历并
+      匹配全部 6 个槽(原实现只掃所有 4B 位置看 PS@+0x00 ⇒ 选 VS/CS 返回空)。
     """
-    bs, bl = blob_list(data)
-    size_of = dict(bl)
+    size = dict(blob_list(data)[1]).get(blob_off)
     groups = {}
-    for p in range(0, bs - 3, 4):
-        if _u32(data, p) == blob_off and _u32(data, p + 0x9c) == size_of.get(blob_off):
-            key = (_u32(data, p + 0x58), _u32(data, p + 0x60))
-            groups.setdefault(key, []).append(p)
+    for p in _record_bases(data):
+        for po, so in _PROG_SLOTS:
+            if _u32(data, p + po) == blob_off and _u32(data, p + so) == size:
+                key = (_u32(data, p + 0x58), _u32(data, p + 0x60))
+                groups.setdefault(key, []).append(p)
+                break
     return groups
 
 
