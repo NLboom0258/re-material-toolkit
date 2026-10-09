@@ -93,15 +93,29 @@ def rebuild_from_rdef(data, blob_patch=None):
             _bo[i] = (tuple(o["cb"]), tuple(o["smp"]), tuple(o["tex"]))
         return _bo[i]
 
+    pa_by_off = {pe[0]: pe for pe in t.param_entries}
+    stored_cb = {}
+    for _e in t.cbuffer_entries:
+        _mem = []
+        for _j in range(_e["count"]):
+            _pe = pa_by_off.get(_e["members_off"] + 16 * _j)
+            if _pe is None:
+                break
+            _mem.append((_pe[5], _pe[3], _pe[4]))
+        stored_cb.setdefault(_e["name"], (_e["size"], _e["count"], tuple(_mem)))
+
     def derived(vs_idx, ps_idx):
-        """由 VS/PS RDEF(blob 下标, 可 None) 派生一个绑定组: cb 定义 + smp/tex 名 + 描述符条目。"""
+        """由 VS/PS RDEF(blob 下标, 可 None) 派生一个绑定组: cb 定义 + smp/tex 名 + 描述符条目。
+
+        cb **定义**优先用容器存储的(稳定、decode 友好; P1 不改 cbuffer); 缺则退回 RDEF 解析。
+        """
         vi = bind_info(vs_idx) if vs_idx is not None else {}
         pi = bind_info(ps_idx) if ps_idx is not None else {}
         vo = bind_order(vs_idx) if vs_idx is not None else ((), (), ())
         po = bind_order(ps_idx) if ps_idx is not None else ((), (), ())
         grp = {k: _dedup(list(vo[j]) + list(po[j]))
                for j, k in enumerate(("cb", "smp", "tex"))}
-        cbd = {}
+        cbd = dict(stored_cb)
         for i in (ps_idx, vs_idx):
             if i is None:
                 continue
@@ -311,16 +325,29 @@ def rebuild_from_rdef(data, blob_patch=None):
     return bytes(head) + new_tail + b"".join(blob_bytes)
 
 
-def add_texture(data, blob_idx, name, slot=None):
-    """给 blob 的 RDEF 加一条 Texture2D(`name`@slot), 再按 RDEF 重建整个容器。
+# 按类别加"绑定资源"的 RDEF 字段预设(实测自原版 bound resource 原始字段)。
+#   ⚠ cbuffer(type=0) **不支持**: 它除绑定项外还需 RDEF 里的 cbuffer **定义表**(成员), add_bound_resource 不建它
+#   (与设计一致: cbuffer 引用需改 shader 源); UAV 因种类多(type 4/6/8/…) 未预置。
+RESOURCE_KINDS = {
+    "tex2d": dict(type_=2, ret=5, dim=4, nsamp=0xFFFFFFFF, flags=0xC),  # Texture2D (SRV)
+    "buf":   dict(type_=7, ret=6, dim=1, nsamp=0, flags=0),            # ByteAddress Buffer (SRV)
+    "smp":   dict(type_=3, ret=0, dim=0, nsamp=0, flags=0),            # Sampler
+}
+_KIND_TYPES = {"tex2d": (2,), "buf": (7,), "smp": (3,)}
 
-    slot=None 取该 blob 现有纹理寄存器之后的下一个。**同 blob 已声明同名则报错**(去重)。
+
+def add_resource(data, blob_idx, cat, name, slot=None):
+    """给 blob 的 RDEF 加一条绑定资源(cat ∈ RESOURCE_KINDS), 再按 RDEF 重建整个容器。
+
+    slot=None 取该类别现有 bind point 之后的下一个。**同 blob 已声明同名则报错**(去重)。
     返回新容器 bytes。
     """
     try:
         from .rdef import add_bound_resource, rdef_bind_info, blob_list
     except ImportError:
         from rdef import add_bound_resource, rdef_bind_info, blob_list
+    if cat not in RESOURCE_KINDS:
+        raise ValueError("未知资源类别: %s" % cat)
     _bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
@@ -330,13 +357,19 @@ def add_texture(data, blob_idx, name, slot=None):
     if any(nm == name for (nm, _t, _bp, _d, _r) in info):
         raise ValueError("该 blob 已声明资源: %s" % name)
     if slot is None:
-        used = [bp for (nm, tt, bp, _d, _r) in info if tt in (1, 2, 5, 7)]
+        types = _KIND_TYPES[cat]
+        used = [bp for (nm, tt, bp, _d, _r) in info if tt in types]
         slot = (max(used) + 1) if used else 0
-    new_blob = add_bound_resource(blob, name, slot)
+    new_blob = add_bound_resource(blob, name, slot, **RESOURCE_KINDS[cat])
     out = rebuild_from_rdef(data, {blob_idx: new_blob})
     if out is None:
         raise ValueError("非主版本(0x01100004)容器, 暂不支持 RDEF 重建")
     return out
+
+
+def add_texture(data, blob_idx, name, slot=None):
+    """[兼容包装] 给 blob 的 RDEF 加一条 Texture2D 并重建。"""
+    return add_resource(data, blob_idx, "tex2d", name, slot)
 
 
 def _ascii(b, o, n=128):

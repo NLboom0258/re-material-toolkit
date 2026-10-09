@@ -55,7 +55,7 @@ from material_toolkit.lib.rdef import (  # noqa: E402
 from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
-from material_toolkit.lib.mmtr_rdefgen import add_texture  # noqa: E402
+from material_toolkit.lib.mmtr_rdefgen import add_resource  # noqa: E402
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -1284,7 +1284,7 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(wrap_with_add_button(
-            self.tree_grp, "＋ 添加纹理(SRV)", self.add_texture_srv), "资源绑定")
+            self.tree_grp, "＋ 添加资源", self.add_resource_dialog), "资源绑定")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
@@ -1776,30 +1776,39 @@ class MmtrPanel(QWidget):
             return
         self._reload_after_edit()
 
-    def add_texture_srv(self):
-        """资源绑定页: 给当前 blob 的 RDEF 加一条 Texture2D(名 = mdf2 的贴图类型名),
-        再**按 RDEF 重建整个容器**(组/资源名池/字符串池自动更新)。"""
+    def add_resource_dialog(self):
+        """资源绑定页: 给当前 blob 的 RDEF 加一条绑定资源(选类别 + 名), 再**按 RDEF 重建整个容器**。
+
+        可直接选容器现有名, 也可自定义。cbuffer 不在列(需定义表/改 shader 源, 见 mmtr_rdefgen 注释)。
+        """
         if self.data is None:
             QMessageBox.warning(self, "提示", "请先打开 mmtr/SDF")
             return
         idx = self.cur_blob()
+        kinds = [("tex2d", "纹理2D (SRV)"), ("buf", "缓冲/ByteAddress (SRV)"),
+                 ("smp", "采样器")]
+        lab, ok = QInputDialog.getItem(self, "添加资源", "类别:",
+                                       [t for _k, t in kinds], 0, False)
+        if not ok:
+            return
+        cat = next(k for k, t in kinds if t == lab)
         try:
             vocab = derive_namepool(self.data)
-            items = sorted(nm for nm, d in vocab.items() if "tex" in d["cats"])
+            items = sorted(nm for nm, d in vocab.items()
+                           if ("smp" in d["cats"]) == (cat == "smp"))
         except Exception:  # noqa: BLE001
             items = []
         name, ok = QInputDialog.getItem(
-            self, "添加纹理(SRV)",
-            "纹理名(= mdf2 贴图类型; 可选现有或自定义):", items, 0, True)
+            self, "添加资源", "名称(= mdf2 的类型; 可选现有或自定义):", items, 0, True)
         if not (ok and name):
             return
         try:
-            self.data = add_texture(self.data, idx, name)
+            self.data = add_resource(self.data, idx, cat, name)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
         self._reload_after_edit(full=True)
-        QMessageBox.information(self, "添加纹理", "已加 %s, 并重建容器。" % name)
+        QMessageBox.information(self, "添加资源", "已加 %s(%s), 并重建容器。" % (name, cat))
 
     # ---- Blob(shader) 编辑 ----
     def disasm_cur_blob(self):
