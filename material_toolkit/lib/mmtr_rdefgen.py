@@ -172,34 +172,15 @@ def rebuild_from_rdef(data, blob_patch=None):
         slot_gk[(kind, i)] = key
     use(name_at(u32(0x10)))
 
-    smp_uniq, tex_uniq, cb_uniq, param_rel = {}, {}, {}, {}
-    smp_order, tex_order, cb_order = [], [], []
+    smp_uniq, tex_uniq = {}, {}
+    smp_order, tex_order = [], []
     for gk in gorder:
         g = groups[gk]
         for key, uniq, order in ((tuple(g["smp"]), smp_uniq, smp_order),
-                                 (tuple(g["tex"]), tex_uniq, tex_order),
-                                 (tuple(g["cb"]), cb_uniq, cb_order)):
+                                 (tuple(g["tex"]), tex_uniq, tex_order)):
             if key not in uniq:
                 uniq[key] = None
                 order.append(key)
-
-    param, param_name_at = bytearray(), []
-    for ck in cb_order:
-        for d in ck:
-            if d in param_rel:
-                continue
-            param_rel[d] = len(param)
-            for (mn, ms, mo) in d[3]:
-                param_name_at.append((len(param), mn))
-                param += struct.pack("<IIII", 0, 0, ascii_hash(mn), (ms << 16) | mo)
-
-    cb, cb_name_at, cb_mem_at = bytearray(), [], []
-    for ck in cb_order:
-        cb_uniq[ck] = len(cb)
-        for d in ck:
-            cb_name_at.append((len(cb), d[0]))
-            cb_mem_at.append((len(cb), d))
-            cb += struct.pack("<QIIIIQ", 0, ascii_hash(d[0]), 0, d[1], d[2], 0)
 
     pool, pool_name_at = bytearray(), []
     for sk in smp_order:
@@ -212,6 +193,15 @@ def rebuild_from_rdef(data, blob_patch=None):
         for nm in tk:
             pool_name_at.append((len(pool), nm))
             pool += struct.pack("<QII", 0, ascii_hash(nm), 0)
+
+    # cbuffer 表 + 参数表: **原样保留**(P1 不改 cbuffer), 仅重定位内部指针 => 保证 TailModel.decode 友好
+    #   (RDEF 重派生会改变 param 顺序, 首条若为 0 尺寸成员会破坏 decode 的 cb 段识别)。
+    orig_cb, orig_param = bnd["cbuffer"], bnd["param"]
+    cb_sec, param_sec = bytes(t.sections["cbuffer"]), bytes(t.sections["param"])
+    for _e in t.cbuffer_entries:
+        use(_e["name"])
+    for _pe in t.param_entries:
+        use(_pe[5])
 
     # 描述符区: 4B 头 + 各**唯一段**([cb]/[smp]/[tex] 的条目序列按内容去重, 跨组共享);
     #   记录 +0x38/+0x48/+0x58 = 对应段起点。
@@ -234,23 +224,24 @@ def rebuild_from_rdef(data, blob_patch=None):
         str_rel[nm] = len(str_pool)
         str_pool += nm.encode("latin1", "replace") + b"\x00"
 
-    cb_rel = {gk: cb_uniq[tuple(groups[gk]["cb"])] for gk in gorder}
     smp_rel = {gk: smp_uniq[tuple(groups[gk]["smp"])] for gk in gorder}
     tex_rel = {gk: tex_uniq[tuple(groups[gk]["tex"])] for gk in gorder}
 
     pool_base = SKELETON_HI
     cb_base = pool_base + len(pool)
-    param_base = cb_base + len(cb)
-    desc_base = param_base + len(param)
+    param_base = cb_base + len(cb_sec)
+    desc_base = param_base + len(param_sec)
     str_base = desc_base + len(desc)
     for off, nm in pool_name_at:
         struct.pack_into("<Q", pool, off, str_base + str_rel[nm])
-    for off, nm in cb_name_at:
-        struct.pack_into("<Q", cb, off, str_base + str_rel[nm])
-    for off, d in cb_mem_at:
-        struct.pack_into("<Q", cb, off + 24, param_base + param_rel[d])
-    for off, nm in param_name_at:
-        struct.pack_into("<I", param, off, str_base + str_rel[nm])
+    cb = bytearray(cb_sec)
+    for _e in t.cbuffer_entries:
+        struct.pack_into("<Q", cb, _e["off"] - orig_cb, str_base + str_rel[_e["name"]])
+        struct.pack_into("<Q", cb, _e["off"] - orig_cb + 24,
+                         param_base + (_e["members_off"] - orig_param))
+    param = bytearray(param_sec)
+    for _pe in t.param_entries:
+        struct.pack_into("<I", param, _pe[0] - orig_param, str_base + str_rel[_pe[5]])
 
     new_tail = bytes(pool) + bytes(cb) + bytes(param) + bytes(desc) + bytes(str_pool)
     new_bs = SKELETON_HI + len(new_tail)
@@ -291,9 +282,12 @@ def rebuild_from_rdef(data, blob_patch=None):
         if gk is not None:
             for fo, drel in ((0x38, "cb"), (0x48, "smp"), (0x58, "tex")):
                 struct.pack_into("<I", head, base + fo, desc_base + desc_rel[gk][drel])
-            struct.pack_into("<I", head, base + 0x40, cb_base + cb_rel[gk])
             struct.pack_into("<I", head, base + 0x50, pool_base + smp_rel[gk])
             struct.pack_into("<I", head, base + 0x60, pool_base + tex_rel[gk])
+        # cbuffer 指针: 原样保留(相对原 cb 区), 重定位到新 cb 区
+        ocb = u32(base + 0x40)
+        if orig_cb <= ocb < orig_param:
+            struct.pack_into("<I", head, base + 0x40, cb_base + (ocb - orig_cb))
         for fo in (0xD8, 0x104):
             v = u32(base + fo)
             nm = name_at(v)
