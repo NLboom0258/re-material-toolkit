@@ -22,7 +22,7 @@ MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/fl
 import os
 import re
 import sys
-from collections import namedtuple
+from collections import Counter, namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # 仓库根(material_studio 的上级)
@@ -30,8 +30,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from material_toolkit.lib.binding import (  # noqa: E402
-    add_texture_slot,
-    name_vocabulary, rename_name_global, _blob_rdef_names,
+    add_texture_slot, rename_name_global,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
@@ -53,6 +52,7 @@ from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  
 from material_toolkit.lib.rdef import (  # noqa: E402
     replace_blob, rdef_cbuffers, rdef_bind_info, rdef_stage,
 )
+from material_toolkit.lib.derive import derive_groups, derive_namepool  # noqa: E402
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -1205,21 +1205,15 @@ class MmtrPanel(QWidget):
         for b in (self.btn_open, self.btn_add, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
-        self.chk_pool_rdef = QCheckBox("资源名池: 仅按 RDEF 声明")
-        self.chk_pool_rdef.setChecked(True)
-        self.chk_pool_rdef.setToolTip(
-            "勾选: “资源名池”的引用 blob 按 RDEF 归因(只算真正声明该资源的 shader)。\n"
-            "不勾选: 按“记录引用的池”原样 —— 池常被记录共享/合并, 会把他人资源\n"
-            "(如 VS 的 SkinningMatrices, 或与本 shader 无关的 ATOS)一并列出。")
-        self.chk_pool_rdef.stateChanged.connect(lambda *_: self._on_rdef_view_changed())
-        hb.addWidget(self.chk_pool_rdef)
 
         self.tree_blob = QTreeWidget()
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_grp = QTreeWidget()
         self.tree_grp.setHeaderLabels(["项 / 类", "名称", "类型 / 槽位"])
         self.tree_pool = QTreeWidget()
-        self.tree_pool.setHeaderLabels(["资源名(池)", "引用组数", "引用 blob"])
+        self.tree_pool.setHeaderLabels(["资源名", "类别", "引用 blob"])
+        self.tree_group = QTreeWidget()
+        self.tree_group.setHeaderLabels(["组", "代表 / 成员", "记录·blob·内容"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
         self.tree_variant = QTreeWidget()
@@ -1288,6 +1282,7 @@ class MmtrPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_grp, "资源绑定")
+        self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
@@ -1318,6 +1313,7 @@ class MmtrPanel(QWidget):
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_detail())
         attach_menu(self.tree_blob, self._menu_blob)
         attach_menu(self.tree_grp, self._menu_grp)
+        attach_menu(self.tree_group, self._menu_bgrp)
         attach_menu(self.tree_pool, self._menu_pool)
         attach_menu(self.tree_param, self._menu_param)
 
@@ -1349,6 +1345,7 @@ class MmtrPanel(QWidget):
         self._edit_blob = None
         self.refresh_blobs()
         self.refresh_pool()
+        self.refresh_group_page()
         self.refresh_variant()
         self._emit_title()
 
@@ -1577,52 +1574,70 @@ class MmtrPanel(QWidget):
         fit_columns(self.tree_grp, [0, 2], pad=28, min_w=120, max_w=520)
         self.tree_grp.setColumnWidth(1, 210)
 
-    def _vocab_map(self):
-        """名称池(去重名字 -> 引用统计)缓存; 编辑后失效。"""
-        if self.data is None:
-            return {}
-        if self._vocab_cache is None:
-            self._vocab_cache = name_vocabulary(self.data)
-        return self._vocab_cache
-
-    def _vocab(self):
-        """名称池词汇表(去重名字, 排序)。"""
-        return sorted(self._vocab_map())
-
-    def _vocab_declared(self):
-        """名称池(仅按 RDEF 声明归因)缓存: 引用 blob = 真正声明该资源的 shader。"""
-        if getattr(self, "_vocab_cache_rdef", None) is None:
-            self._vocab_cache_rdef = name_vocabulary(self.data, declared_only=True)
-        return self._vocab_cache_rdef
-
-    def _cur_rdef_names(self):
-        """当前 blob 的 RDEF 声明名集合(shader 真正能采样的资源)。"""
-        idx = self.cur_blob()
-        if idx is None or self.data is None:
-            return set()
-        return _blob_rdef_names(self.data, idx)
-
-    def _on_rdef_view_changed(self):
-        """切换“仅按 RDEF 声明”视图: 刷新资源名池页(资源绑定页已固定为 RDEF 视图)。"""
-        self.refresh_pool()
-
     def refresh_pool(self):
-        """名称池页: 列出该文件用到的所有贴图名 + 引用统计。
+        """资源名池页: 由 RDEF 程序化派生的资源名(全类 cb/smp/tex/uav)。
 
-        默认按“RDEF 声明”归因(避免共享池把他人资源算到本 blob); 可取消勾选看“按池”口径。
+        名 -> 类别(可多) + 引用 blob 数(= 真正声明它的 shader 数); 未被引用的 blob 不计。
         """
         self.tree_pool.clear()
         if self.data is None:
             return
-        chk = getattr(self, "chk_pool_rdef", None)
-        vocab = (self._vocab_declared() if (chk is not None and chk.isChecked())
-                 else self._vocab_map())
-        for nm in sorted(vocab, key=lambda n: (-vocab[n]["groups"], n)):
+        try:
+            vocab = derive_namepool(self.data)
+        except Exception:  # noqa: BLE001
+            return
+        for nm in sorted(vocab, key=lambda n: (-len(vocab[n]["blobs"]), n)):
             d = vocab[nm]
-            it = QTreeWidgetItem([nm, str(d["groups"]), str(len(d["blobs"]))])
+            it = QTreeWidgetItem([nm, "/".join(sorted(d["cats"])), str(len(d["blobs"]))])
             it.setData(0, Qt.UserRole, ("poolname", nm))
             self.tree_pool.addTopLevelItem(it)
         fit_columns(self.tree_pool, [0, 1, 2], pad=24, min_w=80, max_w=520)
+
+    def refresh_group_page(self):
+        """组页(只读): 由 RDEF 程序化派生的绑定组(按“资源声明签名”去重)。
+
+        组无固有名 ⇒ 用“组N + 代表成员名(等K种)”标识; 展开看内容(池条目, 按类分组)。
+        组 = 一次 draw 的完整绑定状态, 被跨 pass 的多个变体记录共享。
+        """
+        self.tree_group.clear()
+        if self.data is None:
+            return
+        try:
+            groups = derive_groups(self.data)
+        except Exception:  # noqa: BLE001
+            return
+        name_of = {}
+        try:
+            for r in MmtrModel(self.data).parse_records():
+                if not r.is_empty:
+                    name_of[r.off] = r.name or "?"
+        except Exception:  # noqa: BLE001
+            pass
+        rows = [(g, sorted({name_of.get(o, "?") for o in g["recs"]})) for g in groups.values()]
+        rows.sort(key=lambda t: (-t[0]["n_rec"], t[0]["recs"][0]))
+        pfx = {"cb": "b", "smp": "s", "tex": "t", "uav": "u"}
+        for i, (g, names) in enumerate(rows):
+            cnt = Counter(e["cat"] for e in g["entries"])
+            rep = names[0] if names else "?"
+            more = f" 等{len(names)}种" if len(names) > 1 else ""
+            top = QTreeWidgetItem(
+                [f"组{i}", f"{rep}{more}",
+                 f"{g['n_rec']} rec · {len(g['blobs'])} blob · "
+                 f"cb{cnt['cb']} smp{cnt['smp']} tex{cnt['tex']} uav{cnt['uav']}"])
+            top.setData(0, Qt.UserRole, ("bgrp", i, g["recs"][0]))
+            self.tree_group.addTopLevelItem(top)
+            for c in ("cb", "smp", "tex", "uav"):
+                es = [e for e in g["entries"] if e["cat"] == c]
+                if not es:
+                    continue
+                ctop = QTreeWidgetItem([c, "", f"{len(es)} 项"])
+                top.addChild(ctop)
+                for e in es:
+                    stg = {0x01: "VS", 0x10: "PS", 0x11: "VS|PS"}.get(e["stage"], "?")
+                    ctop.addChild(QTreeWidgetItem(
+                        [f"[{pfx[c]}{e['slot']}]", e["name"],
+                         f"{c} {pfx[c]}{e['slot']} · {stg}"]))
+        fit_columns(self.tree_group, [0, 1], pad=20, min_w=90, max_w=560)
 
     def _reload_after_edit(self, full=False):
         """改 bytes 后统一刷新。full=True 才重建 blob 列表(仅 blob 计数/结构变化时需要)。"""
@@ -1634,6 +1649,7 @@ class MmtrPanel(QWidget):
             self.refresh_blobs()
         self.refresh_detail()
         self.refresh_pool()
+        self.refresh_group_page()
 
     def _reload_after_rename(self):
         """改名(不动参数/blob 结构)后的轻量刷新: 只刷绑定页与名称池(免整表重解析卡顿)。"""
@@ -1641,6 +1657,7 @@ class MmtrPanel(QWidget):
         self._vocab_cache_rdef = None
         self.refresh_groups()
         self.refresh_pool()
+        self.refresh_group_page()
 
     def _commit_slot_setname(self, group_k, slot, old, new):
         """下拉框改某槽的池名: 按名改(该 blob 的所有组一起改, 绑定键=名)。"""
@@ -1724,6 +1741,13 @@ class MmtrPanel(QWidget):
                      lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
                     ("复制名", lambda: _copy_to_clipboard(name))]
         return None
+
+    def _menu_bgrp(self, item):
+        d = item.data(0, Qt.UserRole) if item else None
+        if not d or d[0] != "bgrp":
+            return None
+        return [("复制行", lambda: _copy_to_clipboard(
+                    " | ".join(item.text(c) for c in range(3))))]
 
     def _menu_pool(self, item):
         if item is None or self.data is None:
@@ -4494,7 +4518,7 @@ def main(argv):
             if isinstance(panel, Mdf2Panel):
                 idx = {"param": 1, "props": 2}.get(pane, 0)
             else:
-                idx = {"pool": 1, "param": 2, "variant": 3, "blob": 4}.get(pane, 0)
+                idx = {"group": 1, "pool": 2, "param": 3, "variant": 4, "blob": 5}.get(pane, 0)
             panel.tabs.setCurrentIndex(idx)
         win.show()
         for _ in range(3):
