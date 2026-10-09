@@ -75,7 +75,7 @@ from PySide6.QtGui import (  # noqa: E402
     QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
+    QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -1215,6 +1215,12 @@ class MmtrPanel(QWidget):
         self.tree_group.setHeaderLabels(["组", "代表 / 成员", "记录·blob·内容"])
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
+        # 支持拖拽重排(材质参数顺序; 偏移自动重算)。拖拽结束后 _on_param_moved 应用。
+        self.tree_param.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree_param.setDragEnabled(True)
+        self.tree_param.setAcceptDrops(True)
+        self.tree_param.setDropIndicatorShown(True)
+        self.tree_param.setDragDropMode(QAbstractItemView.InternalMove)
         self.tree_variant = QTreeWidget()
         self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·HS·DS·GS·CS)", "维度 / 说明"])
 
@@ -1326,6 +1332,7 @@ class MmtrPanel(QWidget):
         attach_menu(self.tree_group, self._menu_bgrp)
         attach_menu(self.tree_pool, self._menu_pool)
         attach_menu(self.tree_param, self._menu_param)
+        self.tree_param.model().rowsMoved.connect(self._on_param_moved)
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
@@ -1691,10 +1698,36 @@ class MmtrPanel(QWidget):
     def refresh_params(self):
         self.tree_param.clear()
         for pr in self._um:
-            self.tree_param.addTopLevelItem(
-                QTreeWidgetItem([pr.name, type_label(pr.size), f"{pr.size}B",
-                                 f"0x{pr.offset:04x}"]))
+            it = QTreeWidgetItem([pr.name, type_label(pr.size), f"{pr.size}B",
+                                  f"0x{pr.offset:04x}"])
+            it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)   # 仅同级重排(不嵌套)
+            self.tree_param.addTopLevelItem(it)
         fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=80, max_w=320)
+
+    def _on_param_moved(self, *_a):
+        """材质参数页拖拽重排: 读当前行顺序 -> 重算偏移并写回容器。"""
+        if self.data is None:
+            return
+        order = []
+
+        def _collect(it):
+            order.append(it.text(0))
+            for j in range(it.childCount()):
+                _collect(it.child(j))
+
+        for i in range(self.tree_param.topLevelItemCount()):
+            _collect(self.tree_param.topLevelItem(i))
+        if order == [pr.name for pr in self._um]:
+            return
+        try:
+            self.data = Mmtr.from_bytes(self.data).reorder_cbuffer_params(
+                "UserMaterial", order)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "重排失败", str(e))
+            self.refresh_params()          # 回滚显示
+            return
+        self._reload_after_edit()
+        self.refresh_params()
 
     # ---- 编辑 ----
     def _need_mmtr(self):

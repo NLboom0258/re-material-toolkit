@@ -229,6 +229,38 @@ class Mmtr:
         struct.pack_into("<I", out, 8, blob_start + head_delta + name_delta)
         return bytes(out)
 
+    def reorder_cbuffer_params(self, cbuffer_name, order):
+        """按 order(参数名列表) 重排该 cbuffer 的成员, 并按**累积约定**重算偏移与 cbuffer size。
+
+        - 偏移: offset[i] = Σ size[0..i-1]; cbuffer size = align16(Σ size)。
+        - 只重排现有成员(名字集不变) ⇒ 名字串/区域长度不变, 原地改写。
+        - ⚠ 不同步 shader 的 RDEF 成员偏移 ⇒ 需重编/改 shader 才能与 shader 对齐(调用方自负)。
+        """
+        data = bytearray(self.data)
+        entries = self._scan_cbuffer_entries(cbuffer_name)
+        if not entries:
+            raise ValueError(f"cbuffer {cbuffer_name!r} not found")
+        members_off, count = entries[0][1], entries[0][2]
+        info, cur = {}, []
+        for j in range(count):
+            p = members_off + j * 16
+            name_off, _z, h, meta = struct.unpack_from("<IIII", data, p)
+            nm = read_ascii(data, name_off)
+            info[nm] = (meta >> 16, name_off, h)
+            cur.append(nm)
+        if sorted(order) != sorted(cur):
+            raise ValueError("order 与现有成员集不一致")
+        off = 0
+        for j, nm in enumerate(order):
+            sz, name_off, h = info[nm]
+            struct.pack_into("<IIII", data, members_off + j * 16,
+                             name_off, 0, h, (sz << 16) | off)
+            off += sz
+        new_sz = (off + 15) & ~15
+        for (p, _mo, _cnt, _sz) in entries:
+            struct.pack_into("<I", data, p + 16, new_sz)
+        return bytes(data)
+
     def dump(self):
         print(f"mmtr blob_start=0x{self.blob_start:x} "
               f"string_pool=0x{self.string_pool_lo:x}..0x{self.string_pool_hi:x} "
