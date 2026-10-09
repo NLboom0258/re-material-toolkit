@@ -2,15 +2,17 @@
 """由 RDEF 派生 SDF/mmtr 容器的绑定结构(组 / 资源名池 / 全局字符串池)。
 
 设计依据(见 analysis/sdf_container_structure.md, 全语料主版本已证):
-  - 变体记录(264B) = 交叉点: 挂 主程序 P0@+0x00 / VS@-0x20 / CS@+0x08 与 绑定表(desc/pool)。
-  - **组的池内容 = 其记录的 [VS∪P0] RDEF 声明的并集**(引擎序 [VS块][PS块]); **组 ⟺ 资源声明签名**。
+  - 变体记录(264B) = 交叉点: 挂 6 个程序槽(VS/HS/DS/GS/PS/CS) 与 绑定表(desc/pool)。
+  - **组的池内容 = 其记录各程序槽 RDEF 声明的并集**(引擎序); **组 ⟺ 资源声明签名**。
   - **资源名池** = 被变体记录引用的 blob 的 RDEF 资源并集(按池名去重)。
-  - **全局字符串池**(头区) ⊇ 所有 blob(含未引用)的 RDEF 资源名 ∪ 变体名/成员名等元数据。
+  - **全局字符串池**(头区) ⊇ 所有 blob(含未引用)的 RDEF 资源名 ∪ 变体名等元数据。
 
 本模块**只算不改**(供 GUI 显示; 将来"由编辑后的 RDEF 重建容器"也复用)。
 注意: 记录解析依赖主版本(0x01100004)骨架; 非主版本(旧格式 SDF)不保证。
 """
 from __future__ import annotations
+
+import struct
 
 from . import rdef as _rdef
 from .mmtr_model import MmtrModel
@@ -35,17 +37,36 @@ def category(bind_type):
     return "?"
 
 
-# 引擎序里 stage 标记(desc code 的 stage 位)
-STAGE_VS, STAGE_PS, STAGE_BOTH, STAGE_CS = 0x01, 0x10, 0x11, 0x20
+# 阶段 desc-"stage 字节" = 位掩码(实测: VS|PS=0x11, CS=0x20, DS=0x04)
+STAGE_BIT = {"VS": 0x01, "HS": 0x02, "DS": 0x04, "GS": 0x08, "PS": 0x10, "CS": 0x20}
+_STAGE_NAMES = ((0x01, "VS"), (0x02, "HS"), (0x04, "DS"),
+                (0x08, "GS"), (0x10, "PS"), (0x20, "CS"))
+# 记录的 6 个程序槽(相对记录基址; 按 stage 位升序): (阶段, 指针偏移)
+_PROG = (("VS", -0x20), ("HS", -0x18), ("DS", -0x10),
+         ("GS", -0x08), ("PS", 0x00), ("CS", 0x08))
 
 
-def _has_program(rec):
-    """该记录是否捆绑了任一 shader 程序(P0/VS/CS)。
+def stage_text(mask):
+    """stage 位掩码 -> 'VS'/'VS|PS'/'CS'…。"""
+    return "|".join(n for b, n in _STAGE_NAMES if mask & b) or "?"
 
-    ⚠ 不可用 `rec.is_empty`(只查 P0) —— 纯 compute 记录 P0/VS 皆空、CS 在 rec+0x08,
-      用 is_empty 会把它们当作空记录跳过 ⇒ CS shader 的资源不进名池/组(实测 lighting.sdf 324 条)。
+
+def _u32(data, o):
+    return struct.unpack_from("<I", data, o)[0]
+
+
+def slots(data, rec):
+    """记录的非空程序槽: [(stage, blob_off), ...](按 stage 位升序)。
+
+    ⚠ **不要用 `rec.is_empty`(只查 P0)**: 纯 compute 记录 P0/VS 皆空、CS 在 rec+0x08;
+      蒙皮/细分等还可能只有 HS/DS/GS。只看 P0 会漏整条记录的资源(实测 lighting.sdf 324 条)。
     """
-    return bool(rec.blob_off or rec.vs_blob or rec.cs_blob)
+    out = []
+    for st, po in _PROG:
+        off = _u32(data, rec.off + po)
+        if off:
+            out.append((st, off))
+    return out
 
 
 def _entries(data, off, size_of):
@@ -58,48 +79,41 @@ def _entries(data, off, size_of):
 def _signature(data, rec, size_of):
     """该记录的“资源声明签名”= frozenset((stage, name, cat, bind_point))。组 ⟺ 签名。"""
     sig = set()
-    for stage, off in (("VS", rec.vs_blob), ("PS", rec.blob_off), ("CS", rec.cs_blob)):
+    for st, off in slots(data, rec):
         for (nm, t, bp, _dim, _r) in _entries(data, off, size_of):
-            sig.add((stage, nm, category(t), bp))
+            sig.add((st, nm, category(t), bp))
     return frozenset(sig)
 
 
 def record_entries(data, rec, size_of):
-    """该记录绑定池条目(引擎序), 由 RDEF 派生。
+    """该记录绑定池条目(引擎序), 由各程序槽 RDEF 派生。
 
-    图形记录(VS/P0): [VS块][PS块](按名去重); stage=0x01(VS)/0x10(PS)/0x11(both);
-        slot=含 PS→PS 的 bind point、纯 VS→0。
-    纯 compute 记录(CS-only, P0/VS 皆空): 由 CS RDEF 派生; stage=0x20(CS); slot=RDEF bind point。
+    按 stage 位升序(VS→HS→DS→GS→PS→CS)遍历各槽的 RDEF, 名字去重(先见者定位);
+    stage = 声明它的各槽位之**位掩码 OR**; slot = 含 PS 取 PS bind point、纯 CS 取 bind point、
+    其余(VS/HS/DS/GS-only)取 0(引擎不写这些槽的 bind point)。
     """
-    vs = _entries(data, rec.vs_blob, size_of)
-    ps = _entries(data, rec.blob_off, size_of)
-    if not vs and not ps:                       # CS-only
-        out, seen = [], set()
-        for (nm, t, bp, dim, _r) in _entries(data, rec.cs_blob, size_of):
+    prog = [(st, _entries(data, off, size_of)) for st, off in slots(data, rec)]
+    ps_bp = {}
+    for st, ents in prog:
+        if st == "PS":
+            for (nm, t, bp, dim, _r) in ents:
+                ps_bp.setdefault(nm, (bp, category(t), dim))
+    has_gfx = any(st != "CS" for st, _ in prog)
+    out, seen = [], {}
+    for st, ents in prog:
+        for (nm, t, bp, dim, _r) in ents:
             if nm in seen:
+                seen[nm]["stage"] |= STAGE_BIT[st]
                 continue
-            seen.add(nm)
-            out.append({"name": nm, "cat": category(t), "stage": STAGE_CS,
-                        "slot": bp, "dim": dim})
-        return out
-    ps_map = {}                       # name -> (slot, cat, dim)   (PS 侧为准)
-    for (nm, t, bp, dim, _r) in ps:
-        ps_map.setdefault(nm, (bp, category(t), dim))
-    out, seen = [], set()
-    for (nm, t, _bp, dim, _r) in vs:
-        if nm in seen:
-            continue
-        seen.add(nm)
-        if nm in ps_map:              # VS 与 PS 都有 -> stage=both, slot=PS 的
-            slot, cat, d2 = ps_map[nm]
-            out.append({"name": nm, "cat": cat, "stage": STAGE_BOTH, "slot": slot, "dim": d2})
-        else:                         # 纯 VS -> slot=0(引擎不写 VS 的 bind point)
-            out.append({"name": nm, "cat": category(t), "stage": STAGE_VS, "slot": 0, "dim": dim})
-    for (nm, t, bp, dim, _r) in ps:
-        if nm in seen:
-            continue
-        seen.add(nm)
-        out.append({"name": nm, "cat": category(t), "stage": STAGE_PS, "slot": bp, "dim": dim})
+            if nm in ps_bp:
+                slot, cat, d2 = ps_bp[nm]
+            elif has_gfx:
+                slot, cat, d2 = 0, category(t), dim
+            else:                                   # 纯 CS
+                slot, cat, d2 = bp, category(t), dim
+            e = {"name": nm, "cat": cat, "stage": STAGE_BIT[st], "slot": slot, "dim": d2}
+            seen[nm] = e
+            out.append(e)
     return out
 
 
@@ -107,14 +121,14 @@ def derive_groups(data):
     """程序化绑定组: **按资源声明签名**分组(组 ⟺ 签名)。
 
     -> {sig: {"entries": [...], "recs": [rec_off...], "blobs": set(blob_off), "n_rec"}}。
-    组内容(entries)对同签名的记录必然一致; 直接取首条记录派生。至少被 2 个不同来源
-    记录共用的组, 与容器里“共享池”一一对应(仅“包含关系”签名是原版的合并优化)。
+    组内容(entries)对同签名的记录必然一致; 直接取首条记录派生。
     """
     model = MmtrModel(data)
     size_of = dict(model.blobs)
     out = {}
     for r in model.parse_records():
-        if not _has_program(r):
+        sl = slots(data, r)
+        if not sl:
             continue
         sig = _signature(data, r, size_of)
         g = out.get(sig)
@@ -123,9 +137,8 @@ def derive_groups(data):
                  "entries": record_entries(data, r, size_of)}
             out[sig] = g
         g["recs"].append(r.off)
-        for off in (r.vs_blob, r.blob_off, r.cs_blob):
-            if off:
-                g["blobs"].add(off)
+        for _st, off in sl:
+            g["blobs"].add(off)
     for g in out.values():
         g["n_rec"] = len(g["recs"])
     return out
@@ -140,11 +153,8 @@ def derive_namepool(data, cats=("cb", "smp", "tex", "uav")):
     size_of = dict(model.blobs)
     used = set()
     for r in model.parse_records():
-        if not _has_program(r):
-            continue
-        for off in (r.vs_blob, r.blob_off, r.cs_blob):
-            if off:
-                used.add(off)
+        for _st, off in slots(data, r):
+            used.add(off)
     vocab = {}
     for off in used:
         for (nm, t, _bp, _dim, _r) in _entries(data, off, size_of):

@@ -52,7 +52,9 @@ from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  
 from material_toolkit.lib.rdef import (  # noqa: E402
     replace_blob, rdef_cbuffers, rdef_bind_info, rdef_stage,
 )
-from material_toolkit.lib.derive import derive_groups, derive_namepool  # noqa: E402
+from material_toolkit.lib.derive import (  # noqa: E402
+    derive_groups, derive_namepool, stage_text,
+)
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -1217,7 +1219,7 @@ class MmtrPanel(QWidget):
         self.tree_param = QTreeWidget()
         self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
         self.tree_variant = QTreeWidget()
-        self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·CS)", "维度 / 说明"])
+        self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·HS·DS·GS·CS)", "维度 / 说明"])
 
         self._vocab_cache = None    # 名称池词汇表缓存(编辑后失效)
 
@@ -1416,15 +1418,18 @@ class MmtrPanel(QWidget):
             d = parse_technology(tech)
             sets = mm.program_sets(tech)
             titem = QTreeWidgetItem(
-                [tech, "程序集=%d  真VS=%s" % (len(sets), mm.shared_vs(tech)),
+                [tech, "程序集=%d" % len(sets),
                  self._dim_label(d) if material_like else ""])
             parent.addChild(titem)
             for g in sets:
-                ps, vs, cs = g["programs"]
+                ps, vs, hs, ds, gs, cs = g["programs"]
                 plab = ",".join(p for p in g["prefixes"] if p and p != "-") or "(无标志)"
+                progs = ["PS=%d" % ps, "VS=%d" % vs]
+                for lab, val in (("HS", hs), ("DS", ds), ("GS", gs), ("CS", cs)):
+                    if val >= 0:
+                        progs.append("%s=%d" % (lab, val))
                 citem = QTreeWidgetItem(
-                    ["<- %s" % plab,
-                     "PS=%d  VS=%d  CS=%d" % (ps, vs, cs),
+                    ["<- %s" % plab, "  ".join(progs),
                      "slots=%s" % ",".join(str(x) for x in g["slots"])])
                 titem.addChild(citem)
 
@@ -1649,7 +1654,7 @@ class MmtrPanel(QWidget):
                 ctop = QTreeWidgetItem([c, "", f"{len(es)} 项"])
                 top.addChild(ctop)
                 for e in es:
-                    stg = {0x01: "VS", 0x10: "PS", 0x11: "VS|PS", 0x20: "CS"}.get(e["stage"], "?")
+                    stg = stage_text(e["stage"])
                     ctop.addChild(QTreeWidgetItem(
                         [f"[{pfx[c]}{e['slot']}]", e["name"],
                          f"{c} {pfx[c]}{e['slot']} · {stg}"]))

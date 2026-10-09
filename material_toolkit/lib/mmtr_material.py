@@ -10,6 +10,8 @@
     ⇒ "Direct" 只影响引擎/RS 侧, 不改 shader); 无前缀('')通常用另一套"最简 pass"程序。
   - 用法: 编辑时可按"材质(技术)"而非"1083 个槽"来理解; 同技术下多个槽可批量应用同一改动。
 """
+import struct
+
 try:
     from .mmtr_model import MmtrModel, split_variant_name
 except ImportError:  # 允许脚本直接 import
@@ -96,8 +98,13 @@ class MaterialModel(object):
     def variants(self):
         if self._variants is None:
             out = []
+            d = self.data
             for i, r in enumerate(self.model.parse_records()):
-                if r.is_empty and not r.vs_blob and not r.cs_blob:
+                hs = struct.unpack_from("<I", d, r.off - 0x18)[0]
+                ds = struct.unpack_from("<I", d, r.off - 0x10)[0]
+                gs = struct.unpack_from("<I", d, r.off - 0x08)[0]
+                # 记录非空 = 6 个程序槽任一存在(不可只看 P0: CS/HS/DS/GS-only 也算)
+                if not (r.blob_off or r.vs_blob or r.cs_blob or hs or ds or gs):
                     continue
                 pre, tech = split_variant_name(r.name)
                 idx = self._idx_of
@@ -105,6 +112,7 @@ class MaterialModel(object):
                     "slot": i, "name": r.name, "prefix": pre, "tech": tech,
                     "ps": idx.get(r.blob_off, -1), "vs": idx.get(r.vs_blob, -1),
                     "cs": idx.get(r.cs_blob, -1),
+                    "hs": idx.get(hs, -1), "ds": idx.get(ds, -1), "gs": idx.get(gs, -1),
                 })
             self._variants = out
         return self._variants
@@ -121,18 +129,22 @@ class MaterialModel(object):
         return {k: out[k] for k in sorted(out)}
 
     def program_sets(self, tech):
-        """该技术的"程序集": [(ps,vs,cs) -> [prefix...]](按程序序)。
+        """该技术的"程序集": [(ps,vs,hs,ds,gs,cs) -> [prefix...]](按程序序)。
 
         ⇒ 前缀里程序相同者会并到一项(实测 `A` 与 `ADirect` 并、`ATS` 与 `ATSDirect` 并)。
         """
         groups = {}
+
+        def key_of(v):
+            return (v["ps"], v["vs"], v["hs"], v["ds"], v["gs"], v["cs"])
+
         for v in self.technologies().get(tech, []):
-            groups.setdefault((v["ps"], v["vs"], v["cs"]), []).append(v["prefix"] or "-")
+            groups.setdefault(key_of(v), []).append(v["prefix"] or "-")
         out = []
         for key in sorted(groups):
             out.append({"programs": key, "prefixes": sorted(set(groups[key])),
                         "slots": [v["slot"] for v in self.technologies()[tech]
-                                  if (v["ps"], v["vs"], v["cs"]) == key]})
+                                  if key_of(v) == key]})
         return out
 
     def shared_vs(self, tech):
@@ -213,11 +225,15 @@ class MaterialModel(object):
             if only and only not in tech:
                 continue
             sets = self.program_sets(tech)
-            print("  [%s]  程序集=%d  真VS=%s" % (tech, len(sets), self.shared_vs(tech)))
+            print("  [%s]  程序集=%d" % (tech, len(sets)))
             for g in sets:
-                ps, vs, cs = g["programs"]
-                print("       PS=%-3d VS=%-3d CS=%-3d  <- %s%s"
-                      % (ps, vs, cs, ",".join(g["prefixes"]),
+                ps, vs, hs, ds, gs, cs = g["programs"]
+                parts = ["PS=%d" % ps, "VS=%d" % vs]
+                for lab, val in (("HS", hs), ("DS", ds), ("GS", gs), ("CS", cs)):
+                    if val >= 0:
+                        parts.append("%s=%d" % (lab, val))
+                print("       %-40s  <- %s%s"
+                      % (" ".join(parts), ",".join(g["prefixes"]),
                          ("  slots=%s" % g["slots"]) if show_slots else ""))
 
 
