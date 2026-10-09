@@ -1239,7 +1239,8 @@ class MmtrPanel(QWidget):
         self.tree_param.setAcceptDrops(True)
         self.tree_param.setDropIndicatorShown(True)
         self.tree_param.setDragDropMode(QAbstractItemView.InternalMove)
-        self.tree_param.setColumnWidth(0, 28)
+        self.tree_param.setIndentation(0)   # 扁平列表: 手柄列不被树缩进推挤(避免与参数名重叠)
+        self.tree_param.setColumnWidth(0, 26)
         self.tree_variant = QTreeWidget()
         self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·HS·DS·GS·CS)", "维度 / 说明"])
 
