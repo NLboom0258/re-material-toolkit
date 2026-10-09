@@ -30,7 +30,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from material_toolkit.lib.binding import (  # noqa: E402
-    add_texture_slot, group_summary,
+    add_texture_slot,
     name_vocabulary, rename_name_global, _blob_rdef_names,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
@@ -39,7 +39,7 @@ from material_toolkit.lib.mdf2 import (  # noqa: E402
 )
 from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from material_toolkit.lib.mmtr_info import (  # noqa: E402
-    blob_count, blob_group_counts, blob_info, group_mode, type_label,
+    blob_count, blob_group_counts, blob_info, type_label,
 )
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
@@ -50,7 +50,9 @@ from material_toolkit.lib.mmtr_assemble import (  # noqa: E402
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
-from material_toolkit.lib.rdef import replace_blob, rdef_cbuffers  # noqa: E402
+from material_toolkit.lib.rdef import (  # noqa: E402
+    replace_blob, rdef_cbuffers, rdef_bind_info, rdef_stage,
+)
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -82,7 +84,10 @@ from PySide6.QtWidgets import (  # noqa: E402
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-TYPENAME = {0x02: "tex2d", 0x80: "raw", 0x00: "sampler", 0xFF: "cbuffer"}
+# D3D_SRV_DIMENSION 名称(用于 RDEF 资源的维度显示)。
+_DIMNAME = {0: "?", 1: "buffer", 2: "tex1d", 3: "tex2d", 4: "tex2dms", 5: "tex3d",
+            6: "texcube", 7: "tex1darr", 8: "tex2darr", 9: "tex2dmsarr",
+            10: "texcubearr", 11: "bufferex"}
 
 
 def _iter_items(tree):
@@ -1200,19 +1205,19 @@ class MmtrPanel(QWidget):
         for b in (self.btn_open, self.btn_add, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
-        self.chk_pool_rdef = QCheckBox("仅按 RDEF 声明(视图)")
+        self.chk_pool_rdef = QCheckBox("资源名池: 仅按 RDEF 声明")
         self.chk_pool_rdef.setChecked(True)
         self.chk_pool_rdef.setToolTip(
-            "勾选: “资源绑定”只显示该 blob 的 RDEF 真正声明的资源; “名称池”的引用 blob 也只按 RDEF 归因。\n"
-            "不勾选: 显示“记录引用的池”原样 —— 池常被记录共享/合并, 会把他人资源(如 VS 的\n"
-            "SkinningMatrices, 或与本 shader 无关的 ATOS)一并列出。")
+            "勾选: “资源名池”的引用 blob 按 RDEF 归因(只算真正声明该资源的 shader)。\n"
+            "不勾选: 按“记录引用的池”原样 —— 池常被记录共享/合并, 会把他人资源\n"
+            "(如 VS 的 SkinningMatrices, 或与本 shader 无关的 ATOS)一并列出。")
         self.chk_pool_rdef.stateChanged.connect(lambda *_: self._on_rdef_view_changed())
         hb.addWidget(self.chk_pool_rdef)
 
         self.tree_blob = QTreeWidget()
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_grp = QTreeWidget()
-        self.tree_grp.setHeaderLabels(["项 / 组", "名称(池)", "类型 / 槽位"])
+        self.tree_grp.setHeaderLabels(["项 / 类", "名称", "类型 / 槽位"])
         self.tree_pool = QTreeWidget()
         self.tree_pool.setHeaderLabels(["资源名(池)", "引用组数", "引用 blob"])
         self.tree_param = QTreeWidget()
@@ -1521,65 +1526,53 @@ class MmtrPanel(QWidget):
         return {name: mem for (name, _size, mem) in cbs}
 
     def refresh_groups(self):
-        """资源绑定页: 当前 blob 的每个绑定组 -> cbuffer / sampler / SRV 槽。
+        """资源绑定页: 当前 blob 的 RDEF 声明的资源绑定(cbuffer/sampler/SRV/UAV)。
 
-        cbuffer/sampler 只读展示; SRV(纹理)槽名可改(= 绑定键)。
-        "仅按 RDEF 声明" 过滤三者。
+        只读展示。RDEF = 该 shader 自己声明的资源(引擎据此 + mdf2/系统 提供实际资源);
+        容器里的“绑定组 / 资源名池”都是这些声明的派生数据(另行生成)。
         """
         self.tree_grp.clear()
         idx = self.cur_blob()
         if idx is None or self.data is None:
             return
-        vocab = self._vocab()
-        chk = getattr(self, "chk_pool_rdef", None)
-        rdef = self._cur_rdef_names() if (chk is not None and chk.isChecked()) else None
-
-        def keep(lst):
-            return lst if rdef is None else [s for s in lst if s["name"] in rdef]
-
+        try:
+            blob = extract_blob(self.data, idx)
+            info = rdef_bind_info(blob) or []
+            stage = rdef_stage(blob)
+        except Exception:  # noqa: BLE001
+            info, stage = [], None
         cb_members = self._blob_cbuffer_members(idx)
-        for k, g in enumerate(group_summary(self.data, idx)):
-            names = [s["name"] for s in g["srvs"]]      # 组名用全量(便于识别该组)
-            all_cb, all_sm = g.get("cbufs", []), g.get("smps", [])
-            cbufs, smps, srvs = keep(all_cb), keep(all_sm), keep(g["srvs"])
-            hid = (len(all_cb) - len(cbufs) + len(all_sm) - len(smps)
-                   + len(g["srvs"]) - len(srvs))
-            top = QTreeWidgetItem([f"组{k} · {group_mode(names)}", "",
-                                   f"desc@0x{g['desc']:x} pool@0x{g['pool']:x} "
-                                   f"n_rec={g['n_rec']} cb={len(cbufs)} smp={len(smps)} srv={len(srvs)}"
-                                   + (f"  已隐藏 {hid} 项(非本 shader 声明)" if hid else "")])
-            top.setData(0, Qt.UserRole, ("group", k))
+        cats = (("cbuffer", (0,), "b"), ("sampler", (3,), "s"),
+                ("SRV", (1, 2, 5, 7), "t"), ("UAV", (4, 6, 8, 9, 10, 11), "u"))
+        buckets = {name: [] for name, _t, _p in cats}
+        for (nm, t, bp, dim, _ret) in info:
+            for name, types, _p in cats:
+                if t in types:
+                    buckets[name].append((nm, bp, dim))
+                    break
+        head = QTreeWidgetItem(
+            [f"RDEF · {stage or '?'}", "",
+             f"cb={len(buckets['cbuffer'])} smp={len(buckets['sampler'])} "
+             f"srv={len(buckets['SRV'])} uav={len(buckets['UAV'])}"])
+        head.setData(0, Qt.UserRole, ("rdefhdr",))
+        self.tree_grp.addTopLevelItem(head)
+        for name, _types, pfx in cats:
+            items = buckets[name]
+            if not items:
+                continue
+            top = QTreeWidgetItem([name, "", f"{len(items)} 项"])
+            top.setData(0, Qt.UserRole, ("rdefcat", name))
             self.tree_grp.addTopLevelItem(top)
-            for s in cbufs:
-                it = QTreeWidgetItem([f"[cb {s['idx']}]", s["name"],
-                                      f"cbuffer  b{s['slot']}"])
-                it.setData(0, Qt.UserRole, ("cb", k, s["slot"], s["name"]))
+            for (nm, bp, dim) in items:
+                desc = f"{name.lower()} {pfx}{bp}"
+                if name in ("SRV", "UAV") and _DIMNAME.get(dim, "?") != "?":
+                    desc += f" · {_DIMNAME[dim]}"
+                it = QTreeWidgetItem([f"[{pfx}{bp}]", nm, desc])
+                it.setData(0, Qt.UserRole, ("rdef", name, bp, nm))
                 top.addChild(it)
-                for (mn, mo, ms) in cb_members.get(s["name"], []):
-                    it.addChild(QTreeWidgetItem(["", mn, f"@off {mo}  size {ms}"]))
-            for s in smps:
-                it = QTreeWidgetItem([f"[smp {s['idx']}]", s["name"],
-                                      f"sampler  s{s['slot']}"])
-                it.setData(0, Qt.UserRole, ("smp", k, s["slot"], s["name"]))
-                top.addChild(it)
-            for s in srvs:
-                tyname = TYPENAME.get(s["type"], f"0x{s['type']:02x}")
-                child = QTreeWidgetItem([f"[{s['idx']}]", "",
-                                         f"{tyname}  t{s['slot']}  hash=0x{s['hash']:08x}"])
-                child.setData(0, Qt.UserRole, ("slot", k, s["slot"], s["name"]))
-                top.addChild(child)
-                # 槽名 = 常驻下拉框(候选 = 本文件名称池词汇表; 可自由输入新名)
-                cb = NoWheelComboBox()
-                cb.setEditable(True)
-                cb.addItems(vocab)
-                cb.setCurrentText(s["name"])
-                cb.textActivated.connect(
-                    lambda txt, kk=k, sl=s["slot"], old=s["name"]:
-                    self._commit_slot_setname(kk, sl, old, txt))
-                cb.lineEdit().editingFinished.connect(
-                    lambda kk=k, sl=s["slot"], old=s["name"], c=cb:
-                    self._commit_slot_setname(kk, sl, old, c.currentText()))
-                self.tree_grp.setItemWidget(child, 1, cb)
+                if name == "cbuffer":
+                    for (mn, mo, ms) in cb_members.get(nm, []):
+                        it.addChild(QTreeWidgetItem(["", mn, f"@off {mo}  size {ms}"]))
             top.setExpanded(True)
         fit_columns(self.tree_grp, [0, 2], pad=28, min_w=120, max_w=520)
         self.tree_grp.setColumnWidth(1, 210)
@@ -1610,8 +1603,7 @@ class MmtrPanel(QWidget):
         return _blob_rdef_names(self.data, idx)
 
     def _on_rdef_view_changed(self):
-        """切换“仅按 RDEF 声明”视图: 同时刷新贴图绑定页与名称池页。"""
-        self.refresh_groups()
+        """切换“仅按 RDEF 声明”视图: 刷新资源名池页(资源绑定页已固定为 RDEF 视图)。"""
         self.refresh_pool()
 
     def refresh_pool(self):
@@ -1726,15 +1718,11 @@ class MmtrPanel(QWidget):
         d = item.data(0, Qt.UserRole) if item else None
         if not d:
             return None
-        if d[0] == "group":
-            k = d[1]
-            return [("加贴图槽(仅本组)", lambda: self.add_slot([k])),
-                    ("复制组信息", lambda: _copy_to_clipboard(f"{item.text(0)} | {item.text(1)}"))]
-        if d[0] == "slot":
-            _tag, _k, slot, name = d
-            return [("改名槽", lambda: self.rename_cur(slot, name)),
-                    ("复制 名字+hash",
-                     lambda: _copy_to_clipboard(f"{item.text(0)} {name} | {item.text(2)}"))]
+        if d[0] == "rdef":
+            _tag, cat, _slot, name = d
+            return [("复制 名字+槽位",
+                     lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
+                    ("复制名", lambda: _copy_to_clipboard(name))]
         return None
 
     def _menu_pool(self, item):
