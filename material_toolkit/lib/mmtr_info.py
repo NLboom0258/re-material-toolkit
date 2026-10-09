@@ -72,14 +72,25 @@ def blob_count(data):
 
 
 def blob_group_counts(data):
-    """单次扫描: {blob_off: 该 blob 的唯一绑定组数}(供列表展示, 避免逐 blob 全头扫描)。"""
+    """单次扫描: {blob_off: 该 blob 的唯一绑定组数}(供列表展示, 避免逐 blob 全头扫描)。
+
+    兼顾记录的 3 个程序槽: P0(+0x00) / VS(-0x20) / CS(+0x08) ——
+    纯 compute 记录 P0 为空、CS 在 +0x08, 只扫 P0 会让 CS blob 的组数漏成 0。
+    每槽 = (大小字段相对扫描点偏移, 组键 desc/pool 相对扫描点偏移)。
+    """
     bs, bl = blob_list(data)
     size_of = dict(bl)
     sets = {off: set() for off, _ in bl}
-    for p in range(0, bs - 3, 4):
+    slots = ((0x9C, 0x58), (0xAC, 0x78), (0x98, 0x50))   # P0 / VS / CS
+    for p in range(0x20, bs - 3, 4):
         v = _u32(data, p)
-        if v in sets and _u32(data, p + 0x9c) == size_of[v]:
-            sets[v].add((_u32(data, p + 0x58), _u32(data, p + 0x60)))
+        if v not in sets:
+            continue
+        sz = size_of[v]
+        for so, ko in slots:
+            if _u32(data, p + so) == sz:
+                sets[v].add((_u32(data, p + ko), _u32(data, p + ko + 8)))
+                break
     return {off: len(s) for off, s in sets.items()}
 
 

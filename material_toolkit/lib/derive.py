@@ -36,7 +36,16 @@ def category(bind_type):
 
 
 # 引擎序里 stage 标记(desc code 的 stage 位)
-STAGE_VS, STAGE_PS, STAGE_BOTH = 0x01, 0x10, 0x11
+STAGE_VS, STAGE_PS, STAGE_BOTH, STAGE_CS = 0x01, 0x10, 0x11, 0x20
+
+
+def _has_program(rec):
+    """该记录是否捆绑了任一 shader 程序(P0/VS/CS)。
+
+    ⚠ 不可用 `rec.is_empty`(只查 P0) —— 纯 compute 记录 P0/VS 皆空、CS 在 rec+0x08,
+      用 is_empty 会把它们当作空记录跳过 ⇒ CS shader 的资源不进名池/组(实测 lighting.sdf 324 条)。
+    """
+    return bool(rec.blob_off or rec.vs_blob or rec.cs_blob)
 
 
 def _entries(data, off, size_of):
@@ -56,13 +65,23 @@ def _signature(data, rec, size_of):
 
 
 def record_entries(data, rec, size_of):
-    """该记录绑定池条目(引擎序 [VS块][PS块], 按名去重), 由 VS/P0 的 RDEF 派生。
+    """该记录绑定池条目(引擎序), 由 RDEF 派生。
 
-    -> [{"name","cat","stage","slot","dim"}]; stage: 0x01=VS-only / 0x10=PS-only / 0x11=both。
-    规则(全语料验证): 顺序=VS 先、PS 后(按名去重); slot=含 PS→取 PS 的 bind point、纯 VS→0。
+    图形记录(VS/P0): [VS块][PS块](按名去重); stage=0x01(VS)/0x10(PS)/0x11(both);
+        slot=含 PS→PS 的 bind point、纯 VS→0。
+    纯 compute 记录(CS-only, P0/VS 皆空): 由 CS RDEF 派生; stage=0x20(CS); slot=RDEF bind point。
     """
     vs = _entries(data, rec.vs_blob, size_of)
     ps = _entries(data, rec.blob_off, size_of)
+    if not vs and not ps:                       # CS-only
+        out, seen = [], set()
+        for (nm, t, bp, dim, _r) in _entries(data, rec.cs_blob, size_of):
+            if nm in seen:
+                continue
+            seen.add(nm)
+            out.append({"name": nm, "cat": category(t), "stage": STAGE_CS,
+                        "slot": bp, "dim": dim})
+        return out
     ps_map = {}                       # name -> (slot, cat, dim)   (PS 侧为准)
     for (nm, t, bp, dim, _r) in ps:
         ps_map.setdefault(nm, (bp, category(t), dim))
@@ -95,7 +114,7 @@ def derive_groups(data):
     size_of = dict(model.blobs)
     out = {}
     for r in model.parse_records():
-        if r.is_empty:
+        if not _has_program(r):
             continue
         sig = _signature(data, r, size_of)
         g = out.get(sig)
@@ -121,7 +140,7 @@ def derive_namepool(data, cats=("cb", "smp", "tex", "uav")):
     size_of = dict(model.blobs)
     used = set()
     for r in model.parse_records():
-        if r.is_empty:
+        if not _has_program(r):
             continue
         for off in (r.vs_blob, r.blob_off, r.cs_blob):
             if off:

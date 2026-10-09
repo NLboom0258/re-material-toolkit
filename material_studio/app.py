@@ -1649,7 +1649,7 @@ class MmtrPanel(QWidget):
                 ctop = QTreeWidgetItem([c, "", f"{len(es)} 项"])
                 top.addChild(ctop)
                 for e in es:
-                    stg = {0x01: "VS", 0x10: "PS", 0x11: "VS|PS"}.get(e["stage"], "?")
+                    stg = {0x01: "VS", 0x10: "PS", 0x11: "VS|PS", 0x20: "CS"}.get(e["stage"], "?")
                     ctop.addChild(QTreeWidgetItem(
                         [f"[{pfx[c]}{e['slot']}]", e["name"],
                          f"{c} {pfx[c]}{e['slot']} · {stg}"]))
