@@ -1630,8 +1630,8 @@ class MmtrPanel(QWidget):
         name_of = {}
         try:
             for r in MmtrModel(self.data).parse_records():
-                if not r.is_empty:
-                    name_of[r.off] = r.name or "?"
+                # ⚠ 不能用 is_empty 过滤(只看 P0): CS/HS/DS/GS-only 记录会被漏 => 组显示 "?"
+                name_of[r.off] = r.name or "?"
         except Exception:  # noqa: BLE001
             pass
         rows = [(g, sorted({name_of.get(o, "?") for o in g["recs"]})) for g in groups.values()]
@@ -1783,8 +1783,14 @@ class MmtrPanel(QWidget):
             QMessageBox.warning(self, "提示", "请先打开 mmtr/SDF")
             return
         idx = self.cur_blob()
-        name, ok = QInputDialog.getText(self, "添加纹理(SRV)",
-                                        "纹理名(需与 mdf2 的贴图类型一致):")
+        try:
+            vocab = derive_namepool(self.data)
+            items = sorted(nm for nm, d in vocab.items() if "tex" in d["cats"])
+        except Exception:  # noqa: BLE001
+            items = []
+        name, ok = QInputDialog.getItem(
+            self, "添加纹理(SRV)",
+            "纹理名(= mdf2 贴图类型; 可选现有或自定义):", items, 0, True)
         if not (ok and name):
             return
         try:

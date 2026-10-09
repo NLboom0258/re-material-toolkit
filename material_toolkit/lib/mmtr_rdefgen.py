@@ -199,15 +199,21 @@ def rebuild_from_rdef(data, blob_patch=None):
             pool_name_at.append((len(pool), nm))
             pool += struct.pack("<QII", 0, ascii_hash(nm), 0)
 
-    # 描述符区: 4B 头 + 每组 [cb][smp][tex] 条目; 记录 +0x38/+0x48/+0x58 = 各段起点
-    desc, desc_rel = bytearray(b"\x00\x00\x00\x00"), {}
+    # 描述符区: 4B 头 + 各**唯一段**([cb]/[smp]/[tex] 的条目序列按内容去重, 跨组共享);
+    #   记录 +0x38/+0x48/+0x58 = 对应段起点。
+    desc, seg_off = bytearray(b"\x00\x00\x00\x00"), {}
+
+    def _seg(entries):
+        key = tuple(entries)
+        if key not in seg_off:
+            seg_off[key] = len(desc)
+            for (u0, code) in entries:
+                desc.extend(struct.pack("<II", u0, code))
+        return seg_off[key]
+
+    desc_rel = {}
     for gk in gorder:
-        rel = {}
-        for kind in ("cb", "smp", "tex"):
-            rel[kind] = len(desc)
-            for (u0, code) in groups[gk]["desc"][kind]:
-                desc += struct.pack("<II", u0, code)
-        desc_rel[gk] = rel
+        desc_rel[gk] = {kind: _seg(groups[gk]["desc"][kind]) for kind in ("cb", "smp", "tex")}
 
     str_pool, str_rel = bytearray(), {}
     for nm in names:
