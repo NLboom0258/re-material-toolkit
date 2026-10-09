@@ -1211,7 +1211,7 @@ class MmtrPanel(QWidget):
         self.tree_grp = QTreeWidget()
         self.tree_grp.setHeaderLabels(["项 / 类", "名称", "类型 / 槽位"])
         self.tree_pool = QTreeWidget()
-        self.tree_pool.setHeaderLabels(["资源名", "类别", "引用 blob"])
+        self.tree_pool.setHeaderLabels(["类别 / 资源名", "引用 blob"])
         self.tree_group = QTreeWidget()
         self.tree_group.setHeaderLabels(["组", "代表 / 成员", "记录·blob·内容"])
         self.tree_param = QTreeWidget()
@@ -1575,9 +1575,10 @@ class MmtrPanel(QWidget):
         self.tree_grp.setColumnWidth(1, 210)
 
     def refresh_pool(self):
-        """资源名池页: 由 RDEF 程序化派生的资源名(全类 cb/smp/tex/uav)。
+        """资源名池页: 由 RDEF 程序化派生的资源名, 按类别展开(cbuffer/sampler/SRV/UAV)。
 
-        名 -> 类别(可多) + 引用 blob 数(= 真正声明它的 shader 数); 未被引用的 blob 不计。
+        名 -> 引用 blob 数(= 真正声明它的 shader 数); 未被引用的 blob 不计。
+        名可属多类时归入首个类别(cb>smp>tex>uav)。
         """
         self.tree_pool.clear()
         if self.data is None:
@@ -1586,12 +1587,27 @@ class MmtrPanel(QWidget):
             vocab = derive_namepool(self.data)
         except Exception:  # noqa: BLE001
             return
-        for nm in sorted(vocab, key=lambda n: (-len(vocab[n]["blobs"]), n)):
-            d = vocab[nm]
-            it = QTreeWidgetItem([nm, "/".join(sorted(d["cats"])), str(len(d["blobs"]))])
-            it.setData(0, Qt.UserRole, ("poolname", nm))
-            self.tree_pool.addTopLevelItem(it)
-        fit_columns(self.tree_pool, [0, 1, 2], pad=24, min_w=80, max_w=520)
+        order = ("cb", "smp", "tex", "uav")
+        title = {"cb": "cbuffer", "smp": "sampler", "tex": "SRV", "uav": "UAV"}
+        buckets = {c: [] for c in order}
+        for nm, d in vocab.items():
+            c = next((x for x in order if x in d["cats"]), None)
+            if c:
+                buckets[c].append((nm, len(d["blobs"])))
+        for c in order:
+            items = buckets[c]
+            if not items:
+                continue
+            items.sort(key=lambda t: (-t[1], t[0]))
+            top = QTreeWidgetItem([title[c], f"{len(items)} 项"])
+            top.setData(0, Qt.UserRole, ("poolcat", c))
+            self.tree_pool.addTopLevelItem(top)
+            for nm, cnt in items:
+                it = QTreeWidgetItem([nm, str(cnt)])
+                it.setData(0, Qt.UserRole, ("poolname", nm))
+                top.addChild(it)
+            top.setExpanded(True)
+        fit_columns(self.tree_pool, [0, 1], pad=20, min_w=90, max_w=560)
 
     def refresh_group_page(self):
         """组页(只读): 由 RDEF 程序化派生的绑定组(按“资源声明签名”去重)。
@@ -1750,9 +1766,10 @@ class MmtrPanel(QWidget):
                     " | ".join(item.text(c) for c in range(3))))]
 
     def _menu_pool(self, item):
-        if item is None or self.data is None:
+        d = item.data(0, Qt.UserRole) if item else None
+        if not d or d[0] != "poolname":
             return None
-        nm = item.text(0)
+        nm = d[1]
         return [("全局改名…", lambda: self.global_rename(nm)),
                 ("复制名", lambda: _copy_to_clipboard(nm))]
 
@@ -4493,7 +4510,9 @@ def main(argv):
             mp.refresh_detail()
             print("blobs:", mp.tree_blob.topLevelItemCount())
             print("UserMaterial 参数:", mp.tree_param.topLevelItemCount())
-            print("名称池:", mp.tree_pool.topLevelItemCount())
+            print("资源名池:", ["%s=%d" % (mp.tree_pool.topLevelItem(i).text(0),
+                                       mp.tree_pool.topLevelItem(i).childCount())
+                                 for i in range(mp.tree_pool.topLevelItemCount())])
             print("变体页 pass 组:", [mp.tree_variant.topLevelItem(i).text(0)
                                      for i in range(mp.tree_variant.topLevelItemCount())])
             for i in range(mp.tree_grp.topLevelItemCount()):
