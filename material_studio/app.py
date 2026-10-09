@@ -55,6 +55,7 @@ from material_toolkit.lib.rdef import (  # noqa: E402
 from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
+from material_toolkit.lib.mmtr_rdefgen import add_texture  # noqa: E402
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -1282,7 +1283,8 @@ class MmtrPanel(QWidget):
         tv.addWidget(self.ed_asm, 1)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.tree_grp, "资源绑定")
+        self.tabs.addTab(wrap_with_add_button(
+            self.tree_grp, "＋ 添加纹理(SRV)", self.add_texture_srv), "资源绑定")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
@@ -1773,6 +1775,25 @@ class MmtrPanel(QWidget):
             QMessageBox.critical(self, "失败", str(e))
             return
         self._reload_after_edit()
+
+    def add_texture_srv(self):
+        """资源绑定页: 给当前 blob 的 RDEF 加一条 Texture2D(名 = mdf2 的贴图类型名),
+        再**按 RDEF 重建整个容器**(组/资源名池/字符串池自动更新)。"""
+        if self.data is None:
+            QMessageBox.warning(self, "提示", "请先打开 mmtr/SDF")
+            return
+        idx = self.cur_blob()
+        name, ok = QInputDialog.getText(self, "添加纹理(SRV)",
+                                        "纹理名(需与 mdf2 的贴图类型一致):")
+        if not (ok and name):
+            return
+        try:
+            self.data = add_texture(self.data, idx, name)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit(full=True)
+        QMessageBox.information(self, "添加纹理", "已加 %s, 并重建容器。" % name)
 
     # ---- Blob(shader) 编辑 ----
     def disasm_cur_blob(self):
