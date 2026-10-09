@@ -323,8 +323,9 @@ def rebuild_from_rdef(data, blob_patch=None):
 #         6=RWStructured(UAV) 7=ByteAddress(SRV) 8=RWByteAddress(UAV)
 #   ⚠ cbuffer(type0): **容器编辑暂不支持**(cbuffer 增/删/加成员需同时改 shader 逻辑, 属 DXBC 层)。
 #     底层写手 `rdef.add_cbuffer_member` 保留作构建块, 但暂不对外暴露。
-#   ⚠ UAV(type 4/6/8/9/10/11) **不支持**: 尾段池只收 SRV, 而记录计数字段却把 UAV 归 SRV
-#     (rdef_resources) ⇒ 加 UAV 会使计数与组不一致(实测 check_groups 96 bad)。材料本就无 UAV。
+#   ⚠ UAV(type 4/6/8/9/10/11) **增/删均不支持**: 尾段池只收 SRV(rdef_bind_order 丢弃 UAV),
+#     而记录计数字段(rdef_resources)把 UAV 归 SRV ⇒ 增/删都会让计数与组不一致(实测 check_groups 96/32 bad)。
+#     mmtr 的 UAV 只在 CS(蒙皮/预变换)blob0-3 与 Pick PS(blob58); 图形 PS/VS 无 UAV。
 #   ⚠ Structured 需 stride(=结构体字节大小, 存于 nsamp), 由调用方给或 UI 询问。
 RESOURCE_KINDS = {
     "tex2d":    dict(type_=2, ret=5, dim=4, nsamp=0xFFFFFFFF, flags=0xC),               # Texture2D (SRV)
@@ -413,6 +414,9 @@ def remove_resource(data, blob_idx, name):
     ty = next((t for (nm, t, *_r) in (rdef_bind_raw(data[o:o + s]) or []) if nm == name), None)
     if ty == 0:
         raise ValueError("暂不支持删除 cbuffer(需同时改 shader; 属 DXBC 层)")
+    if ty in _UAV_TYPES:
+        raise ValueError("暂不支持删除 UAV(type=%d): 尾段池不收 UAV, 而计数字段归 SRV "
+                         "⇒ 组/计数不一致(实测 check_groups 32 bad)" % ty)
     new_blob = remove_bound_resource(data[o:o + s], name)
     out = rebuild_from_rdef(data, {blob_idx: new_blob})
     if out is None:

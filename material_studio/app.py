@@ -1729,8 +1729,8 @@ class MmtrPanel(QWidget):
                      ("复制 名字+槽位",
                       lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
                      ("复制名", lambda: _copy_to_clipboard(name))]
-            if cat != "cbuffer":
-                # cbuffer 编辑属 DXBC 层(shader 也要改), 暂不对用户暴露。
+            if cat in ("SRV", "sampler"):
+                # 仅 SRV/sampler 支持删除; cbuffer/UAV 属 DXBC 层(需同时改 shader), 不暴露。
                 items.insert(0, ("删除资源", lambda: self.delete_resource(name)))
             return items
         return None
