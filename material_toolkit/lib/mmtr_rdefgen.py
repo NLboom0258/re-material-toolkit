@@ -159,8 +159,7 @@ def rebuild_from_rdef(data, blob_patch=None):
         if vs_idx is None and ps_idx is None:
             continue
         g = derived(vs_idx, ps_idx)
-        key = (tuple(g["cb"]), tuple(g["smp"]), tuple(g["tex"]),
-               tuple(g["desc"]["cb"]), tuple(g["desc"]["smp"]), tuple(g["desc"]["tex"]))
+        key = (tuple(g["cb"]), tuple(g["smp"]), tuple(g["tex"]))
         if key not in groups:
             groups[key] = g
             gorder.append(key)
@@ -195,31 +194,13 @@ def rebuild_from_rdef(data, blob_patch=None):
             pool_name_at.append((len(pool), nm))
             pool += struct.pack("<QII", 0, ascii_hash(nm), 0)
 
-    # cbuffer 表 + 参数表: 由**派生组**规范重建(cb 按"条目集"去重跨组共享) => 支持整条 cbuffer 增/删。
-    #   组内容来自 RDEF(derived): 现有 cbuffer 用容器存储定义, 新 cbuffer 用 RDEF 定义。
-    cb, cb_name_at, cb_mem_at = bytearray(), [], []
-    param, param_name_at = bytearray(), []
-    cb_uniq, cb_order, param_rel = {}, [], {}
-    for gk in gorder:
-        ck = tuple(groups[gk]["cb"])
-        if ck not in cb_uniq:
-            cb_uniq[ck] = None
-            cb_order.append(ck)
-    for ck in cb_order:
-        for d in ck:
-            if d in param_rel:
-                continue
-            param_rel[d] = len(param)
-            for (mn, ms, mo) in d[3]:
-                param_name_at.append((len(param), mn))
-                param += struct.pack("<IIII", 0, 0, ascii_hash(mn), (ms << 16) | mo)
-    cb_rel = {}
-    for ck in cb_order:
-        cb_rel[ck] = len(cb)
-        for d in ck:
-            cb_name_at.append((len(cb), d[0]))
-            cb_mem_at.append((len(cb), d))
-            cb += struct.pack("<QIIIIQ", 0, ascii_hash(d[0]), 0, d[1], d[2], 0)
+    # cbuffer 表 + 参数表: **原样保留**(容器编辑不改 cbuffer), 仅重定位内部指针 => 保证 TailModel.decode 友好。
+    orig_cb, orig_param = bnd["cbuffer"], bnd["param"]
+    cb_sec, param_sec = bytes(t.sections["cbuffer"]), bytes(t.sections["param"])
+    for _e in t.cbuffer_entries:
+        use(_e["name"])
+    for _pe in t.param_entries:
+        use(_pe[5])
 
     # 描述符区: 4B 头 + 各**唯一段**([cb]/[smp]/[tex] 的条目序列按内容去重, 跨组共享);
     #   记录 +0x38/+0x48/+0x58 = 对应段起点。
@@ -247,17 +228,19 @@ def rebuild_from_rdef(data, blob_patch=None):
 
     pool_base = SKELETON_HI
     cb_base = pool_base + len(pool)
-    param_base = cb_base + len(cb)
-    desc_base = param_base + len(param)
+    param_base = cb_base + len(cb_sec)
+    desc_base = param_base + len(param_sec)
     str_base = desc_base + len(desc)
     for off, nm in pool_name_at:
         struct.pack_into("<Q", pool, off, str_base + str_rel[nm])
-    for off, nm in cb_name_at:
-        struct.pack_into("<Q", cb, off, str_base + str_rel[nm])
-    for off, d in cb_mem_at:
-        struct.pack_into("<Q", cb, off + 24, param_base + param_rel[d])
-    for off, nm in param_name_at:
-        struct.pack_into("<I", param, off, str_base + str_rel[nm])
+    cb = bytearray(cb_sec)
+    for _e in t.cbuffer_entries:
+        struct.pack_into("<Q", cb, _e["off"] - orig_cb, str_base + str_rel[_e["name"]])
+        struct.pack_into("<Q", cb, _e["off"] - orig_cb + 24,
+                         param_base + (_e["members_off"] - orig_param))
+    param = bytearray(param_sec)
+    for _pe in t.param_entries:
+        struct.pack_into("<I", param, _pe[0] - orig_param, str_base + str_rel[_pe[5]])
 
     new_tail = bytes(pool) + bytes(cb) + bytes(param) + bytes(desc) + bytes(str_pool)
     new_bs = SKELETON_HI + len(new_tail)
@@ -300,9 +283,10 @@ def rebuild_from_rdef(data, blob_patch=None):
                 struct.pack_into("<I", head, base + fo, desc_base + desc_rel[gk][drel])
             struct.pack_into("<I", head, base + 0x50, pool_base + smp_rel[gk])
             struct.pack_into("<I", head, base + 0x60, pool_base + tex_rel[gk])
-        if gk is not None:   # cbuffer 指针: 指向该组的 cb 切片(由派生组规范重建)
-            struct.pack_into("<I", head, base + 0x40,
-                             cb_base + cb_rel[tuple(groups[gk]["cb"])])
+        # cbuffer 指针: 原样保留(相对原 cb 区), 重定位到新 cb 区
+        ocb = u32(base + 0x40)
+        if orig_cb <= ocb < orig_param:
+            struct.pack_into("<I", head, base + 0x40, cb_base + (ocb - orig_cb))
         for fo in (0xD8, 0x104):
             v = u32(base + fo)
             nm = name_at(v)
@@ -337,8 +321,8 @@ def rebuild_from_rdef(data, blob_patch=None):
 # 按类别加"绑定资源"的 RDEF 字段预设(编码 = D3D_SIT_*; 实测自原版 bound resource 原始字段)。
 #   type: 0=cbuffer 1=tbuffer 2=texture 3=sampler 4=RWTexture(UAV) 5=Structured(SRV)
 #         6=RWStructured(UAV) 7=ByteAddress(SRV) 8=RWByteAddress(UAV)
-#   ⚠ cbuffer(type0) 不在此表: 加成员见 `add_cbuffer_member`; 删/解绑见 `remove_resource`;
-#     整条 cbuffer 的出现/消失(RDEF 驱动)由 `rebuild_from_rdef` 的组派生自动反映到容器 cb 区。
+#   ⚠ cbuffer(type0): **容器编辑暂不支持**(cbuffer 增/删/加成员需同时改 shader 逻辑, 属 DXBC 层)。
+#     底层写手 `rdef.add_cbuffer_member` 保留作构建块, 但暂不对外暴露。
 #   ⚠ UAV(type 4/6/8/9/10/11) **不支持**: 尾段池只收 SRV, 而记录计数字段却把 UAV 归 SRV
 #     (rdef_resources) ⇒ 加 UAV 会使计数与组不一致(实测 check_groups 96 bad)。材料本就无 UAV。
 #   ⚠ Structured 需 stride(=结构体字节大小, 存于 nsamp), 由调用方给或 UI 询问。
@@ -415,16 +399,20 @@ def add_resource(data, blob_idx, cat, name, slot=None, stride=None):
 def remove_resource(data, blob_idx, name):
     """从 blob 的 RDEF 删除名为 name 的绑定资源后重建整个容器。
 
-    含 cbuffer: 删 RDEF 绑定项后 cb 区由派生组重排(cbuffer 定义不再被重建), check_* 一致。
+    ⚠ 暂不支持删 cbuffer(type0): 单改容器/RDEF 而 shader 仍读它 => 引擎不填值, shader 读垃圾。
+    (cbuffer 增删属 DXBC 层: 需同时改 shader 逻辑; 底层写手 `rdef.add_cbuffer_member` 预留。)
     """
     try:
-        from .rdef import remove_bound_resource, blob_list
+        from .rdef import remove_bound_resource, rdef_bind_raw, blob_list
     except ImportError:
-        from rdef import remove_bound_resource, blob_list
+        from rdef import remove_bound_resource, rdef_bind_raw, blob_list
     _bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
     o, s = bl[blob_idx]
+    ty = next((t for (nm, t, *_r) in (rdef_bind_raw(data[o:o + s]) or []) if nm == name), None)
+    if ty == 0:
+        raise ValueError("暂不支持删除 cbuffer(需同时改 shader; 属 DXBC 层)")
     new_blob = remove_bound_resource(data[o:o + s], name)
     out = rebuild_from_rdef(data, {blob_idx: new_blob})
     if out is None:
