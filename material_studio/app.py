@@ -42,10 +42,7 @@ from material_toolkit.lib.mmtr_info import (  # noqa: E402
 )
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
-    find_translator, run_translator, check_asm, find_assembler, BlobSource,
-)
-from material_toolkit.lib.mmtr_assemble import (  # noqa: E402
-    assemble as assemble_mmtr, ProgramInstall,
+    find_translator, run_translator, check_asm, find_assembler,
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
@@ -59,7 +56,6 @@ from material_toolkit.lib.mmtr_rdefgen import (  # noqa: E402
     RESOURCE_KINDS, RESOURCE_LABELS, add_raw_resource, add_resource, parse_spec,
     remove_resource, resource_spec,
 )
-from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
 from material_toolkit.lib import mmtr_nogen as nogen  # noqa: E402
@@ -2579,170 +2575,6 @@ class Mdf2Panel(QWidget):
         _copy_to_clipboard(f"{ty} | {path}")
 
 
-# ---------------------------------------------------------------- 装配(模板+规格) 对话框
-def _assemble_install(spec, template):
-    """把一条 spec dict 变成一个 ProgramInstall(解析 asm/dxbc/blob 来源)。"""
-    src = spec["source"]
-    kind = src["kind"]
-    if kind == "asm":
-        ref = (extract_blob(template, spec["src_blob"])
-               if spec.get("src_blob") is not None else None)
-        source = BlobSource.from_asm(
-            open(src["path"], encoding="utf-8").read(), ref_dxbc=ref)
-    elif kind == "dxbc":
-        source = BlobSource.from_dxbc(open(src["path"], "rb").read())
-    elif kind == "blob":
-        source = BlobSource.transport(template, int(src["idx"]))
-    else:
-        raise ValueError(f"未知来源: {kind!r}")
-    return ProgramInstall(spec["role"], source, src_blob=spec.get("src_blob"),
-                          in_place=spec.get("in_place", False))
-
-
-class AssembleInstallDialog(QDialog):
-    """编辑"一条安装规格": 角色 + 源 blob + 程序来源 + 就地/追加。"""
-
-    def __init__(self, parent, template):
-        super().__init__(parent)
-        self.setWindowTitle("添加安装")
-        self._template = template
-        n = blob_count(template)
-        form = QFormLayout(self)
-        self.cmb_role = NoWheelComboBox()
-        self.cmb_role.addItems(["PS", "VS", "CS"])
-        form.addRow("角色", self.cmb_role)
-        self.cmb_src = NoWheelComboBox()
-        for i in range(n):
-            bi = blob_info(template, i)
-            self.cmb_src.addItem(f"blob[{i}] {bi['stage']} size={bi['size']}", i)
-        form.addRow("源 blob(被替换)", self.cmb_src)
-        self.cmb_kind = NoWheelComboBox()
-        self.cmb_kind.addItems(["asm 文件", "dxbc 文件", "本文件 blob"])
-        form.addRow("程序来源", self.cmb_kind)
-        self.ed_path = QLineEdit()
-        btn_browse = QPushButton("浏览…")
-        btn_browse.clicked.connect(self._browse)
-        self._pw = QWidget()
-        hb = QHBoxLayout(self._pw)
-        hb.setContentsMargins(0, 0, 0, 0)
-        hb.addWidget(self.ed_path, 1)
-        hb.addWidget(btn_browse)
-        form.addRow("文件", self._pw)
-        self.sp_blob = QSpinBox()
-        self.sp_blob.setRange(0, max(0, n - 1))
-        form.addRow("来源 blob 索引", self.sp_blob)
-        self.chk_inplace = QCheckBox("就地替换源 blob(不追加)")
-        self.chk_inplace.setToolTip(
-            "勾选=直接改写源 blob(blob 数不变); 不勾=追加为新 blob 并重指对应槽")
-        form.addRow("", self.chk_inplace)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        form.addRow(bb)
-        self.cmb_kind.currentIndexChanged.connect(self._sync)
-        self._sync()
-
-    def _sync(self):
-        k = self.cmb_kind.currentIndex()
-        self._pw.setVisible(k in (0, 1))
-        self.sp_blob.setVisible(k == 2)
-
-    def _browse(self):
-        if self.cmb_kind.currentIndex() == 0:
-            p, _ = QFileDialog.getOpenFileName(
-                self, "选择 asm", "", "asm (*.asm *.asm.txt *.txt);;所有文件 (*)")
-        else:
-            p, _ = QFileDialog.getOpenFileName(
-                self, "选择 dxbc", "", "dxbc (*.dxbc *.bin *.cbo);;所有文件 (*)")
-        if p:
-            self.ed_path.setText(p)
-
-    def spec(self):
-        k = self.cmb_kind.currentIndex()
-        if k == 0:
-            src = {"kind": "asm", "path": self.ed_path.text()}
-        elif k == 1:
-            src = {"kind": "dxbc", "path": self.ed_path.text()}
-        else:
-            src = {"kind": "blob", "idx": self.sp_blob.value()}
-        return {"role": self.cmb_role.currentText(),
-                "src_blob": self.cmb_src.currentData(),
-                "source": src,
-                "in_place": self.chk_inplace.isChecked()}
-
-    def accept(self):
-        if self.cmb_kind.currentIndex() in (0, 1) and not self.ed_path.text().strip():
-            QMessageBox.warning(self, "提示", "请先选择文件")
-            return
-        super().accept()
-
-
-class AssembleDialog(QDialog):
-    """装配规格编辑器: 维护一组安装, 确定后由调用方执行装配。"""
-
-    def __init__(self, parent, template, label=""):
-        super().__init__(parent)
-        self.setWindowTitle("装配 mmtr(模板 + 规格)")
-        self.resize(680, 440)
-        self._template = template
-        self._specs = []
-        v = QVBoxLayout(self)
-        v.addWidget(QLabel(f"模板: {label}  ({blob_count(template)} 个 blob)"))
-        self.lst = QListWidget()
-        v.addWidget(self.lst, 1)
-        hb = QHBoxLayout()
-        b_add = QPushButton("＋ 添加安装…")
-        b_del = QPushButton("删除所选")
-        b_clr = QPushButton("清空")
-        b_add.clicked.connect(self._add)
-        b_del.clicked.connect(self._del)
-        b_clr.clicked.connect(self._clear)
-        for b in (b_add, b_del, b_clr):
-            hb.addWidget(b)
-        hb.addStretch(1)
-        v.addLayout(hb)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("装配 → 新标签页")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-
-    def _add(self):
-        d = AssembleInstallDialog(self, self._template)
-        if d.exec() == QDialog.Accepted:
-            self._specs.append(d.spec())
-            self._refresh()
-
-    def _del(self):
-        rows = sorted((self.lst.row(it) for it in self.lst.selectedItems()),
-                      reverse=True)
-        for r in rows:
-            self._specs.pop(r)
-        self._refresh()
-
-    def _clear(self):
-        self._specs = []
-        self._refresh()
-
-    def _refresh(self):
-        self.lst.clear()
-        for s in self._specs:
-            src = s["source"]
-            k = src["kind"]
-            if k == "asm":
-                tgt = f"asm:{os.path.basename(src['path'])}"
-            elif k == "dxbc":
-                tgt = f"dxbc:{os.path.basename(src['path'])}"
-            else:
-                tgt = f"blob[{src['idx']}]"
-            mode = "就地替换" if s["in_place"] else "追加"
-            self.lst.addItem(
-                f"{s['role']}  ←  {tgt}   (源 blob[{s['src_blob']}], {mode})")
-
-    def spec_list(self):
-        return list(self._specs)
-
-
 # D3DCompile 错误行: 形如 "file.hlsl(12,5-9): error X3000: ..."
 _HLSL_ERR_RE = re.compile(r"\((\d+),(\d+)(?:-(\d+))?\):\s*(error|warning)\s+(\w+):\s*(.*)")
 
@@ -4285,8 +4117,6 @@ class MmtrTabs(QTabWidget):
     - 无文件时显示一个不可关闭的「(未打开)」占位页, 避免"无内容且无处可点"。
     """
 
-    DEFAULT_TITLE = "NewMMTR.mmtr.1808168797"
-
     def __init__(self):
         super().__init__()
         self.setTabsClosable(True)
@@ -4297,17 +4127,9 @@ class MmtrTabs(QTabWidget):
         hb = QHBoxLayout(box)
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(4)
-        btn_new = QPushButton("新建 mmtr…")
-        btn_new.setToolTip("从模板克隆新建 mmtr(选一个现有 mmtr 作为模板)")
-        btn_new.clicked.connect(self.new_dialog)
         btn_open = QPushButton("打开 mmtr/SDF…")
         btn_open.setToolTip("打开一个 mmtr/SDF 文件(新标签页)")
         btn_open.clicked.connect(self.open_dialog)
-        btn_asm = QPushButton("装配…")
-        btn_asm.setToolTip("以当前(或选定)mmtr 为模板, 按规格装配程序 -> 新标签页")
-        btn_asm.clicked.connect(self.assemble_dialog)
-        hb.addWidget(btn_new)
-        hb.addWidget(btn_asm)
         hb.addWidget(btn_open)
         self.setCornerWidget(box, Qt.TopRightCorner)
         self._placeholder = None
@@ -4320,63 +4142,12 @@ class MmtrTabs(QTabWidget):
         panel.load_path(path)
         return self._add_panel(panel)
 
-    def new_dialog(self):
-        """选一个现有 mmtr 当模板, 克隆为新文件。"""
-        p, _ = QFileDialog.getOpenFileName(
-            self, "选择模板 mmtr(克隆为新建文件)", "", "mmtr (*.mmtr.*);;所有文件 (*)")
-        if not p:
-            return
-        try:
-            data = new_from_template(open(p, "rb").read())
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
-            return
-        self.new_from_data(data)
-
-    def new_from_data(self, data, title=None):
-        """以给定 bytes 新建标签页(未保存; 标题用合成名)。"""
-        self._drop_placeholder()
-        panel = MmtrPanel(container=self)
-        panel.load_data(data, path=None, title=title or self.DEFAULT_TITLE)
-        return self._add_panel(panel)
-
     def open_dialog(self):
         p, _ = QFileDialog.getOpenFileName(
             self, "打开 mmtr/SDF", "",
             "mmtr/SDF (*.mmtr.* *.sdf.*);;mmtr (*.mmtr.*);;SDF (*.sdf.*);;所有文件 (*)")
         if p:
             self.open_path(p)
-
-    def assemble_dialog(self):
-        """装配(模板+规格) -> 新标签页。模板默认取当前页文件。"""
-        panel = self.current_panel()
-        if panel is not None and panel.data is not None:
-            template, label = panel.data, panel.doc_title()
-        else:
-            p, _ = QFileDialog.getOpenFileName(
-                self, "选择模板 mmtr", "", "mmtr (*.mmtr.*);;所有文件 (*)")
-            if not p:
-                return
-            template, label = open(p, "rb").read(), os.path.basename(p)
-        dlg = AssembleDialog(self, template, label)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        try:
-            installs = [_assemble_install(s, template) for s in dlg.spec_list()]
-            out = assemble_mmtr(template, installs)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "装配失败", str(e))
-            return
-        try:
-            issues = MmtrModel(out).validate()
-        except Exception as e:  # noqa: BLE001
-            issues = [str(e)]
-        if issues:
-            QMessageBox.warning(
-                self, "装配后自检",
-                f"头部自检发现 {len(issues)} 处问题(建议核对):\n"
-                + "\n".join(issues[:8]))
-        self.new_from_data(out, title="assembled.mmtr.1808168797")
 
     def current_panel(self):
         w = self.currentWidget()
