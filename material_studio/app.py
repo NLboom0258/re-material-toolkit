@@ -56,7 +56,8 @@ from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
 from material_toolkit.lib.mmtr_rdefgen import (  # noqa: E402
-    add_raw_resource, add_resource, parse_spec, remove_resource, resource_spec,
+    RESOURCE_KINDS, RESOURCE_LABELS, add_raw_resource, add_resource, parse_spec,
+    remove_resource, resource_spec,
 )
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
@@ -1801,13 +1802,17 @@ class MmtrPanel(QWidget):
             QMessageBox.warning(self, "提示", "请先打开 mmtr/SDF")
             return
         idx = self.cur_blob()
-        kinds = [("tex2d", "纹理2D (SRV)"), ("buf", "缓冲/ByteAddress (SRV)"),
-                 ("smp", "采样器")]
         lab, ok = QInputDialog.getItem(self, "添加资源", "类别:",
-                                       [t for _k, t in kinds], 0, False)
+                                       [t for _k, t in RESOURCE_LABELS], 0, False)
         if not ok:
             return
-        cat = next(k for k, t in kinds if t == lab)
+        cat = next(k for k, t in RESOURCE_LABELS if t == lab)
+        stride = None
+        if RESOURCE_KINDS[cat].get("stride"):
+            stride, ok = QInputDialog.getInt(self, "添加资源",
+                                             "结构体步长 stride(字节):", 80, 1, 1 << 20)
+            if not ok:
+                return
         try:
             vocab = derive_namepool(self.data)
             items = sorted(nm for nm, d in vocab.items()
@@ -1819,7 +1824,7 @@ class MmtrPanel(QWidget):
         if not (ok and name):
             return
         try:
-            self.data = add_resource(self.data, idx, cat, name)
+            self.data = add_resource(self.data, idx, cat, name, stride=stride)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return

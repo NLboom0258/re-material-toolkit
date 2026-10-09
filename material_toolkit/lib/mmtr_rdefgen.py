@@ -319,15 +319,30 @@ def rebuild_from_rdef(data, blob_patch=None):
     return bytes(head) + new_tail + b"".join(blob_bytes)
 
 
-# 按类别加"绑定资源"的 RDEF 字段预设(实测自原版 bound resource 原始字段)。
-#   ⚠ cbuffer(type=0) **不支持**: 它除绑定项外还需 RDEF 里的 cbuffer **定义表**(成员), add_bound_resource 不建它
-#   (与设计一致: cbuffer 引用需改 shader 源); UAV 因种类多(type 4/6/8/…) 未预置。
+# 按类别加"绑定资源"的 RDEF 字段预设(编码 = D3D_SIT_*; 实测自原版 bound resource 原始字段)。
+#   type: 0=cbuffer 1=tbuffer 2=texture 3=sampler 4=RWTexture(UAV) 5=Structured(SRV)
+#         6=RWStructured(UAV) 7=ByteAddress(SRV) 8=RWByteAddress(UAV)
+#   ⚠ cbuffer(type0) 增/删均**不支持**(除绑定项外还需 RDEF 里的 cbuffer 定义表/成员, 需改 shader 源)。
+#   ⚠ UAV(type 4/6/8/9/10/11) **不支持**: 尾段池只收 SRV, 而记录计数字段却把 UAV 归 SRV
+#     (rdef_resources) ⇒ 加 UAV 会使计数与组不一致(实测 check_groups 96 bad)。材料本就无 UAV。
+#   ⚠ Structured 需 stride(=结构体字节大小, 存于 nsamp), 由调用方给或 UI 询问。
 RESOURCE_KINDS = {
-    "tex2d": dict(type_=2, ret=5, dim=4, nsamp=0xFFFFFFFF, flags=0xC),  # Texture2D (SRV)
-    "buf":   dict(type_=7, ret=6, dim=1, nsamp=0, flags=0),            # ByteAddress Buffer (SRV)
-    "smp":   dict(type_=3, ret=0, dim=0, nsamp=0, flags=0),            # Sampler
+    "tex2d":    dict(type_=2, ret=5, dim=4, nsamp=0xFFFFFFFF, flags=0xC),               # Texture2D (SRV)
+    "texcube":  dict(type_=2, ret=5, dim=9, nsamp=0xFFFFFFFF, flags=0xC),               # TextureCube (SRV)
+    "struct":   dict(type_=5, ret=6, dim=1, nsamp=0, flags=0, stride=True),             # StructuredBuffer (SRV)
+    "buf":      dict(type_=7, ret=6, dim=1, nsamp=0, flags=0),                          # ByteAddressBuffer (SRV)
+    "smp":      dict(type_=3, ret=0, dim=0, nsamp=0, flags=0),                          # Sampler
 }
-_KIND_TYPES = {"tex2d": (2,), "buf": (7,), "smp": (3,)}
+# UI 用显示顺序(类别, 标签); Structured 在选类后另问 stride
+RESOURCE_LABELS = (
+    ("tex2d", "纹理2D (SRV)"),
+    ("texcube", "纹理立方 (SRV)"),
+    ("struct", "结构化缓冲 (SRV)"),
+    ("buf", "字节寻址缓冲 (SRV)"),
+    ("smp", "采样器 (Sampler)"),
+)
+_KIND_TYPES = {"tex2d": (2,), "texcube": (2,), "struct": (5,), "buf": (7,), "smp": (3,)}
+_UAV_TYPES = (4, 6, 8, 9, 10, 11)
 
 
 def add_raw_resource(data, blob_idx, name, type_, ret, dim, nsamp, flags, slot=None):
@@ -342,6 +357,9 @@ def add_raw_resource(data, blob_idx, name, type_, ret, dim, nsamp, flags, slot=N
         from rdef import add_bound_resource, rdef_bind_info, blob_list
     if type_ == 0:
         raise ValueError("不支持加 cbuffer(需定义表/改 shader 源)")
+    if type_ in _UAV_TYPES:
+        raise ValueError("不支持 UAV(type=%d): 尾段池只收 SRV, 而计数字段把 UAV 归 SRV, "
+                         "加后计数与组不一致; 材料本就无 UAV" % type_)
     _bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
@@ -361,25 +379,40 @@ def add_raw_resource(data, blob_idx, name, type_, ret, dim, nsamp, flags, slot=N
     return out
 
 
-def add_resource(data, blob_idx, cat, name, slot=None):
-    """按类别(cat ∈ RESOURCE_KINDS)给 blob 的 RDEF 加一条绑定资源后重建。"""
+def add_resource(data, blob_idx, cat, name, slot=None, stride=None):
+    """按类别(cat ∈ RESOURCE_KINDS)给 blob 的 RDEF 加一条绑定资源后重建。
+
+    Structured 系类别需 stride(=结构体字节大小)。
+    """
     if cat not in RESOURCE_KINDS:
         raise ValueError("未知资源类别: %s" % cat)
     k = RESOURCE_KINDS[cat]
+    nsamp = k["nsamp"]
+    if k.get("stride"):
+        if not stride:
+            raise ValueError("类别 %s 需要结构化步长 stride(结构体字节大小)" % cat)
+        nsamp = int(stride)
     return add_raw_resource(data, blob_idx, name, k["type_"], k["ret"],
-                            k["dim"], k["nsamp"], k["flags"], slot)
+                            k["dim"], nsamp, k["flags"], slot)
 
 
 def remove_resource(data, blob_idx, name):
-    """从 blob 的 RDEF 删除名为 name 的绑定资源后重建整个容器。"""
+    """从 blob 的 RDEF 删除名为 name 的绑定资源后重建整个容器。
+
+    ⚠ **禁止删 cbuffer**: 容器 cbuffer/参数段原样保留(不随 RDEF 重建), 删绑定项会让
+    描述符数量与定义表不一致(实测 check_desc 96 bad)。cbuffer 增删需 cbuffer 编辑支持。
+    """
     try:
-        from .rdef import remove_bound_resource, blob_list
+        from .rdef import remove_bound_resource, rdef_bind_raw, blob_list
     except ImportError:
-        from rdef import remove_bound_resource, blob_list
+        from rdef import remove_bound_resource, rdef_bind_raw, blob_list
     _bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
     o, s = bl[blob_idx]
+    ty = next((t for (nm, t, *_r) in (rdef_bind_raw(data[o:o + s]) or []) if nm == name), None)
+    if ty == 0:
+        raise ValueError("不支持删除 cbuffer(定义表原样保留, 会致不一致; 需 cbuffer 编辑支持)")
     new_blob = remove_bound_resource(data[o:o + s], name)
     out = rebuild_from_rdef(data, {blob_idx: new_blob})
     if out is None:
