@@ -56,8 +56,8 @@ from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
 from material_toolkit.lib.mmtr_rdefgen import (  # noqa: E402
-    RESOURCE_KINDS, RESOURCE_LABELS, add_raw_resource, add_resource, parse_spec,
-    remove_resource, resource_spec,
+    RESOURCE_KINDS, RESOURCE_LABELS, add_cbuffer_member, add_raw_resource,
+    add_resource, parse_spec, remove_resource, resource_spec,
 )
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
@@ -1725,11 +1725,15 @@ class MmtrPanel(QWidget):
             return None
         if d[0] == "rdef":
             _tag, cat, _slot, name = d
-            return [("删除资源", lambda: self.delete_resource(name)),
-                    ("复制资源信息(跨文件粘贴用)", lambda: self.copy_resource_info(name)),
-                    ("复制 名字+槽位",
-                     lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
-                    ("复制名", lambda: _copy_to_clipboard(name))]
+            items = [("删除资源", lambda: self.delete_resource(name)),
+                     ("复制资源信息(跨文件粘贴用)", lambda: self.copy_resource_info(name)),
+                     ("复制 名字+槽位",
+                      lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
+                     ("复制名", lambda: _copy_to_clipboard(name))]
+            if cat == "cbuffer":
+                items.insert(0, ("＋ 加成员(参数)",
+                                 lambda: self.add_cbuffer_member_dialog(name)))
+            return items
         return None
 
     def _menu_bgrp(self, item):
@@ -1877,6 +1881,42 @@ class MmtrPanel(QWidget):
             return
         self._reload_after_edit(full=True)
         QMessageBox.information(self, "删除资源", "已删除 %s, 并重建容器。" % name)
+
+    def add_cbuffer_member_dialog(self, cbuffer_name):
+        """给当前 blob 的某 cbuffer 加一个成员(参数): 改 RDEF 定义 + 容器参数表。
+
+        UserMaterial 惯例: RDEF 成员名带 `VAR_`, 容器/mdf2 用裸名。
+        """
+        if self.data is None:
+            return
+        idx = self.cur_blob()
+        try:
+            cbs = {nm: (sz, mem) for (nm, sz, mem)
+                   in (rdef_cbuffers(extract_blob(self.data, idx)) or [])}
+        except Exception:  # noqa: BLE001
+            cbs = {}
+        csz = cbs.get(cbuffer_name, (0, []))[0]
+        name, ok = QInputDialog.getText(self, "加 cbuffer 成员", "成员名(裸名):")
+        if not (ok and name):
+            return
+        size, ok = QInputDialog.getInt(self, "加 cbuffer 成员", "字节大小:", 4, 1, 4096)
+        if not ok:
+            return
+        offset, ok = QInputDialog.getInt(self, "加 cbuffer 成员",
+                                         "偏移(默认=当前 size):", csz, 0, 1 << 16)
+        if not ok:
+            return
+        rd = ("VAR_" + name) if (cbuffer_name == "UserMaterial"
+                                 and not name.startswith("VAR_")) else name
+        try:
+            self.data = add_cbuffer_member(self.data, idx, cbuffer_name, name,
+                                           size, offset, rd_member=rd)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit(full=True)
+        QMessageBox.information(self, "加 cbuffer 成员",
+                                "已加 %s.%s (size %d @off %d)。" % (cbuffer_name, name, size, offset))
 
     # ---- Blob(shader) 编辑 ----
     def disasm_cur_blob(self):

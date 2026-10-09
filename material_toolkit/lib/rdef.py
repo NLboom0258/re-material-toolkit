@@ -398,6 +398,107 @@ def remove_bound_resource(blob, name):
     return bytes(new_blob)
 
 
+def add_cbuffer_member(blob, cbuffer_name, member_name, size, offset, vtype=None):
+    """给 RDEF 里某 cbuffer 的定义表末尾加一个成员(变量描述符 40B), 返回新 blob。
+
+    - 成员描述符 40B: name_off@0 / start@4 / size@8 / type@12 / default_off@16 / …
+      type(及其他常量字段)从**同 size 的现有成员克隆**(安全); 无同尺寸则用 vtype(默认 2)。
+    - 同步: 该 cbuffer 的 var_count+1、size=align16(max(size, offset+size));
+      插入后所有 >= 插入点的指针 +40(名字追加在末尾)。
+    - ⚠ 仅 SM5.0(32B/条 bound resource); 需配合容器侧 `Mmtr.add_cbuffer_param` 同步参数表。
+    """
+    blob = bytearray(blob)
+    n = _u32(blob, 28)
+    ofs = [_u32(blob, 32 + i * 4) for i in range(n)]
+    rdef_ci = next((co for co in ofs if blob[co:co + 4] == b"RDEF"), None)
+    if rdef_ci is None:
+        raise ValueError("blob has no RDEF")
+    cs = _u32(blob, rdef_ci + 4)
+    rdef = bytearray(blob[rdef_ci + 8:rdef_ci + 8 + cs])
+    n_cb, cb_off, n_br, br_off, target = struct.unpack_from("<IIIII", rdef, 0)
+    if _br_stride(target) != 32:
+        raise ValueError("仅支持 SM5.0 RDEF")
+    k = next((i for i in range(n_cb)
+              if _cstr(rdef, _u32(rdef, cb_off + i * 24)) == cbuffer_name), None)
+    if k is None:
+        raise ValueError("RDEF 无 cbuffer: %s" % cbuffer_name)
+    cbp = cb_off + k * 24
+    vc = _u32(rdef, cbp + 4)
+    vo = _u32(rdef, cbp + 8)
+    csz = _u32(rdef, cbp + 12)
+    ins = vo + vc * 40
+    # 克隆同 size 成员的常量字段(type/default 等)
+    tmpl = None
+    for i in range(n_cb):
+        p, vv, vvo = cb_off + i * 24, _u32(rdef, cb_off + i * 24 + 4), \
+            _u32(rdef, cb_off + i * 24 + 8)
+        for j in range(vv):
+            vp = vvo + j * 40
+            if _u32(rdef, vp + 8) == size:
+                tmpl = bytes(rdef[vp:vp + 40])
+                break
+        if tmpl:
+            break
+    if tmpl is None:
+        tmpl = struct.pack("<10I", 0, 0, size, (2 if vtype is None else vtype),
+                           0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0)
+    var = bytearray(tmpl)
+    new_name_off = len(rdef) + 40
+    struct.pack_into("<I", var, 0, new_name_off)
+    struct.pack_into("<I", var, 4, offset)
+    struct.pack_into("<I", var, 8, size)
+    nb = member_name.encode("ascii") + b"\x00"
+    out = bytearray()
+    out += rdef[:ins]
+    out += var
+    out += rdef[ins:]
+    out += nb
+
+    def delta(v):
+        return 40 if v >= ins else 0
+
+    def shift(fo):
+        v = _u32(out, fo)
+        d = delta(v)
+        if d:
+            struct.pack_into("<I", out, fo, v + d)
+
+    shift(4)                      # cb_off
+    shift(24)                     # CreatorOffset
+    for i in range(n_br):         # bound resource 名字
+        shift(br_off + i * 32)
+    cb_off2 = _u32(out, 4)
+    for i in range(n_cb):
+        p = cb_off2 + i * 24
+        shift(p)                  # cbuffer 名字
+        shift(p + 8)              # var_off
+        vv = _u32(out, p + 4)
+        vvo = _u32(out, p + 8)
+        for j in range(vv):
+            vp = vvo + j * 40
+            shift(vp)             # 成员名
+            shift(vp + 16)        # 默认值偏移
+    kp = cb_off2 + k * 24
+    struct.pack_into("<I", out, kp + 4, vc + 1)
+    struct.pack_into("<I", out, kp + 12, (max(csz, offset + size) + 15) & ~15)
+
+    # 重建 blob
+    d = len(out) - cs
+    new_blob = bytearray()
+    new_blob += blob[:32]
+    new_blob += b"\x00" * (n * 4)
+    new_ofs = [co + d if co > rdef_ci else co for co in ofs]
+    struct.pack_into("<" + "I" * n, new_blob, 32, *new_ofs)
+    for co, sz in sorted((co, _u32(blob, co + 4)) for co in ofs):
+        if co == rdef_ci:
+            new_blob += b"RDEF" + struct.pack("<I", len(out)) + out
+        else:
+            new_blob += blob[co:co + 8 + sz]
+    struct.pack_into("<I", new_blob, 24, len(new_blob))
+    new_blob[4:20] = dxil_hash(bytes(new_blob[20:]), "retail")
+    return bytes(new_blob)
+
+
 def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
     """把第 blob_idx 个 blob 换为 new_blob(长度可变), 重映射头部引用。
 

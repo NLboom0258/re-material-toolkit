@@ -420,6 +420,35 @@ def remove_resource(data, blob_idx, name):
     return out
 
 
+def add_cbuffer_member(data, blob_idx, cbuffer, member, size, offset, rd_member=None):
+    """给某 cbuffer 加一个成员(参数): 改 blob 的 **RDEF** 定义 + 容器 **参数表**。
+
+    - `rdef.add_cbuffer_member`(RDEF: 加变量描述符 + cbuffer var_count/size);
+    - `Mmtr.add_cbuffer_param`(容器: 参数表条目 + cbuffer 绑定条目 count/size)。
+    - `rd_member` = RDEF 里的成员名(默认 = member; UserMaterial 惯例 `VAR_` 前缀, 由调用方给)。
+    - `offset` = 成员在 cbuffer 内的字节偏移(默认取当前 size)。
+    """
+    try:
+        from .rdef import (add_cbuffer_member as _rd_add, rdef_cbuffers,
+                           replace_blob, blob_list)
+        from .mmtr import Mmtr
+    except ImportError:
+        from rdef import add_cbuffer_member as _rd_add, rdef_cbuffers, \
+            replace_blob, blob_list
+        from mmtr import Mmtr
+    _bs, bl = blob_list(data)
+    if not (0 <= blob_idx < len(bl)):
+        raise ValueError("blob idx out of range")
+    o, s = bl[blob_idx]
+    cbs = rdef_cbuffers(data[o:o + s]) or []
+    if not any(nm == cbuffer for (nm, _z, _m) in cbs):
+        raise ValueError("RDEF 无 cbuffer: %s" % cbuffer)
+    new_blob = _rd_add(data[o:o + s], cbuffer, rd_member or member, size, offset)
+    out = replace_blob(data, blob_idx, new_blob)
+    out = Mmtr.from_bytes(out).add_cbuffer_param(cbuffer, member, size, offset)
+    return out
+
+
 def resource_spec(data, blob_idx, name):
     """取 blob 中名为 name 的绑定资源的"全部信息"文本(RSRC|type|ret|dim|nsamp|flags|name)。
 
