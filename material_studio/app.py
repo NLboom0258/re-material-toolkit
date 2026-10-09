@@ -2183,11 +2183,19 @@ class Mdf2Panel(QWidget):
         self.tree_tex.setItemDelegate(
             InlineNameDelegate(self.tree_tex, 0, self._tex_name,
                                self._commit_tex_rename))
-        self.tree_param = QTreeWidget()
-        self.tree_param.setHeaderLabels(["参数名", "类型", "值", "offset"])
+        self.tree_param = ReorderTree()
+        self.tree_param.setHeaderLabels(["", "参数名", "类型", "值", "offset"])
+        # 拖拽重排(仅第0列 ≡ 手柄可发起拖拽, 防误拖)
+        self.tree_param.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree_param.setDragEnabled(True)
+        self.tree_param.setAcceptDrops(True)
+        self.tree_param.setDropIndicatorShown(True)
+        self.tree_param.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree_param.setIndentation(0)
+        self.tree_param.setColumnWidth(0, 22)
         # 参数名双击内联改名(预选原名); 类型/值列为常驻控件
         self.tree_param.setItemDelegate(
-            InlineNameDelegate(self.tree_param, 0, self._param_name,
+            InlineNameDelegate(self.tree_param, 1, self._param_name,
                                self._commit_param_rename))
 
         # 材质属性页: 着色类型 + flags 位 + Tess/Phong
@@ -2266,6 +2274,7 @@ class Mdf2Panel(QWidget):
         attach_menu(self.tree_mat, self._menu_mat)
         attach_menu(self.tree_tex, self._menu_tex)
         attach_menu(self.tree_param, self._menu_param)
+        self.tree_param.reordered.connect(self._on_param_moved)
 
     def doc_title(self):
         """标签页标题: 已打开文件用文件名; 未命名(新建)用 NewMDF2.mdf2.10。"""
@@ -2359,9 +2368,11 @@ class Mdf2Panel(QWidget):
         fm = self.tree_param.fontMetrics()
         type_w = max(fm.horizontalAdvance(n) for n in names) + 36   # 文字 + 下拉箭头/内边距
         for pr in m.properties:
-            it = QTreeWidgetItem([pr.name, "", "", f"0x{pr.data_offset:04x}"])
+            it = QTreeWidgetItem(["", pr.name, "", "", f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
             it.setFlags(it.flags() | Qt.ItemIsEditable)   # 参数名可双击内联改名
+            it.setIcon(0, _grip_icon())
+            it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)   # 仅同级重排(不嵌套)
             self.tree_param.addTopLevelItem(it)
             # 类型列: 常驻下拉(改类型 = 改值个数)
             cb = NoWheelComboBox()
@@ -2371,12 +2382,36 @@ class Mdf2Panel(QWidget):
                 cb.setCurrentText(pr.type)
             cb.currentTextChanged.connect(
                 lambda t, nm=pr.name: self._defer_set_type(nm, t))
-            self.tree_param.setItemWidget(it, 1, cb)
+            self.tree_param.setItemWidget(it, 2, cb)
             # 值列: 类型化控件(分量输入框; float3/4 带颜色块)
-            self.tree_param.setItemWidget(it, 2, ValueEditor(pr))
-        fit_columns(self.tree_param, [0, 3], pad=24, min_w=90, max_w=420)
-        self.tree_param.setColumnWidth(1, type_w + 12)
-        self.tree_param.setColumnWidth(2, 360)
+            self.tree_param.setItemWidget(it, 3, ValueEditor(pr))
+        fit_columns(self.tree_param, [1, 4], pad=24, min_w=90, max_w=420)
+        self.tree_param.setColumnWidth(2, type_w + 12)
+        self.tree_param.setColumnWidth(3, 360)
+
+    def _on_param_moved(self, *_a):
+        """材质参数拖拽重排: 读当前行顺序 -> 重排 properties + 重算偏移。"""
+        m = self._cur_material()
+        if m is None:
+            return
+        order = []
+
+        def _collect(it):
+            order.append(it.text(1))
+            for j in range(it.childCount()):
+                _collect(it.child(j))
+
+        for i in range(self.tree_param.topLevelItemCount()):
+            _collect(self.tree_param.topLevelItem(i))
+        if order == [pr.name for pr in m.properties]:
+            return
+        by = {pr.name: pr for pr in m.properties}
+        if set(order) != set(by):
+            self.refresh_params()
+            return
+        m.properties = [by[n] for n in order]
+        relayout_offsets(m)
+        self.refresh_params()
 
     # ---- 材质级编辑(新增/删除/改名 + 着色类型/flags) ----
     def _mat_name(self, item):
@@ -2529,13 +2564,13 @@ class Mdf2Panel(QWidget):
         acts = [("新增参数", self.add_param)]
         d = item.data(0, Qt.UserRole) if item else None
         if d and d[0] == "param":
-            acts = [("重命名", lambda: self.tree_param.editItem(item, 0)),
+            acts = [("重命名", lambda: self.tree_param.editItem(item, 1)),
                     ("改类型", lambda: self.set_param_type(d[1])),
                     ("删除参数", lambda: self.delete_param(d[1])),
                     ("新增参数", self.add_param),
                     ("复制行",
                      lambda: _copy_to_clipboard(
-                         " | ".join(item.text(c) for c in range(4))))]
+                         " | ".join(item.text(c) for c in range(1, 5))))]
         return acts
 
     def add_param(self):
