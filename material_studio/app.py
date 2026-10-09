@@ -56,7 +56,7 @@ from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
 from material_toolkit.lib.mmtr_rdefgen import (  # noqa: E402
-    add_raw_resource, add_resource, parse_spec, resource_spec,
+    add_raw_resource, add_resource, parse_spec, remove_resource, resource_spec,
 )
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
@@ -1724,7 +1724,8 @@ class MmtrPanel(QWidget):
             return None
         if d[0] == "rdef":
             _tag, cat, _slot, name = d
-            return [("复制资源信息(跨文件粘贴用)", lambda: self.copy_resource_info(name)),
+            return [("删除资源", lambda: self.delete_resource(name)),
+                    ("复制资源信息(跨文件粘贴用)", lambda: self.copy_resource_info(name)),
                     ("复制 名字+槽位",
                      lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
                     ("复制名", lambda: _copy_to_clipboard(name))]
@@ -1856,6 +1857,21 @@ class MmtrPanel(QWidget):
             return
         self._reload_after_edit(full=True)
         QMessageBox.information(self, "粘贴资源", "已粘贴 %s, 并重建容器。" % name)
+
+    def delete_resource(self, name):
+        """从当前 blob 的 RDEF 删除某资源, 并重建容器。"""
+        if self.data is None:
+            return
+        if QMessageBox.question(self, "删除资源",
+                                "从当前 blob 删除资源 %s ?" % name) != QMessageBox.Yes:
+            return
+        try:
+            self.data = remove_resource(self.data, self.cur_blob(), name)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit(full=True)
+        QMessageBox.information(self, "删除资源", "已删除 %s, 并重建容器。" % name)
 
     # ---- Blob(shader) 编辑 ----
     def disasm_cur_blob(self):

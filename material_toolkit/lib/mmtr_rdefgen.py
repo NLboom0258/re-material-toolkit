@@ -370,6 +370,23 @@ def add_resource(data, blob_idx, cat, name, slot=None):
                             k["dim"], k["nsamp"], k["flags"], slot)
 
 
+def remove_resource(data, blob_idx, name):
+    """从 blob 的 RDEF 删除名为 name 的绑定资源后重建整个容器。"""
+    try:
+        from .rdef import remove_bound_resource, blob_list
+    except ImportError:
+        from rdef import remove_bound_resource, blob_list
+    _bs, bl = blob_list(data)
+    if not (0 <= blob_idx < len(bl)):
+        raise ValueError("blob idx out of range")
+    o, s = bl[blob_idx]
+    new_blob = remove_bound_resource(data[o:o + s], name)
+    out = rebuild_from_rdef(data, {blob_idx: new_blob})
+    if out is None:
+        raise ValueError("非主版本(0x01100004)容器, 暂不支持 RDEF 重建")
+    return out
+
+
 def resource_spec(data, blob_idx, name):
     """取 blob 中名为 name 的绑定资源的"全部信息"文本(RSRC|type|ret|dim|nsamp|flags|name)。
 

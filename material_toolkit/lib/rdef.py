@@ -329,6 +329,75 @@ def add_bound_resource(blob: bytes, name: str, slot: int, type_=TYPE_TEXTURE,
     return bytes(new_blob)
 
 
+def remove_bound_resource(blob, name):
+    """从 RDEF 删除名为 name 的 bound resource(仅删 32B 条目; 名字串留作孤儿), 返回新 blob。
+
+    镜象 add_bound_resource: 删条目后后续指针偏移 -32; n_br -1。仅支持 SM5.0(32B/条)。
+    """
+    blob = bytearray(blob)
+    n = _u32(blob, 28)
+    ofs = [_u32(blob, 32 + i * 4) for i in range(n)]
+    rdef_ci = next((co for co in ofs if blob[co:co + 4] == b"RDEF"), None)
+    if rdef_ci is None:
+        raise ValueError("blob has no RDEF")
+    cs = _u32(blob, rdef_ci + 4)
+    rdef = bytearray(blob[rdef_ci + 8:rdef_ci + 8 + cs])
+    n_cb, cb_off, n_br, br_off, target = struct.unpack_from("<IIIII", rdef, 0)
+    if _br_stride(target) != 32:
+        raise ValueError("仅支持 SM5.0 RDEF(32B/条)")
+    idx = next((k for k in range(n_br)
+                if _cstr(rdef, _u32(rdef, br_off + k * 32)) == name), None)
+    if idx is None:
+        raise ValueError("RDEF 未声明资源: %s" % name)
+    rem = br_off + idx * 32
+    out = bytearray()
+    out += rdef[:rem]
+    out += rdef[rem + 32:]
+
+    def nd(v):
+        return -32 if v >= rem + 32 else 0
+
+    def nshift(fo):
+        v = _u32(out, fo)
+        d = nd(v)
+        if d:
+            struct.pack_into("<I", out, fo, v + d)
+
+    nshift(4)      # ConstantBufferOffset
+    nshift(24)     # CreatorOffset
+    for k in range(n_br - 1):        # 其余 bound resource 名字
+        nshift(br_off + k * 32)
+    cb_off2 = _u32(out, 4)
+    for k in range(n_cb):
+        p = cb_off2 + k * 24
+        nshift(p)                    # cbuffer 名字
+        vc = _u32(out, p + 4)
+        vo = _u32(out, p + 8)
+        vo2 = vo + nd(vo)
+        struct.pack_into("<I", out, p + 8, vo2)
+        for vv in range(vc):
+            vp = vo2 + vv * 40
+            nshift(vp)               # 变量名
+            nshift(vp + 16)          # variable 描述符 field[4]
+    struct.pack_into("<I", out, 8, n_br - 1)   # bound resource 数量 -1
+
+    # 重建 blob
+    d = len(out) - cs
+    new_blob = bytearray()
+    new_blob += blob[:32]
+    new_blob += b"\x00" * (n * 4)
+    new_ofs = [co + d if co > rdef_ci else co for co in ofs]
+    struct.pack_into("<" + "I" * n, new_blob, 32, *new_ofs)
+    for co, sz in sorted((co, _u32(blob, co + 4)) for co in ofs):
+        if co == rdef_ci:
+            new_blob += b"RDEF" + struct.pack("<I", len(out)) + out
+        else:
+            new_blob += blob[co:co + 8 + sz]
+    struct.pack_into("<I", new_blob, 24, len(new_blob))
+    new_blob[4:20] = dxil_hash(bytes(new_blob[20:]), "retail")
+    return bytes(new_blob)
+
+
 def replace_blob(data: bytes, blob_idx: int, new_blob: bytes) -> bytes:
     """把第 blob_idx 个 blob 换为 new_blob(长度可变), 重映射头部引用。
 
