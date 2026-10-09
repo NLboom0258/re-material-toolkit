@@ -30,7 +30,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from material_toolkit.lib.binding import (  # noqa: E402
-    add_texture_slot, rename_name_global,
+    rename_name_global,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
@@ -1202,9 +1202,8 @@ class MmtrPanel(QWidget):
 
         hb = QHBoxLayout()
         self.btn_open = QPushButton("打开 mmtr")
-        self.btn_add = QPushButton("加贴图槽(全部组)")
         self.btn_exp = QPushButton("导出 mmtr")
-        for b in (self.btn_open, self.btn_add, self.btn_exp):
+        for b in (self.btn_open, self.btn_exp):
             hb.addWidget(b)
         hb.addStretch(1)
 
@@ -1306,7 +1305,6 @@ class MmtrPanel(QWidget):
         lay.addWidget(split, 1)
 
         self.btn_open.clicked.connect(self.open_mmtr)
-        self.btn_add.clicked.connect(lambda: self.add_slot(None))
         self.btn_exp.clicked.connect(self.export_mmtr)
         self.btn_dis.clicked.connect(self.disasm_cur_blob)
         self.btn_apply.clicked.connect(self.apply_cur_blob)
@@ -1680,24 +1678,6 @@ class MmtrPanel(QWidget):
         self.refresh_pool()
         self.refresh_group_page()
 
-    def _commit_slot_setname(self, group_k, slot, old, new):
-        """下拉框改某槽的池名: 按名改(该 blob 的所有组一起改, 绑定键=名)。"""
-        new = (new or "").strip()
-        if not new or new == old or self.data is None:
-            return
-        if not self._need_mmtr():
-            return
-        try:
-            out = rename_name_global(self.data, old, new,
-                                     blobs=[self.cur_blob()])
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
-            return
-        if out == self.data:
-            return                    # 无命中(含重复信号) -> 不动
-        self.data = out
-        self._reload_after_rename()
-
     def refresh_params(self):
         self.tree_param.clear()
         for pr in self._um:
@@ -1713,41 +1693,11 @@ class MmtrPanel(QWidget):
             return False
         return True
 
-    def add_slot(self, only_indices=None):
-        if not self._need_mmtr():
-            return
-        idx = self.cur_blob()
-        name, ok = QInputDialog.getText(self, "加贴图槽",
-                                        "新贴图槽的池名(需与 mdf2 的 type 一致):")
-        if not (ok and name):
-            return
-        try:
-            self.data = add_texture_slot(self.data, idx, name, only_indices=only_indices)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
-            return
-        self._reload_after_edit(full=True)
-
-    def rename_cur(self, slot, oldname):
-        if not self._need_mmtr():
-            return
-        name, ok = QInputDialog.getText(self, "改名槽", f"把 {oldname} 改名为:")
-        if not (ok and name and name != oldname):
-            return
-        try:
-            self.data = rename_name_global(self.data, oldname, name,
-                                           blobs=[self.cur_blob()])
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "失败", str(e))
-            return
-        self._reload_after_rename()
-
     # ---- 右键菜单 ----
     def _menu_blob(self, item):
         if item is None or self.data is None:
             return None
-        return [("加贴图槽(全部组)", lambda: self.add_slot(None)),
-                ("复制 blob 信息",
+        return [("复制 blob 信息",
                  lambda: _copy_to_clipboard(
                      f"blob {item.text(0)} {item.text(1)} size={item.text(2)} "
                      f"groups={item.text(3)} srv={item.text(4)}"))]
