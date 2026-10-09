@@ -1205,10 +1205,8 @@ class MmtrPanel(QWidget):
         self._container = container
 
         hb = QHBoxLayout()
-        self.btn_open = QPushButton("打开 mmtr")
         self.btn_exp = QPushButton("导出 mmtr")
-        for b in (self.btn_open, self.btn_exp):
-            hb.addWidget(b)
+        hb.addWidget(self.btn_exp)
         hb.addStretch(1)
 
         self.tree_blob = QTreeWidget()
@@ -1319,7 +1317,6 @@ class MmtrPanel(QWidget):
         lay.addLayout(hb)
         lay.addWidget(split, 1)
 
-        self.btn_open.clicked.connect(self.open_mmtr)
         self.btn_exp.clicked.connect(self.export_mmtr)
         self.btn_add_res.clicked.connect(self.add_resource_dialog)
         self.btn_paste_res.clicked.connect(self.paste_resource)
