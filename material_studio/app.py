@@ -234,6 +234,24 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class ReorderTree(QTreeWidget):
+    """支持内部拖拽重排的树: **仅第 0 列(≡ 手柄)可发起拖拽**(防误拖); 放下后发 reordered。
+
+    用 `dropEvent` 后发信号(而非 `rowsMoved`): QTreeWidget 的内部移动不保证发 rowsMoved。
+    """
+
+    reordered = Signal()
+
+    def startDrag(self, actions):
+        if self.currentColumn() != 0:
+            return
+        super().startDrag(actions)
+
+    def dropEvent(self, e):
+        super().dropEvent(e)
+        self.reordered.emit()
+
+
 # asm 高亮/静态检查用到的 DXBC SM5 指令集(基名; 带 _sat/_indexable(...) 等由识别器归一)
 _ASM_OPCODES = {
     "mov", "movc", "mova", "mad", "add", "mul", "div", "dp2", "dp3",
@@ -1213,14 +1231,15 @@ class MmtrPanel(QWidget):
         self.tree_pool.setHeaderLabels(["类别 / 资源名", "引用 blob"])
         self.tree_group = QTreeWidget()
         self.tree_group.setHeaderLabels(["组", "代表 / 成员", "记录·blob·内容"])
-        self.tree_param = QTreeWidget()
-        self.tree_param.setHeaderLabels(["参数名", "类型", "大小", "offset"])
-        # 支持拖拽重排(材质参数顺序; 偏移自动重算)。拖拽结束后 _on_param_moved 应用。
+        self.tree_param = ReorderTree()
+        self.tree_param.setHeaderLabels(["", "参数名", "类型", "大小", "offset"])
+        # 拖拽重排(材质参数顺序; 偏移自动重算): 仅第 0 列(≡ 手柄)可发起拖拽, 防误拖。
         self.tree_param.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree_param.setDragEnabled(True)
         self.tree_param.setAcceptDrops(True)
         self.tree_param.setDropIndicatorShown(True)
         self.tree_param.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree_param.setColumnWidth(0, 28)
         self.tree_variant = QTreeWidget()
         self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·HS·DS·GS·CS)", "维度 / 说明"])
 
@@ -1332,7 +1351,7 @@ class MmtrPanel(QWidget):
         attach_menu(self.tree_group, self._menu_bgrp)
         attach_menu(self.tree_pool, self._menu_pool)
         attach_menu(self.tree_param, self._menu_param)
-        self.tree_param.model().rowsMoved.connect(self._on_param_moved)
+        self.tree_param.reordered.connect(self._on_param_moved)
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
@@ -1698,20 +1717,20 @@ class MmtrPanel(QWidget):
     def refresh_params(self):
         self.tree_param.clear()
         for pr in self._um:
-            it = QTreeWidgetItem([pr.name, type_label(pr.size), f"{pr.size}B",
+            it = QTreeWidgetItem(["≡", pr.name, type_label(pr.size), f"{pr.size}B",
                                   f"0x{pr.offset:04x}"])
             it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)   # 仅同级重排(不嵌套)
             self.tree_param.addTopLevelItem(it)
-        fit_columns(self.tree_param, [0, 1, 2, 3], pad=24, min_w=80, max_w=320)
+        fit_columns(self.tree_param, [1, 2, 3, 4], pad=24, min_w=80, max_w=320)
 
     def _on_param_moved(self, *_a):
-        """材质参数页拖拽重排: 读当前行顺序 -> 重算偏移并写回容器。"""
+        """材质参数页拖拽重排(仅手柄列可拖): 读当前行顺序 -> 重算偏移并写回容器。"""
         if self.data is None:
             return
         order = []
 
         def _collect(it):
-            order.append(it.text(0))
+            order.append(it.text(1))
             for j in range(it.childCount()):
                 _collect(it.child(j))
 
@@ -1725,6 +1744,21 @@ class MmtrPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "重排失败", str(e))
             self.refresh_params()          # 回滚显示
+            return
+        self._reload_after_edit()
+        self.refresh_params()
+
+    def remove_param(self, name):
+        """删除 UserMaterial 某参数(就地压缩 + 偏移重算)。"""
+        if self.data is None:
+            return
+        if QMessageBox.question(self, "删除参数",
+                                "删除 UserMaterial 参数 %s ?" % name) != QMessageBox.Yes:
+            return
+        try:
+            self.data = Mmtr.from_bytes(self.data).remove_cbuffer_param("UserMaterial", name)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
             return
         self._reload_after_edit()
         self.refresh_params()
@@ -1797,9 +1831,10 @@ class MmtrPanel(QWidget):
     def _menu_param(self, item):
         acts = [("新增参数(UserMaterial)", self.add_param)]
         if item is not None:
+            acts.append(("删除参数", lambda: self.remove_param(item.text(1))))
             acts.append(("复制行",
                          lambda: _copy_to_clipboard(
-                             " | ".join(item.text(c) for c in range(4)))))
+                             " | ".join(item.text(c) for c in range(1, 5)))))
         return acts
 
     def add_param(self):

@@ -261,6 +261,46 @@ class Mmtr:
             struct.pack_into("<I", data, p + 16, new_sz)
         return bytes(data)
 
+    def remove_cbuffer_param(self, cbuffer_name, name):
+        """从该 cbuffer 成员表删除名为 name 的参数, 重算剩余偏移, 并**就地压缩**(尾段长度不变)。
+
+        - 就地压缩: 后面成员上移一格, count-1, 最后一个 16B 清零为无效 slack ⇒ **无需重映射**。
+        - 被删成员的名字串保留(孤儿, 无害)。
+        """
+        data = bytearray(self.data)
+        entries = self._scan_cbuffer_entries(cbuffer_name)
+        if not entries:
+            raise ValueError(f"cbuffer {cbuffer_name!r} not found")
+        members_off, count = entries[0][1], entries[0][2]
+        idx = None
+        for j in range(count):
+            p = members_off + j * 16
+            if read_ascii(data, struct.unpack_from("<I", data, p)[0]) == name:
+                idx = j
+                break
+        if idx is None:
+            raise ValueError(f"参数 {name!r} 不在 {cbuffer_name}")
+        # 就地压缩: entries[idx..count-2] = entries[idx+1..count-1]
+        for j in range(idx, count - 1):
+            src = members_off + (j + 1) * 16
+            dst = members_off + j * 16
+            data[dst:dst + 16] = data[src:src + 16]
+        # 最后一条清零为无效 slack
+        struct.pack_into("<IIII", data, members_off + (count - 1) * 16, 0, 0, 0, 0)
+        # 重算剩余偏移(累积)
+        off = 0
+        for j in range(count - 1):
+            p = members_off + j * 16
+            name_off, _z, h, meta = struct.unpack_from("<IIII", data, p)
+            sz = meta >> 16
+            struct.pack_into("<IIII", data, p, name_off, 0, h, (sz << 16) | off)
+            off += sz
+        new_sz = (off + 15) & ~15
+        for (p, _mo, cnt, _sz) in entries:
+            struct.pack_into("<I", data, p + 16, new_sz)
+            struct.pack_into("<I", data, p + 20, cnt - 1)
+        return bytes(data)
+
     def dump(self):
         print(f"mmtr blob_start=0x{self.blob_start:x} "
               f"string_pool=0x{self.string_pool_lo:x}..0x{self.string_pool_hi:x} "
