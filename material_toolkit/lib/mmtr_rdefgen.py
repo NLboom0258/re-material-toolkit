@@ -330,18 +330,18 @@ RESOURCE_KINDS = {
 _KIND_TYPES = {"tex2d": (2,), "buf": (7,), "smp": (3,)}
 
 
-def add_resource(data, blob_idx, cat, name, slot=None):
-    """给 blob 的 RDEF 加一条绑定资源(cat ∈ RESOURCE_KINDS), 再按 RDEF 重建整个容器。
+def add_raw_resource(data, blob_idx, name, type_, ret, dim, nsamp, flags, slot=None):
+    """按原始字段给 blob 的 RDEF 加一条绑定资源后重建整个容器。
 
-    slot=None 取该类别现有 bind point 之后的下一个。**同 blob 已声明同名则报错**(去重)。
-    返回新容器 bytes。
+    slot=None 取同 type 现有 bind point 之后的下一个。同 blob 同名则报错(去重)。
+    ⚠ cbuffer(type_=0) 不支持(除绑定项外还需 cbuffer 定义表/成员)。
     """
     try:
         from .rdef import add_bound_resource, rdef_bind_info, blob_list
     except ImportError:
         from rdef import add_bound_resource, rdef_bind_info, blob_list
-    if cat not in RESOURCE_KINDS:
-        raise ValueError("未知资源类别: %s" % cat)
+    if type_ == 0:
+        raise ValueError("不支持加 cbuffer(需定义表/改 shader 源)")
     _bs, bl = blob_list(data)
     if not (0 <= blob_idx < len(bl)):
         raise ValueError("blob idx out of range")
@@ -351,14 +351,58 @@ def add_resource(data, blob_idx, cat, name, slot=None):
     if any(nm == name for (nm, _t, _bp, _d, _r) in info):
         raise ValueError("该 blob 已声明资源: %s" % name)
     if slot is None:
-        types = _KIND_TYPES[cat]
-        used = [bp for (nm, tt, bp, _d, _r) in info if tt in types]
+        used = [bp for (nm, tt, bp, _d, _r) in info if tt == type_]
         slot = (max(used) + 1) if used else 0
-    new_blob = add_bound_resource(blob, name, slot, **RESOURCE_KINDS[cat])
+    new_blob = add_bound_resource(blob, name, slot, type_=type_, ret=ret,
+                                  dim=dim, nsamp=nsamp, flags=flags)
     out = rebuild_from_rdef(data, {blob_idx: new_blob})
     if out is None:
         raise ValueError("非主版本(0x01100004)容器, 暂不支持 RDEF 重建")
     return out
+
+
+def add_resource(data, blob_idx, cat, name, slot=None):
+    """按类别(cat ∈ RESOURCE_KINDS)给 blob 的 RDEF 加一条绑定资源后重建。"""
+    if cat not in RESOURCE_KINDS:
+        raise ValueError("未知资源类别: %s" % cat)
+    k = RESOURCE_KINDS[cat]
+    return add_raw_resource(data, blob_idx, name, k["type_"], k["ret"],
+                            k["dim"], k["nsamp"], k["flags"], slot)
+
+
+def resource_spec(data, blob_idx, name):
+    """取 blob 中名为 name 的绑定资源的"全部信息"文本(RSRC|type|ret|dim|nsamp|flags|name)。
+
+    供跨文件“复制 -> 粘贴”添加。
+    """
+    try:
+        from .rdef import rdef_bind_raw, blob_list
+    except ImportError:
+        from rdef import rdef_bind_raw, blob_list
+    _bs, bl = blob_list(data)
+    if not (0 <= blob_idx < len(bl)):
+        raise ValueError("blob idx out of range")
+    o, s = bl[blob_idx]
+    for (nm, ty, ret, dim, nsamp, _bind, _cnt, flags) in (rdef_bind_raw(data[o:o + s]) or []):
+        if nm == name:
+            return "RSRC|%d|%d|%d|%d|%d|%s" % (ty, ret, dim, nsamp, flags, nm)
+    raise ValueError("该 blob 未声明资源: %s" % name)
+
+
+def parse_spec(text):
+    """解析 resource_spec 文本 -> (name, type, ret, dim, nsamp, flags); 非本格式返回 None。"""
+    t = (text or "").strip()
+    if not t.startswith("RSRC|"):
+        return None
+    p = t.split("|")
+    if len(p) < 7:
+        return None
+    try:
+        ty, ret, dim, nsamp, flags = (int(p[1]), int(p[2]), int(p[3]),
+                                      int(p[4]), int(p[5]))
+    except ValueError:
+        return None
+    return ("|".join(p[6:]), ty, ret, dim, nsamp, flags)
 
 
 def add_texture(data, blob_idx, name, slot=None):

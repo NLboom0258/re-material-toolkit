@@ -55,7 +55,9 @@ from material_toolkit.lib.rdef import (  # noqa: E402
 from material_toolkit.lib.derive import (  # noqa: E402
     derive_groups, derive_namepool, stage_text,
 )
-from material_toolkit.lib.mmtr_rdefgen import add_resource  # noqa: E402
+from material_toolkit.lib.mmtr_rdefgen import (  # noqa: E402
+    add_raw_resource, add_resource, parse_spec, resource_spec,
+)
 from material_toolkit.lib.mmtr_build import new_from_template  # noqa: E402
 from material_toolkit.lib import material_pass as mpass  # noqa: E402
 from material_toolkit.lib import material_gen as mgen  # noqa: E402
@@ -1283,8 +1285,18 @@ class MmtrPanel(QWidget):
         tv.addWidget(self.ed_asm, 1)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(wrap_with_add_button(
-            self.tree_grp, "＋ 添加资源", self.add_resource_dialog), "资源绑定")
+        rb = QWidget()
+        rv = QVBoxLayout(rb)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rh = QHBoxLayout()
+        self.btn_add_res = QPushButton("＋ 添加资源")
+        self.btn_paste_res = QPushButton("粘贴资源")
+        rh.addWidget(self.btn_add_res)
+        rh.addWidget(self.btn_paste_res)
+        rh.addStretch(1)
+        rv.addLayout(rh)
+        rv.addWidget(self.tree_grp, 1)
+        self.tabs.addTab(rb, "资源绑定")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
@@ -1308,6 +1320,8 @@ class MmtrPanel(QWidget):
 
         self.btn_open.clicked.connect(self.open_mmtr)
         self.btn_exp.clicked.connect(self.export_mmtr)
+        self.btn_add_res.clicked.connect(self.add_resource_dialog)
+        self.btn_paste_res.clicked.connect(self.paste_resource)
         self.btn_dis.clicked.connect(self.disasm_cur_blob)
         self.btn_apply.clicked.connect(self.apply_cur_blob)
         self.btn_asmo.clicked.connect(self.export_asm)
@@ -1710,7 +1724,8 @@ class MmtrPanel(QWidget):
             return None
         if d[0] == "rdef":
             _tag, cat, _slot, name = d
-            return [("复制 名字+槽位",
+            return [("复制资源信息(跨文件粘贴用)", lambda: self.copy_resource_info(name)),
+                    ("复制 名字+槽位",
                      lambda: _copy_to_clipboard(f"{cat} {name} @ {item.text(0)}")),
                     ("复制名", lambda: _copy_to_clipboard(name))]
         return None
@@ -1809,6 +1824,38 @@ class MmtrPanel(QWidget):
             return
         self._reload_after_edit(full=True)
         QMessageBox.information(self, "添加资源", "已加 %s(%s), 并重建容器。" % (name, cat))
+
+    def copy_resource_info(self, name):
+        """复制某资源在 RDEF 里的"全部信息"(跨文件粘贴用)。"""
+        if self.data is None:
+            return
+        try:
+            spec = resource_spec(self.data, self.cur_blob(), name)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "提示", str(e))
+            return
+        _copy_to_clipboard(spec)
+        QMessageBox.information(self, "复制资源", "已复制(可到别的文件「粘贴资源」):\n%s" % spec)
+
+    def paste_resource(self):
+        """从剪贴板粘贴一个资源(全部信息)加到当前 blob。"""
+        if self.data is None:
+            QMessageBox.warning(self, "提示", "请先打开 mmtr/SDF")
+            return
+        clp = QApplication.clipboard()
+        spec = parse_spec(clp.text() if clp else "")
+        if spec is None:
+            QMessageBox.warning(self, "提示", "剪贴板不是资源信息(先用「复制资源信息」复制)。")
+            return
+        name, ty, ret, dim, nsamp, flags = spec
+        try:
+            self.data = add_raw_resource(self.data, self.cur_blob(), name,
+                                         ty, ret, dim, nsamp, flags)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "失败", str(e))
+            return
+        self._reload_after_edit(full=True)
+        QMessageBox.information(self, "粘贴资源", "已粘贴 %s, 并重建容器。" % name)
 
     # ---- Blob(shader) 编辑 ----
     def disasm_cur_blob(self):

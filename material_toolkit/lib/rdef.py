@@ -112,6 +112,30 @@ def rdef_bind_info(blob):
     return out
 
 
+def rdef_bind_raw(blob):
+    """RDEF bound resources 原始字段 -> [(name,type,ret,dim,nsamp,bind,count,flags), ...]。
+
+    供"复制资源全部信息(跨文件粘贴)"用; SM5.1(40B/条)布局不同, 返回 None。
+    """
+    r = _rdef_of(blob)
+    if r is None:
+        return None
+    try:
+        _n_cb, _cb_off, n_br, br_off, _t = struct.unpack_from("<IIIII", r, 0)
+    except Exception:
+        return None
+    st = _br_stride(_t)
+    if st != 32:
+        return None
+    out = []
+    for k in range(n_br):
+        p = br_off + k * st
+        out.append((_cstr(r, _u32(r, p)), _u32(r, p + 4), _u32(r, p + 8),
+                    _u32(r, p + 12), _u32(r, p + 16), _u32(r, p + 20),
+                    _u32(r, p + 24), _u32(r, p + 28)))
+    return out
+
+
 def rdef_bind_order(blob):
     """RDEF bound resources 按**数组顺序**分桶 -> {"cb":[name...], "smp":[...], "tex":[...]} 保序。
 
