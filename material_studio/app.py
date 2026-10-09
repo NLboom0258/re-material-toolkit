@@ -68,10 +68,10 @@ from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import material_iface as miface  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
-    Qt, QTimer, QSize, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
+    Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPalette,
+    QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPalette, QPixmap,
     QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (  # noqa: E402
@@ -85,6 +85,28 @@ from PySide6.QtWidgets import (  # noqa: E402
     QStyleOptionViewItem, QTabBar, QTabWidget, QTextEdit, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+_grip_cache = None
+
+
+def _grip_icon(size=16):
+    """材质参数页的“拖拽手柄”图标(两列×三行圆点; 比字符清晰、可调大小/颜色)。"""
+    global _grip_cache
+    if _grip_cache is not None:
+        return _grip_cache
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(150, 150, 150))
+    for x in (size * 0.34, size * 0.66):
+        for y in (size * 0.26, size * 0.5, size * 0.74):
+            p.drawEllipse(QPointF(x, y), 1.7, 1.7)
+    p.end()
+    _grip_cache = QIcon(pm)
+    return _grip_cache
+
 
 # D3D_SRV_DIMENSION 名称(用于 RDEF 资源的维度显示)。
 _DIMNAME = {0: "?", 1: "buffer", 2: "tex1d", 3: "tex2d", 4: "tex2dms", 5: "tex3d",
@@ -1240,7 +1262,7 @@ class MmtrPanel(QWidget):
         self.tree_param.setDropIndicatorShown(True)
         self.tree_param.setDragDropMode(QAbstractItemView.InternalMove)
         self.tree_param.setIndentation(0)   # 扁平列表: 手柄列不被树缩进推挤(避免与参数名重叠)
-        self.tree_param.setColumnWidth(0, 26)
+        self.tree_param.setColumnWidth(0, 22)
         self.tree_variant = QTreeWidget()
         self.tree_variant.setHeaderLabels(["技术 / 变体 / 前缀", "程序 (PS·VS·HS·DS·GS·CS)", "维度 / 说明"])
 
@@ -1718,8 +1740,9 @@ class MmtrPanel(QWidget):
     def refresh_params(self):
         self.tree_param.clear()
         for pr in self._um:
-            it = QTreeWidgetItem(["≡", pr.name, type_label(pr.size), f"{pr.size}B",
+            it = QTreeWidgetItem(["", pr.name, type_label(pr.size), f"{pr.size}B",
                                   f"0x{pr.offset:04x}"])
+            it.setIcon(0, _grip_icon())
             it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)   # 仅同级重排(不嵌套)
             self.tree_param.addTopLevelItem(it)
         fit_columns(self.tree_param, [1, 2, 3, 4], pad=24, min_w=80, max_w=320)
