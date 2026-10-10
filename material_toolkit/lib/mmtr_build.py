@@ -149,11 +149,6 @@ class MmtrTemplate:
         return cls(open(path, "rb").read())
 
 
-def extract_skeleton(data):
-    """导出版本骨架(纯骨架 bytes)。"""
-    return MmtrTemplate(data).skeleton
-
-
 def new_from_template(template: bytes) -> bytes:
     """从模板构造新 mmtr 的 bytes(统一入口)。
 

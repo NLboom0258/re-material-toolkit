@@ -168,13 +168,15 @@ def rdef_bind_order(blob):
 
 
 def rdef_uav_names(blob):
-    """RDEF 里 **UAV** 的名字集合 (bound resource type ∈ {4,6,7,8,9,10} = RWTYPED/
+    """RDEF 里 **UAV** 的名字集合 (bound resource type ∈ {4,6,8,9,10,11} = RWTYPED/
     RWSTRUCTURED/RWBYTEADDRESS/APPEND/CONSUME/RWSTRUCTURED_WITH_COUNTER)。
 
     用途: 判别"UAV-only"着色器(如 Pick PS: 除 cb 外只有 UAV) —— 其 mmtr 记录计数与
     "非 cb/smp 即 SRV"的口径不一致(见 analysis/mmtr_record_fields.md)。无 RDEF 返回空集。
+    ⚠ 不含 type 7(ByteAddress) —— 那是 **SRV**(材质 PS 常用, 如 WhitePtSrv); 与
+      `rdef_bind_order`/`derive._CAT_UAV`/`mmtr_rdefgen._UAV_TYPES` 口径一致。
     """
-    _UAV = (4, 6, 7, 8, 9, 10)
+    _UAV = (4, 6, 8, 9, 10, 11)
     r = _rdef_of(blob)
     if r is None:
         return set()

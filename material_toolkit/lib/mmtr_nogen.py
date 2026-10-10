@@ -23,8 +23,7 @@ try:
     from . import rdef as R
     from . import mmtr_tail as T
     from . import vs_gen as VG
-    from .mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
-                             PT_LO, PT_N, PT_SIZE)
+    from .mmtr_build import SKELETON_HI, REC_LO, REC_SIZE
     from .hashes import ascii_hash
 except ImportError:  # 允许脚本直接 import
     import os
@@ -38,8 +37,7 @@ except ImportError:  # 允许脚本直接 import
     import rdef as R
     import mmtr_tail as T
     import vs_gen as VG
-    from mmtr_build import (SKELETON_HI, REC_LO, REC_N, REC_SIZE,
-                            PT_LO, PT_N, PT_SIZE)
+    from mmtr_build import SKELETON_HI, REC_LO, REC_SIZE
     from hashes import ascii_hash
 
 _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
@@ -67,17 +65,6 @@ def _uav_order(blob):
 
 def _variant_name(r):
     return (r.get("prefix") or "") + r["tech"]
-
-
-def _iface_from_decls(material_src, inputs=None):
-    """(兼容)按结构化 inputs 生成主 pass 接口。"""
-    from . import material_inputs as INP
-    iface, _ka, _rep = INP.build_iface_and_keepalive(
-        INP.default_iface(), engine_names=MIM.engine(inputs, "main"),
-        params=MIM.params(inputs, "main"), textures=MIM.textures(inputs, "main"),
-        presets=MIM.presets(inputs, "main"), all_params=MIM.all_params(inputs),
-        pass_name="main")
-    return iface
 
 
 # 极简"深度/阴影态 PS"(对齐原版 env_sea#5: `ps_5_0/dcl_globalFlags/ret`, 仅 SV_POSITION

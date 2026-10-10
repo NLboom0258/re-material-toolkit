@@ -342,7 +342,6 @@ RESOURCE_LABELS = (
     ("buf", "字节寻址缓冲 (SRV)"),
     ("smp", "采样器 (Sampler)"),
 )
-_KIND_TYPES = {"tex2d": (2,), "texcube": (2,), "struct": (5,), "buf": (7,), "smp": (3,)}
 _UAV_TYPES = (4, 6, 8, 9, 10, 11)
 
 

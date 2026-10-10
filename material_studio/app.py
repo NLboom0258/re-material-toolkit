@@ -65,13 +65,12 @@ from material_toolkit.lib import material_asset as masset  # noqa: E402
 from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
-from material_toolkit.lib import material_iface as miface  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPalette, QPixmap,
+    QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPixmap,
     QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (  # noqa: E402

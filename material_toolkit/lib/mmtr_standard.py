@@ -142,23 +142,6 @@ def diff_standard(a, b):
     return {"equal": not only_a and not only_b, "only_in_a": only_a, "only_in_b": only_b}
 
 
-def standard_bank(data):
-    """标准程序银行: {"VS"/"PS": {(前缀, 技术名): dxbc bytes}}(VS + Pick PS)。
-
-    按 (前缀, 技术名) 键 —— 生成新 mmtr 时, 标准槽可据此从银行取字节(脱离任意 donor)。
-    """
-    data = bytes(data)
-    kinds = blob_kinds(data)
-    bank = {"VS": {}, "PS": {}}
-    for v in MaterialModel(data).variants():
-        key = (v["prefix"] or "", v["tech"])
-        if v["vs"] >= 0 and kinds.get(v["vs"]) == "standard_vs":
-            bank["VS"].setdefault(key, B.extract_blob(data, v["vs"]))
-        if v["ps"] >= 0 and kinds.get(v["ps"]) == "standard_ps":
-            bank["PS"].setdefault(key, B.extract_blob(data, v["ps"]))
-    return bank
-
-
 def generate(donor, material_ps, pass_name="Deferred"):
     """骨架化生成: donor 提供**结构 + 标准 pass 集**; 仅把目标 pass 的**材质 PS** 换成新程序。
 

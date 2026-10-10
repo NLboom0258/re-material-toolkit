@@ -471,12 +471,6 @@ def interp_decls(pass_name="main", presets=()):
     return "\n".join(lines)
 
 
-def interp_has(pass_name, name, presets=()):
-    """该 pass 是否(按当前预设)声明某插值输入。"""
-    return any(s.get("name") == name
-               for s in _interp_specs_for(pass_name, presets))
-
-
 def pass_dep_names(pass_name="main", template=None):
     """该 pass **声明的引擎资源依赖**名列表(passes.json; 可按模板覆盖)。系统自动添加 + 锁定。"""
     return _pass_deps(pass_name, template)

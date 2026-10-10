@@ -53,18 +53,6 @@ def list_names():
     return sorted(out)
 
 
-def list_functions():
-    """[{name, path, source}]。"""
-    out = []
-    for n in list_names():
-        try:
-            with open(_path(n), encoding="utf-8") as f:
-                out.append({"name": n, "path": _path(n), "source": f.read()})
-        except OSError:
-            pass
-    return out
-
-
 def get(name):
     p = _path(name)
     if not os.path.isfile(p):
