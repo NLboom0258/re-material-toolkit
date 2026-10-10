@@ -28,7 +28,7 @@
 2. 安装 Python 依赖:`pip install -r requirements.txt`(需要 Python 3.10+)。
 3. 双击 `run.bat`(或 `python run.py`)启动 GUI。
    - 发布包已内置 `material_toolkit/bin/` 下的 `D3D_Shaders.exe`、`d3dcompiler_47.dll`,
-     以及可选的 `hlsl_blend_dxbc_translator.exe`(含其 `data/`)。
+     以及可选的 `hlsl_blend_dxbc_translator.exe`。
 
 ### 方式 B:从源码运行(仓库)
 
@@ -51,7 +51,7 @@
 ## 可选的"混合翻译器"
 
 工具支持一个可选功能:把"DXBC asm + HLSL 标记"的混合文本翻回纯 asm。
-**发布包已内置**其 `material_toolkit/bin/hlsl_blend_dxbc_translator.exe` 及运行所需的 `material_toolkit/bin/data/`
+**发布包已内置**其 `material_toolkit/bin/hlsl_blend_dxbc_translator.exe`
 (独立开源项目:[hlsl-blend-dxbc-translator](https://github.com/NLboom0258/hlsl-blend-dxbc-translator));
 **从仓库运行**则不含其 exe(需按该仓库自行构建)。**缺失不影响其余功能。**
 

@@ -23,10 +23,9 @@
 
 - 本项目支持一个**可选**功能:把"DXBC asm + HLSL 标记"的混合文本翻回纯 asm。
 - 该翻译器为**独立开源项目**:https://github.com/NLboom0258/hlsl-blend-dxbc-translator
-- **发布包已内置**其编译产物 `material_toolkit/bin/hlsl_blend_dxbc_translator.exe` 与运行所需的
-  函数库 `material_toolkit/bin/data/`(`rules.txt` + `functions/lib.txt`)。
+- **发布包已内置**其编译产物 `material_toolkit/bin/hlsl_blend_dxbc_translator.exe`。
 - **仓库不含其 exe**;从仓库运行如需该功能,请按上述仓库自行构建并放入 `material_toolkit/bin/`。
-  可用环境变量 `HLSL_BLEND_TRANSLATOR_EXE` / `HLSL_BLEND_TRANSLATOR_DATA` 指定。
+  可用环境变量 `HLSL_BLEND_TRANSLATOR_EXE` 指定。
 - 缺失该 exe 时,其余功能不受影响(纯 asm 照常)。
 - 许可:见其自身仓库。
 

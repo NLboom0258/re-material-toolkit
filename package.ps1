@@ -14,7 +14,7 @@
   Binaries go to material_toolkit/bin/:
     - d3dcompiler_47.dll           (already committed in the repo)
     - D3D_Shaders.exe              (via -D3DShadersExe)
-    - hlsl_blend_dxbc_translator.exe + data/  (via -TranslatorExe [-TranslatorData])
+    - hlsl_blend_dxbc_translator.exe  (via -TranslatorExe)
 .NOTES
   ASCII-only on purpose (Windows PowerShell 5.1 mis-decodes non-ASCII .ps1 without a BOM).
 .EXAMPLE
@@ -24,8 +24,7 @@
 param(
     [string]$Version = "0.1.0",
     [string]$D3DShadersExe = "",
-    [string]$TranslatorExe = "",
-    [string]$TranslatorData = ""
+    [string]$TranslatorExe = ""
 )
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -108,19 +107,6 @@ if ($D3DShadersExe -and (Test-Path -LiteralPath $D3DShadersExe)) {
 if ($TranslatorExe -and (Test-Path -LiteralPath $TranslatorExe)) {
     Copy-Item -LiteralPath $TranslatorExe -Destination (Join-Path $bin "hlsl_blend_dxbc_translator.exe") -Force
     Write-Host "  + hlsl_blend_dxbc_translator.exe"
-    $dataSrc = ""
-    $cands = @($TranslatorData,
-               (Join-Path (Split-Path -Parent $TranslatorExe) "data"),
-               (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $TranslatorExe))) "data"))
-    foreach ($c in $cands) {
-        if ($c -and (Test-Path -LiteralPath $c)) { $dataSrc = $c; break }
-    }
-    if ($dataSrc) {
-        Copy-Tree $dataSrc (Join-Path $bin "data")
-        Write-Host "  + translator data/"
-    } else {
-        Write-Warning "translator data/ not found; function imports may not resolve."
-    }
 } elseif (-not (Test-Path (Join-Path $bin "hlsl_blend_dxbc_translator.exe"))) {
     Write-Warning "no hlsl_blend_dxbc_translator.exe (optional). Pass -TranslatorExe to include it."
 }
