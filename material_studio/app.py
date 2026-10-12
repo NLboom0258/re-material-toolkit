@@ -1233,19 +1233,21 @@ def _strip_ver_suffix(name):
 
 
 def _get_save_path(parent, title, default_name, name_filter):
-    """保存对话框: 强制**非原生**(Qt 自绘), 从根源避免“按筛选器自动补后缀”。
+    """保存对话框(**保持原生外观**): 靠“筛选器不给 OS 默认扩展名”来杜绝后缀叠加。
 
-    原生对话框(Windows)会按筛选器把默认扩展名(.mmtr.1808168797)追加到文件名:
-    每次切换“保存类型”就叠一层; 且按“最后一个点”判定 ⇒ 即使已带该后缀也会再追加。
-    改用 Qt 自绘对话框(不依赖平台自动补后缀) ⇒ 名字原样保留, 不再靠事后折叠。
+    Windows 原生框会把筛选器里的扩展名当“默认扩展名”(defext)追加到文件名, 且按“最后一个点”
+    判定 ⇒ 多点后缀(.mmtr.1808168797)每切一次类型就叠一层、已带后缀也再加。
+    Qt 无 API 可关掉(原生框的 accept 也不可重写)。故本函数把筛选器 pattern 的扩展名去掉
+    (`(*.xxx)` -> `(*)`) ⇒ Qt 传空 defext ⇒ 系统不追加; 文件名保持预填原样。
     取消/关闭返回 None。
     """
-    dlg = QFileDialog(parent, title, default_name)
-    dlg.setOption(QFileDialog.DontUseNativeDialog, True)   # 根源: 关掉平台自动补后缀
+    cleaned = []
+    for f in name_filter.split(";;"):
+        cleaned.append(re.sub(r"\(\*\.[^)]*\)", "(*)", f))   # (*.ext) -> (*): 无 defext, 不追加
+    dlg = QFileDialog(parent, title, default_name)   # 不加 DontUseNativeDialog ⇒ 保留原生外观
     dlg.setAcceptMode(QFileDialog.AcceptSave)
     dlg.setFileMode(QFileDialog.AnyFile)
-    dlg.setNameFilters(name_filter.split(";;"))
-    dlg.setDefaultSuffix("")     # 双保险: 明确不补后缀
+    dlg.setNameFilters(cleaned)
     if dlg.exec() != QFileDialog.Accepted:
         return None
     fs = dlg.selectedFiles()
