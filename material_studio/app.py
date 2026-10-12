@@ -1205,20 +1205,12 @@ def wrap_with_add_button(tree, text, slot):
 
 
 def relayout_offsets(mat):
-    """按 cb_offset/顺序重算材质各参数的 data_offset(与 save 的口径一致)。
+    """按 d3dcompiler cbuffer 打包规则重算各参数 data_offset(与 Mdf2.save 同口径)。
 
-    用于让“新参数”的 offset 显示正确(不再是一开始的 0), 且与实际导出一致。
+    让“新参数”的 offset 显示正确, 且与实际导出完全一致。
     """
-    off = 0
-    for pr in mat.properties:
-        pr.param_count = len(pr.values)
-        if pr.cb_offset is not None:
-            pr.data_offset = pr.cb_offset
-            off = max(off, pr.cb_offset + pr.param_count * 4)
-        else:
-            pr.data_offset = off
-            off += pr.param_count * 4
-    mat.prop_block_size = off
+    from material_toolkit.lib.mdf2 import layout_prop_offsets
+    mat.prop_block_size = layout_prop_offsets(mat.properties)
 
 
 class MmtrPanel(QWidget):

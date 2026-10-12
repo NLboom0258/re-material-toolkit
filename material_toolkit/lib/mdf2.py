@@ -51,6 +51,40 @@ def param_type_float_count(type_name: str) -> int:
     return PARAM_TYPE_BYTES[type_name] // 4
 
 
+def d3d_cbuffer_next(cur_off: int, size: int) -> int:
+    """d3dcompiler 的 cbuffer 打包: 从 cur_off 起放一个 size 字节成员。
+
+    规则: 若该成员会跨 16 字节边界(即 cur_off%16 + size > 16), 则对齐到下一个 16 边界。
+    (与 material_iface.next_offset 同口径 => mdf2 值区 == shader 的 cbuffer 布局。)
+    """
+    if (cur_off % 16) + size > 16:
+        cur_off = (cur_off + 15) & ~15
+    return cur_off
+
+
+def layout_prop_offsets(properties) -> int:
+    """按 d3dcompiler cbuffer 打包规则计算各属性 data_offset(原地写回), 返回块大小。
+
+    - `cb_offset` 非 None: 用其值(权威偏移, 通常来自 mmtr/shader, 已是对齐布局);
+    - `cb_offset` 为 None: 从上一成员末尾按 d3dcompiler 规则续排(不跨 16 字节行)。
+
+    引擎按 mmtr/shader 的 cbuffer 偏移去 mdf2 值区取值, 故两者必须一致;
+    若按"顺序紧排"(不补对齐), float3/矩阵等会被读错位。
+    """
+    off = 0
+    for pr in properties:
+        pr.param_count = len(pr.values)
+        size = pr.param_count * 4
+        if pr.cb_offset is not None:
+            pr.data_offset = pr.cb_offset
+            off = max(off, pr.cb_offset + size)
+        else:
+            off = d3d_cbuffer_next(off, size)
+            pr.data_offset = off
+            off += size
+    return off
+
+
 # 材质着色类型(MaterialShadingType; 权威 = 逆向 DMC5 exe 的 via.render.MaterialShadingType)。
 # ⚠ DMC5 实际只有 11 项(下表); 社区工具(MDF-Manager/RE-Mesh-Editor)列的是"跨游戏并集":
 #   在 PrimitiveMesh(6) 之后多插了 PrimitiveSolidMesh/SpeedTree/GUI/GUIMeshTransparent/
@@ -541,20 +575,12 @@ class Mdf2:
             for pr in mat.properties:
                 pr.name_offset = str_off_base + pr.name_offset
 
-        # 逐材质计算 propData 与各子表偏移
+        # 逐材质计算 propData 与各子表偏移(值区按 d3dcompiler cbuffer 布局)
         cur_prop_data = 0
         for mat in self.materials:
             mat.prop_data_offset = data_off_base + cur_prop_data
-            off = 0
-            for pr in mat.properties:
-                if pr.cb_offset is not None:
-                    pr.data_offset = pr.cb_offset
-                    off = max(off, pr.cb_offset + pr.param_count * 4)
-                else:
-                    pr.data_offset = off
-                    off += pr.param_count * 4
-            mat.prop_block_size = off
-            cur_prop_data += off
+            mat.prop_block_size = layout_prop_offsets(mat.properties)
+            cur_prop_data += mat.prop_block_size
 
         # 组装
         out = bytearray()
