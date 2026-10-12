@@ -1233,17 +1233,19 @@ def _strip_ver_suffix(name):
 
 
 def _get_save_path(parent, title, default_name, name_filter):
-    """保存对话框(**保持原生外观**): 靠“筛选器不给 OS 默认扩展名”来杜绝后缀叠加。
+    """保存对话框(**保持原生外观 + 真正的类型过滤**): 让 defext 命中“最后一个点”以杜绝叠加。
 
-    Windows 原生框会把筛选器里的扩展名当“默认扩展名”(defext)追加到文件名, 且按“最后一个点”
-    判定 ⇒ 多点后缀(.mmtr.1808168797)每切一次类型就叠一层、已带后缀也再加。
-    Qt 无 API 可关掉(原生框的 accept 也不可重写)。故本函数把筛选器 pattern 的扩展名去掉
-    (`(*.xxx)` -> `(*)`) ⇒ Qt 传空 defext ⇒ 系统不追加; 文件名保持预填原样。
-    取消/关闭返回 None。
+    Windows 原生框会把筛选器的扩展名当“默认扩展名(defext)”追加, 且按“最后一个点”判定
+    ⇒ 多点后缀 .mmtr.1808168797 每切一次类型叠一层、已带后缀也再加; Qt 关不掉。
+    故把 pattern 的多点扩展名收成“末尾一段”((*.mmtr.1808168797)->(*.1808168797)):
+    原生下拉**只显示描述**(如“mmtr”)所以用户无感; 过滤仍命中(文件本就以 .1808168797 结尾);
+    而 defext 与文件名末段一致 ⇒ 系统不再追加。取消/关闭返回 None。
     """
     cleaned = []
     for f in name_filter.split(";;"):
-        cleaned.append(re.sub(r"\(\*\.[^)]*\)", "(*)", f))   # (*.ext) -> (*): 无 defext, 不追加
+        # (*.a.b.c) -> (*.c): 描述不变; defext 命中文件名“最后一个点” => 不追加; 过滤仍生效
+        cleaned.append(re.sub(r"\(\*\.([^) ]+)\)",
+                              lambda m: "(*." + m.group(1).rsplit(".", 1)[-1] + ")", f))
     dlg = QFileDialog(parent, title, default_name)   # 不加 DontUseNativeDialog ⇒ 保留原生外观
     dlg.setAcceptMode(QFileDialog.AcceptSave)
     dlg.setFileMode(QFileDialog.AnyFile)
