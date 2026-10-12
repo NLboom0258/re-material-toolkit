@@ -1456,7 +1456,8 @@ class MmtrPanel(QWidget):
     def export_mmtr(self):
         if self.data is None:
             return
-        p, _ = QFileDialog.getSaveFileName(self, "导出 mmtr", self.path or "out.mmtr.1808168797")
+        p = _get_save_path(self, "导出 mmtr", self.path or "out.mmtr.1808168797",
+                           "mmtr/SDF (*.1808168797);;所有文件 (*)")
         if p:
             open(p, "wb").write(self.data)
             QMessageBox.information(self, "导出", f"已写出 {len(self.data)} 字节:\n{p}")
@@ -2570,7 +2571,8 @@ class Mdf2Panel(QWidget):
     def export_mdf2(self):
         if self.obj is None:
             return
-        p, _ = QFileDialog.getSaveFileName(self, "导出 mdf2", self.path or "out.mdf2.10")
+        p = _get_save_path(self, "导出 mdf2", self.path or "out.mdf2.10",
+                           "mdf2 (*.mdf2.10);;所有文件 (*)")
         if p:
             self.obj.save(p)
             QMessageBox.information(self, "导出", f"已写出:\n{p}")
