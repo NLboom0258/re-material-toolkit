@@ -1232,27 +1232,20 @@ def _strip_ver_suffix(name):
     return name
 
 
-def _norm_out_path(path, ext):
-    """把导出路径的尾部版本后缀折叠为恰好一个 ext。
-
-    应对 Windows 保存框按“最后一个点”判定扩展名而重复追加(如 ...mmtr.1808168797 再加一层)。
-    """
-    d, b = os.path.split(path)
-    return os.path.join(d, _strip_ver_suffix(b) + ext)
-
-
 def _get_save_path(parent, title, default_name, name_filter):
-    """保存对话框(实例版): 从源头阻断 Qt 的“按筛选器自动补后缀”。
+    """保存对话框: 强制**非原生**(Qt 自绘), 从根源避免“按筛选器自动补后缀”。
 
-    静态 getSaveFileName 会在**每次切换“保存类型”**时用 completeBaseName()+后缀 追加;
-    对**多点后缀**(.mmtr.1808168797)completeBaseName 只去掉最后一层 ⇒ 每切一次叠一层。
-    改用实例 + setDefaultSuffix("") 关掉这个自动追加。取消/关闭返回 None。
+    原生对话框(Windows)会按筛选器把默认扩展名(.mmtr.1808168797)追加到文件名:
+    每次切换“保存类型”就叠一层; 且按“最后一个点”判定 ⇒ 即使已带该后缀也会再追加。
+    改用 Qt 自绘对话框(不依赖平台自动补后缀) ⇒ 名字原样保留, 不再靠事后折叠。
+    取消/关闭返回 None。
     """
     dlg = QFileDialog(parent, title, default_name)
+    dlg.setOption(QFileDialog.DontUseNativeDialog, True)   # 根源: 关掉平台自动补后缀
     dlg.setAcceptMode(QFileDialog.AcceptSave)
     dlg.setFileMode(QFileDialog.AnyFile)
     dlg.setNameFilters(name_filter.split(";;"))
-    dlg.setDefaultSuffix("")     # 关键: 阻断筛选器切换时的自动追加(多点后缀会反复叠)
+    dlg.setDefaultSuffix("")     # 双保险: 明确不补后缀
     if dlg.exec() != QFileDialog.Accepted:
         return None
     fs = dlg.selectedFiles()
@@ -3665,7 +3658,6 @@ class MaterialSystemPanel(QWidget):
                               "材质资产 (*.mmat.json);;All (*)")
         if not path:
             return
-        path = _norm_out_path(path, ".mmat.json")
         try:
             self.asset.save(path)
         except Exception as e:  # noqa: BLE001
@@ -3851,7 +3843,6 @@ class MaterialSystemPanel(QWidget):
                               "mmtr (*.mmtr.1808168797);;All (*)")
         if not path:
             return
-        path = _norm_out_path(path, ".mmtr.1808168797")
         open(path, "wb").write(data)
         tag = "无 donor"
         self.lbl_status.setText("已生成(%s) %s (%dB) PS=%sB 绑定组=%s 槽=%s"
@@ -3875,7 +3866,6 @@ class MaterialSystemPanel(QWidget):
                               "mdf2 (*.mdf2.10);;All (*)")
         if not path:
             return
-        path = _norm_out_path(path, ".mdf2.10")
         mpath = (self.asset.template.get("mmtr_path")
                  or "MasterMaterial/Master/%s.mmtr" % self.asset.name)
         try:
