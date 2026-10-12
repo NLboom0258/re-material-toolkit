@@ -1213,6 +1213,52 @@ def relayout_offsets(mat):
     mat.prop_block_size = layout_prop_offsets(mat.properties)
 
 
+_VER_SUFFIX_RE = re.compile(r"\.(?:mmtr|mdf2|sdf)\.\d+$")
+
+
+def _strip_ver_suffix(name):
+    """去掉文件名尾部的版本后缀(.mmtr.1808168797 / .mdf2.10 / .sdf.* / .mmat.json), 可反复。"""
+    name = os.path.basename(name or "")
+    changed = True
+    while changed:
+        changed = False
+        m = _VER_SUFFIX_RE.search(name)
+        if m:
+            name = name[:m.start()]
+            changed = True
+        elif name.endswith(".mmat.json"):
+            name = name[:-len(".mmat.json")]
+            changed = True
+    return name
+
+
+def _norm_out_path(path, ext):
+    """把导出路径的尾部版本后缀折叠为恰好一个 ext。
+
+    应对 Windows 保存框按“最后一个点”判定扩展名而重复追加(如 ...mmtr.1808168797 再加一层)。
+    """
+    d, b = os.path.split(path)
+    return os.path.join(d, _strip_ver_suffix(b) + ext)
+
+
+def _get_save_path(parent, title, default_name, name_filter):
+    """保存对话框(实例版): 从源头阻断 Qt 的“按筛选器自动补后缀”。
+
+    静态 getSaveFileName 会在**每次切换“保存类型”**时用 completeBaseName()+后缀 追加;
+    对**多点后缀**(.mmtr.1808168797)completeBaseName 只去掉最后一层 ⇒ 每切一次叠一层。
+    改用实例 + setDefaultSuffix("") 关掉这个自动追加。取消/关闭返回 None。
+    """
+    dlg = QFileDialog(parent, title, default_name)
+    dlg.setAcceptMode(QFileDialog.AcceptSave)
+    dlg.setFileMode(QFileDialog.AnyFile)
+    dlg.setNameFilters(name_filter.split(";;"))
+    dlg.setDefaultSuffix("")     # 关键: 阻断筛选器切换时的自动追加(多点后缀会反复叠)
+    if dlg.exec() != QFileDialog.Accepted:
+        return None
+    fs = dlg.selectedFiles()
+    return fs[0] if fs else None
+
+
 class MmtrPanel(QWidget):
     """mmtr 检视/编辑面板(单个文件)。
 
@@ -3614,11 +3660,12 @@ class MaterialSystemPanel(QWidget):
     def save_asset(self):
         self._sync_asset()
         self._sync_inputs()
-        path, _ = QFileDialog.getSaveFileName(self, "保存材质资产",
-                                              self.asset.name + ".mmat.json",
-                                              "材质资产 (*.mmat.json);;All (*)")
+        path = _get_save_path(self, "保存材质资产",
+                              _strip_ver_suffix(self.asset.name) + ".mmat.json",
+                              "材质资产 (*.mmat.json);;All (*)")
         if not path:
             return
+        path = _norm_out_path(path, ".mmat.json")
         try:
             self.asset.save(path)
         except Exception as e:  # noqa: BLE001
@@ -3799,11 +3846,12 @@ class MaterialSystemPanel(QWidget):
                 "有 %d 个 VS 变体编译失败 ⇒ 已回退为银行字节; 该材质的顶点效果不会生效。\n\n%s\n\n"
                 "常见原因: 顶点里采样必须用 SampleLevel(显式 LOD); 变量名拼写; 未声明标识符。"
                 % (_vf, _e))
-        path, _ = QFileDialog.getSaveFileName(self, "生成 mmtr",
-                                              self.asset.name + ".mmtr.1808168797",
-                                              "mmtr (*.mmtr.1808168797);;All (*)")
+        path = _get_save_path(self, "生成 mmtr",
+                              _strip_ver_suffix(self.asset.name) + ".mmtr.1808168797",
+                              "mmtr (*.mmtr.1808168797);;All (*)")
         if not path:
             return
+        path = _norm_out_path(path, ".mmtr.1808168797")
         open(path, "wb").write(data)
         tag = "无 donor"
         self.lbl_status.setText("已生成(%s) %s (%dB) PS=%sB 绑定组=%s 槽=%s"
@@ -3822,11 +3870,12 @@ class MaterialSystemPanel(QWidget):
             data, rep = self._generate()
             if data is None:
                 return
-        path, _ = QFileDialog.getSaveFileName(self, "导出材质实例",
-                                              self.asset.name + ".mdf2.10",
-                                              "mdf2 (*.mdf2.10);;All (*)")
+        path = _get_save_path(self, "导出材质实例",
+                              _strip_ver_suffix(self.asset.name) + ".mdf2.10",
+                              "mdf2 (*.mdf2.10);;All (*)")
         if not path:
             return
+        path = _norm_out_path(path, ".mdf2.10")
         mpath = (self.asset.template.get("mmtr_path")
                  or "MasterMaterial/Master/%s.mmtr" % self.asset.name)
         try:
