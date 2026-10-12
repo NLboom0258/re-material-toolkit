@@ -18,15 +18,24 @@ except ImportError:  # 直接运行
 
 
 def material_texture_slots(mmtr_bytes, pass_name="Deferred"):
-    """材质主 pass(Deferred)的非引擎纹理槽名(排除 byte/raw 的引擎 SRV, 如 WhitePt)。"""
+    """材质主 pass(Deferred)PS 的**材质**纹理槽名。
+
+    排除两类(否则会被误当成材质贴图加进 mdf2):
+    - 引擎 SRV 缓冲(byte/raw, 如 WhitePt) —— 按 RDEF 的 `fmt == 'byte'`;
+    - **引擎贴图资源**(如 IBLCubemap2DArraySRV / IESLightTableSRV / ShadowMapSRV…)
+      —— 按引擎资源清单(`material_inputs.by_kind('texture')`)排除。
+    """
     from . import mmtr_blobs as B
     from . import material_gen as G
     from . import material_iface as MI
+    from . import material_inputs as minp
     idx = G.pick_iface_ps(mmtr_bytes, pass_name)
     if idx is None:
         return []
     iface = MI.iface_from_dxbc(B.extract_blob(mmtr_bytes, idx))
-    return [t["name"] for t in iface["textures"] if t["fmt"] != "byte"]
+    engine_tex = {e["name"] for e in minp.by_kind("texture")}
+    return [t["name"] for t in iface["textures"]
+            if t["fmt"] != "byte" and t["name"] not in engine_tex]
 
 
 def from_mmtr(mmtr_bytes, mmtr_path, material_name, shading_type="Standard",
