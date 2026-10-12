@@ -40,8 +40,12 @@ def material_texture_slots(mmtr_bytes, pass_name="Deferred"):
 
 def from_mmtr(mmtr_bytes, mmtr_path, material_name, shading_type="Standard",
               game_version=10, cbuffer="UserMaterial",
-              texture_placeholder="Null.tex"):
-    """由一个 mmtr 造新 mdf2(单个材质)。返回 Mdf2。"""
+              texture_placeholder="Null.tex", texture_slots=None):
+    """由一个 mmtr 造新 mdf2(单个材质)。返回 Mdf2。
+
+    `texture_slots`: 材质贴图槽名清单。None 时从 mmtr 主 pass 的 RDEF **推断**(排除引擎资源);
+    调用方若已知**权威清单**(如材质资产的 `inputs["tex"]`), 直接传入更准(避开推断的边界问题)。
+    """
     from .mmtr import Mmtr
     from .sync import sync_mdf2
 
@@ -51,7 +55,8 @@ def from_mmtr(mmtr_bytes, mmtr_path, material_name, shading_type="Standard",
         raise ValueError("unknown shading type %r" % shading_type)
     mat = m.add_material(material_name, mmtr_path, shader_type=st, flags=0)
     sync_mdf2(m, Mmtr.from_bytes(mmtr_bytes), cbuffer)  # 参数: 来自 mmtr UserMaterial
-    for name in material_texture_slots(mmtr_bytes):
+    slots = list(texture_slots) if texture_slots is not None else material_texture_slots(mmtr_bytes)
+    for name in slots:
         mat.add_texture(name, texture_placeholder)
     return m
 

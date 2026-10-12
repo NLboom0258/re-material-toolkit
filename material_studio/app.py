@@ -3628,6 +3628,13 @@ class MaterialSystemPanel(QWidget):
         if name in self.asset.inputs["tex"][_pass]:
             QMessageBox.warning(self, "重复", "贴图已存在: %s" % name)
             return
+        if minp.find(name) is not None:
+            QMessageBox.warning(
+                self, "与引擎资源重名",
+                "%s 是引擎资源名, 不能用作材质贴图 ——\n"
+                "该槽会同时被引擎(按名供给)和 mdf2 争用, 归谁不确定, 可能顶掉引擎资源或贴图不生效。\n"
+                "请改名(如 %s_Map)。" % (name, name))
+            return
         self.asset.inputs["tex"][_pass].append(name)
         self._after_inputs_changed()
 
@@ -3659,6 +3666,10 @@ class MaterialSystemPanel(QWidget):
             new = new.strip()
             if new in self.asset.inputs["tex"][_pass]:
                 QMessageBox.warning(self, "重复", "贴图已存在: %s" % new)
+                return
+            if minp.find(new) is not None:
+                QMessageBox.warning(self, "与引擎资源重名",
+                                    "%s 是引擎资源名, 不能用作材质贴图。请改名。" % new)
                 return
             self.asset.inputs["tex"][_pass] = [
                 new if n == name else n for n in self.asset.inputs["tex"][_pass]]
@@ -3983,8 +3994,14 @@ class MaterialSystemPanel(QWidget):
             return
         mpath = (self.asset.template.get("mmtr_path")
                  or "MasterMaterial/Master/%s.mmtr" % self.asset.name)
+        _slots = []
+        for _p in ("main", "depth", "vertex"):
+            for _n in mimp.textures(self.asset.inputs, _p):
+                if _n not in _slots:
+                    _slots.append(_n)
         try:
-            m = minst.from_mmtr(data, mpath, self.asset.name, shading_type="Standard")
+            m = minst.from_mmtr(data, mpath, self.asset.name, shading_type="Standard",
+                                texture_slots=_slots)
             n = m.save(path)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "导出失败", str(e))
