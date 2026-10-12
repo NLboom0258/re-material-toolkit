@@ -273,6 +273,41 @@ class ReorderTree(QTreeWidget):
         self.reordered.emit()
 
 
+class _InputTree(ReorderTree):
+    """输入页的树: 只允许在**可重排分组节点**(参数/贴图)的同一父内部拖拽排序; 其余忽略。
+
+    分组节点用 `Qt.UserRole+1` 标记为 ("group", <kind>) —— 与 `UserRole`(存 kind/token)分开,
+    避免影响右键菜单。仅“上/下插入(不嵌套)”才放行。
+    """
+
+    REORDER_GROUPS = ("param", "tex")
+
+    @staticmethod
+    def _gkind(it):
+        d = it.data(0, Qt.UserRole + 1) if it is not None else None
+        return d[1] if (isinstance(d, tuple) and len(d) == 2 and d[0] == "group") else None
+
+    def _row_group(self, it):
+        """it 所属的“可重排分组节点”(it 是某分组子项时); 否则 None。"""
+        p = it.parent() if it is not None else None
+        return p if (p is not None and self._gkind(p) in self.REORDER_GROUPS) else None
+
+    def startDrag(self, actions):
+        if self.currentColumn() != 0 or self._row_group(self.currentItem()) is None:
+            return
+        QTreeWidget.startDrag(self, actions)
+
+    def dropEvent(self, e):
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        src, tgt = self.currentItem(), self.itemAt(pos)
+        if (self._row_group(src) is None or self._row_group(src) is not self._row_group(tgt)
+                or self.dropIndicatorPosition() == QAbstractItemView.OnItem):   # 禁嵌套
+            e.ignore()
+            return
+        QTreeWidget.dropEvent(self, e)
+        self.reordered.emit()
+
+
 # asm 高亮/静态检查用到的 DXBC SM5 指令集(基名; 带 _sat/_indexable(...) 等由识别器归一)
 _ASM_OPCODES = {
     "mov", "movc", "mova", "mad", "add", "mul", "div", "dp2", "dp3",
@@ -3147,9 +3182,9 @@ class MaterialSystemPanel(QWidget):
     # ---- 输入页 ----
     def _wrap_inputs(self):
         """输入页: 单页 + 顶部按钮组切换各 pass/顶点(每 pass 独立输入树 + 增删)。"""
-        _w1, self.tree_inputs = self._inputs_tree()
-        _w2, self.tree_inputs_depth = self._inputs_tree()
-        _w3, self.tree_inputs_vs = self._inputs_tree(with_force=True)
+        _w1, self.tree_inputs = self._inputs_tree("main")
+        _w2, self.tree_inputs_depth = self._inputs_tree("depth")
+        _w3, self.tree_inputs_vs = self._inputs_tree("vertex", with_force=True)
         page, self._in_btns, self._in_stack = _seg_switch(
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
@@ -3169,7 +3204,7 @@ class MaterialSystemPanel(QWidget):
         chk.setEnabled(False)
         chk.blockSignals(False)
 
-    def _inputs_tree(self, with_force=False):
+    def _inputs_tree(self, pass_name="main", with_force=False):
         """一个 pass 的输入视图(输入树 + 增删按钮)。返回 (容器, 树)。
 
         with_force=True(顶点页): 顶部加「强制完整输入」勾选(只有顶点页有, 是顶点唯一的多余项)。
@@ -3187,8 +3222,9 @@ class MaterialSystemPanel(QWidget):
                 "去掉相关顶点预设即自动取消。")
             self.chk_force_full.setEnabled(False)
             v.addWidget(self.chk_force_full)
-        tree = QTreeWidget()
+        tree = _InputTree()
         tree.setHeaderLabels(["类别 / 名", "类型", "说明"])
+        tree.reordered.connect(lambda _t=tree, _p=pass_name: self._on_input_reordered(_t, _p))
         v.addWidget(tree, 1)
         bar = QHBoxLayout()
         for text, cb in (("＋预设输入", self._add_presets), ("＋参数", self._add_param),
@@ -3226,6 +3262,40 @@ class MaterialSystemPanel(QWidget):
         self._sync_inputs()
         self.refresh_inputs()
         self._refresh_vs_preview()
+
+    def _on_input_reordered(self, tree, pass_name):
+        """输入树内拖拽重排(仅 参数/贴图 分组): 读改组顺序 -> 写回 asset.inputs -> 刷新。
+
+        - 参数是**全局**的: 任一棵树改都作用于同一份 `inputs["param"]`;
+        - 贴图按 pass: 只改当前树的 `inputs["tex"][pass_name]`;
+        - 顺序 = 生成时的声明/绑定顺序(材质源按名引用, 顺序只影响参数表/SRV 分配)。
+        """
+        _param, _tex = None, None
+
+        def _scan(it):
+            nonlocal _param, _tex
+            g = it.data(0, Qt.UserRole + 1)
+            if isinstance(g, tuple) and g[:1] == ("group",):
+                _names = []
+                for j in range(it.childCount()):
+                    c = it.child(j)
+                    cd = c.data(0, Qt.UserRole)
+                    if isinstance(cd, tuple) and cd and cd[0] == g[1]:
+                        _names.append((cd[1], c.text(1)))
+                if g[1] == "param":
+                    _param = [{"name": n, "type": t} for (n, t) in _names]
+                elif g[1] == "tex":
+                    _tex = [n for (n, _t) in _names]
+            for j in range(it.childCount()):
+                _scan(it.child(j))
+
+        for i in range(tree.topLevelItemCount()):
+            _scan(tree.topLevelItem(i))
+        if _param is not None and _param != self.asset.inputs.get("param"):
+            self.asset.inputs["param"] = _param
+        if _tex is not None and _tex != mimp.textures(self.asset.inputs, pass_name):
+            self.asset.inputs["tex"][pass_name] = _tex
+        self._after_inputs_changed()
 
     def _locked_names(self, pass_name="main"):
         """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。"""
@@ -3370,6 +3440,7 @@ class MaterialSystemPanel(QWidget):
                 it.setData(0, Qt.UserRole, ("preset", n))
                 pre.addChild(it)
         pnode = QTreeWidgetItem(["参数 (//! param)", "", "%d" % len(params)])
+        pnode.setData(0, Qt.UserRole + 1, ("group", "param"))   # 可拖拽重排(组内)
         cust.addChild(pnode)
         for n, t in params:
             # 此处显示/编辑的是**裸名**(= mdf2 / mmtr 参数表名); RDEF 名(带 `VAR_`) 只在
@@ -3377,12 +3448,15 @@ class MaterialSystemPanel(QWidget):
             base = mgen.param_base_name(n)
             rdef_hint = ("RDEF 成员: %s" % n) if n.startswith(mgen.PARAM_PREFIX) else ""
             it = QTreeWidgetItem([base, t, rdef_hint])
+            it.setIcon(0, _grip_icon())                        # 拖拽手柄(组内排序)
             it.setData(0, Qt.UserRole, ("param", n))
             pnode.addChild(it)
         tnode = QTreeWidgetItem(["贴图 (//! tex)", "", "%d" % len(textures)])
+        tnode.setData(0, Qt.UserRole + 1, ("group", "tex"))
         cust.addChild(tnode)
         for n in textures:
             it = QTreeWidgetItem([n, "", ""])
+            it.setIcon(0, _grip_icon())
             it.setData(0, Qt.UserRole, ("tex", n))
             tnode.addChild(it)
         enode = QTreeWidgetItem(["引擎资源 (//! engine)", "", "%d" % len(engine)])
