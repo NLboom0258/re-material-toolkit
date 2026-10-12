@@ -290,6 +290,11 @@ class _InputTree(ReorderTree):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+        self._press_pos = None
+
+    def mousePressEvent(self, e):
+        self._press_pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        super().mousePressEvent(e)
 
     @staticmethod
     def _gkind(it):
@@ -301,8 +306,25 @@ class _InputTree(ReorderTree):
         p = it.parent() if it is not None else None
         return p if (p is not None and self._gkind(p) in self.REORDER_GROUPS) else None
 
+    def _grip_hit(self, it, pos):
+        """pos 是否落在该行列0 的“手柄图标”区域内(限制拖动起点, 避免整列/留白都可拖)。"""
+        if it is None or pos is None:
+            return False
+        r = self.visualItemRect(it)
+        if not (r.top() <= pos.y() <= r.bottom()):
+            return False
+        depth = 0
+        p = it.parent()
+        while p is not None:
+            depth += 1
+            p = p.parent()
+        x0 = (depth + 1) * self.indentation()      # 列0 内容(手柄图标)左边界
+        return x0 - 2 <= pos.x() <= x0 + 22
+
     def startDrag(self, actions):
-        if self.currentColumn() != 0 or self._row_group(self.currentItem()) is None:
+        it = self.currentItem()
+        if (self.currentColumn() != 0 or self._row_group(it) is None
+                or not self._grip_hit(it, self._press_pos)):
             return
         QTreeWidget.startDrag(self, actions)
 
@@ -3300,9 +3322,13 @@ class MaterialSystemPanel(QWidget):
 
         for i in range(tree.topLevelItemCount()):
             _scan(tree.topLevelItem(i))
-        if _param is not None and _param != self.asset.inputs.get("param"):
+        # 安全网: 仅在“集合不变(只改顺序)”时写回 —— 防止误拖出组导致丢项/串项。
+        _cur_p = [(e.get("name"), e.get("type") or "float")
+                  for e in (self.asset.inputs.get("param") or [])]
+        if _param is not None and {p["name"] for p in _param} == {n for n, _t in _cur_p}:
             self.asset.inputs["param"] = _param
-        if _tex is not None and _tex != mimp.textures(self.asset.inputs, pass_name):
+        _cur_t = mimp.textures(self.asset.inputs, pass_name)
+        if _tex is not None and set(_tex) == set(_cur_t):
             self.asset.inputs["tex"][pass_name] = _tex
         self._after_inputs_changed()
 
