@@ -6,3 +6,6 @@ dist/
 *.zip
 .idea/
 .vs/
+
+# 运行时二进制(打包脚本注入/外部提供, 不入库; d3dcompiler_47.dll 仍跟踪)
+material_toolkit/bin/*.exe
