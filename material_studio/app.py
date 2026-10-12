@@ -282,6 +282,15 @@ class _InputTree(ReorderTree):
 
     REORDER_GROUPS = ("param", "tex")
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 启用拖拽重排(ReorderTree 只重写了 startDrag/dropEvent; 这些属性必须在实例上设置)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+
     @staticmethod
     def _gkind(it):
         d = it.data(0, Qt.UserRole + 1) if it is not None else None
