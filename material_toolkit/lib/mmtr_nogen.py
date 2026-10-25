@@ -162,14 +162,25 @@ def require_fn(material_src, name):
 # 类型/资源 ⇒ 造成 pass 间“串味”。暂不支持用户自定义辅助函数(之后若需要, 须带“按 pass 归属”
 # 另行设计)。匹配形如 `TYPE NAME(...) {` 的函数定义(行首; 行内 `//` 注释天然不匹配)。
 _ALLOWED_FUNCS = ("MaterialMain", "MaterialDepth", "MaterialVertex")
-_FUNC_DEF_RE = re.compile(r"(?m)^\s*[A-Za-z_][\w<>]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{")
+
+# 控制关键字: `else if (...) {` 也会满足 `TYPE NAME(...) {` 的形，必须排除。
+# （控制语句不是函数定义; HLSL 本身完全支持 `else if`。）
+_CTRL_KEYWORDS = frozenset((
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "return", "break", "continue", "discard", "typedef", "struct", "cbuffer"))
+
+_FUNC_DEF_RE = re.compile(
+    r"(?m)^\s*([A-Za-z_][\w<>]*)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{")
 
 
 def enforce_functions(material_src, allowed=_ALLOWED_FUNCS):
     """材质源不得定义除 `allowed` 外的函数; 否则报错(保证三 pass 完全独立)。"""
     extra = []
     for m in _FUNC_DEF_RE.finditer(material_src or ""):
-        nm = m.group(1)
+        ret, nm = m.group(1), m.group(2)
+        # `else if (...) {` / `do {` 等控制结构: 不是函数定义
+        if ret in _CTRL_KEYWORDS or nm in _CTRL_KEYWORDS:
+            continue
         if nm not in allowed and nm not in extra:
             extra.append(nm)
     if extra:
