@@ -199,7 +199,11 @@ _DIMTYPE = {"2d": "Texture2D", "2darray": "Texture2DArray", "1d": "Texture1D",
 
 
 def _texture_decl(t, reg=None):
-    """纹理声明。`reg` 已弃用(不再写 `register`; 寄存器由编译器自动分配)。"""
+    """纹理声明。`reg` 已弃用(不再写 `register`; 寄存器由编译器自动分配)。
+
+    返回 None = 本模块不负责声明(结构化缓冲需要配套 struct 定义),
+    由调用方补(材质 pass 见 `material_pass.build_source`, VS 见 `vs_gen._srv_decl`)。
+    """
     fmt = t.get("fmt")
     dim = t.get("dim") or "2d"
     if fmt == "byte":
@@ -207,8 +211,7 @@ def _texture_decl(t, reg=None):
     elem = _ELEM.get(fmt)
     base = _DIMTYPE.get(dim)
     if elem is None or base is None:
-        # 结构化缓冲(fmt=struct)等需配套 struct 定义, 这里暂不声明(不用即可)
-        return "// [跳过] %s (fmt=%s dim=%s)" % (t["name"], fmt, dim)
+        return None
     if fmt == "uint" and dim == "3d":
         elem = "uint4"
     return "%s<%s> %s;" % (base, elem, t["name"])
@@ -230,7 +233,9 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         for cb in iface["cbuffers"]:
             _flat_cbuffer(out, cb, _seen)
         for t in iface["textures"]:
-            out.append(_texture_decl(t))
+            _d = _texture_decl(t)
+            if _d:
+                out.append(_d)
         for s in iface["samplers"]:
             ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
             out.append("%s %s;" % (ty, s["name"]))
@@ -269,7 +274,9 @@ def hlsl_of(iface, style="cbuffer", material_cbuffer="UserMaterial",
         out.append("")
 
     for t in iface["textures"]:
-        out.append(_texture_decl(t))
+        _d = _texture_decl(t)
+        if _d:
+            out.append(_d)
     for s in iface["samplers"]:
         ty = "SamplerComparisonState" if s.get("cmp") else "SamplerState"
         out.append("%s %s;" % (ty, s["name"]))

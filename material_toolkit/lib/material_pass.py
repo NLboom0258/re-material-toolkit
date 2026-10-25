@@ -84,7 +84,21 @@ def build_source(material_src=None, template="deferred_env", iface=None,
         from . import material_iface as MI
         i0 = tpl.index(IFACE_BEGIN) + len(IFACE_BEGIN)
         i1 = tpl.index(IFACE_END)
-        tpl = tpl[:i0] + "\n" + MI.hlsl_of(iface, style=style) + tpl[i1:]
+        decl = MI.hlsl_of(iface, style=style)
+        # 结构化缓冲(SRV): hlsl_of 只管 cbuffer/纹理/sampler, `fmt=struct` 交给这里。
+        # 与 VS 共用 vs_gen.SRV_STRUCTS 的类型/stride 表(避免两处各写一份)。
+        # 未收录的 struct 缓冲无从得知元素布局 → 保留一行注释告警(不可静默丢)。
+        from . import vs_gen as VG
+        for t in iface.get("textures") or ():
+            f = t.get("fmt")
+            if f in ("byte", "float", "float2", "float3", "float4", "int", "uint"):
+                continue
+            if t.get("name") in VG.SRV_STRUCTS:
+                decl += VG._srv_decl(t["name"]) + "\n"
+            else:
+                decl += ("// [未声明] %s (fmt=%s dim=%s) — 不在 SRV_STRUCTS, "
+                         "缺少元素布局\n" % (t["name"], f, t.get("dim")))
+        tpl = tpl[:i0] + "\n" + decl + tpl[i1:]
     if minput is None:
         from . import semantic_inputs as SI
         minput = SI.empty_texts()
