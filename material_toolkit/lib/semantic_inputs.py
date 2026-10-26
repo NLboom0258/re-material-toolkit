@@ -121,14 +121,17 @@ def unsupported_in_stage(names, stage):
 
 
 def available(name, stage="ps"):
-    """该语义输入项在给定 stage 是否**可选**(全部阶段值都能供值)。
+    """该语义输入项在给定 stage 是否**可选**。
 
-    `values` 为空的项(只依赖引擎资源)三边都可用; 含有当前 stage 拿不到的值(如
-    `variantKind` 在 ps/depth 为 None)则只能在其它 stage 添加。
+    优先看条目里的显式 `stages`(缺省 = 三个 pass 都可用); 老数据没有 `stages` 时
+    回退到“全部 `values` 在该 stage 都能供值”的推导。
     """
     e = find(name)
     if not e:
         return False
+    st = e.get("stages")
+    if st:
+        return stage in st
     vals = e.get("values") or []
     if not vals:
         return True

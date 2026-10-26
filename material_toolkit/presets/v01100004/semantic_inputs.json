@@ -107,6 +107,7 @@
     {
       "name": "variantKind",
       "group": "骨骼",
+      "stages": ["vs"],
       "desc": "当前 VS 变体类别(仅顶点阶段): 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect; >=3 才有骨骼矩阵",
       "depends": [],
       "values": ["variantKind"],
@@ -116,7 +117,8 @@
     {
       "name": "jointOffset",
       "group": "骨骼",
-      "desc": "本次 draw 的骨骼块起点(仅顶点阶段; 与 SkinningMatrices 配合取骨骼矩阵)",
+      "stages": ["vs"],
+      "desc": "本次 draw 的骨骼块起点(仅顶点阶段; 取自模板已备好的 InstanceWorldInfo.jointOffset, 不额外引入资源依赖)",
       "depends": [],
       "values": ["jointOffset"],
       "field": {"name": "jointOffset", "type": "uint"},
