@@ -63,6 +63,12 @@ def _norm_extra(d):
     return {p: str(src.get(p) or "") for p in MIM.PASSES}
 
 
+# 自定义模式的 `MaterialVertex(in VertexInput vi, out VertexOutput vo)` 默认实现
+# 直接引用这些顶点预设; 切换到自定义模式时需自动加入顶点页(否则 `vi.xxx` 未定义)。
+CUSTOM_VERTEX_PRESETS = ("positionWS", "NormalWS", "TangentWS",
+                         "bitangentSign", "uv0", "uv1")
+
+
 class MaterialAsset(object):
     """材质资产(源)。字段: 两个选项 + 输入注册(preset/engine/param/tex)+ 材质函数(HLSL)。"""
 

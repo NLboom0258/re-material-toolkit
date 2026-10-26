@@ -56,8 +56,20 @@ void MaterialDepth(DepthInput di, inout bool discardPixel)
     discardPixel = false;
 }
 
-// 顶点钩子(必需, VS 级): 缺省不偏移 ⇒ 等价“无钩子”的标准 VS(逐字节一致)。
-float3 MaterialVertex(VertexInput vi)
+// 顶点输出(必需, VS 级): 直接给最终几何量; 默认实现与“默认模式”一致。
+// 依赖顶点预设: positionWS / NormalWS / TangentWS / bitangentSign / uv0 / uv1。
+void MaterialVertex(in VertexInput vi, out VertexOutput vo)
 {
-    return float3(0.0, 0.0, 0.0);
+    // ---- 语义(默认值与“默认模式”一致) ----
+    float3 PositionOffset = float3(0.0, 0.0, 0.0);
+
+    // ---- 与默认模式相同的处理(只是搬进了材质源) ----
+    float3 wp = vi.positionWS + PositionOffset;
+
+    vo.PositionWS    = wp;
+    vo.NormalWS      = vi.NormalWS;
+    vo.TangentWS     = vi.TangentWS;
+    vo.BitangentSign = vi.bitangentSign;
+    vo.UV0           = vi.uv0;
+    vo.UV1           = vi.uv1;
 }

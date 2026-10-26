@@ -293,7 +293,7 @@ def d30_map():
     return _d30_map_cache
 
 
-def build_standard_vs(material_src, bank_key, inputs=None, extra=None):
+def build_standard_vs(material_src, bank_key, inputs=None, extra=None, vo_kind="offset"):
     """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
     data, idx = _load_bank()
     e = idx.get(bank_key)
@@ -311,7 +311,8 @@ def build_standard_vs(material_src, bank_key, inputs=None, extra=None):
     from . import custom_functions as CF
     _hook = CF.injection_text(MIM.funcs(inputs, "vertex"), "vs", "vertex") + \
         extra_text(extra, "vertex") + (vs_hook_source(material_src) or "")
-    src = VG.build_from_spec(spec, hook=_hook or None, vs_in=vs_in, vs_iface=vs_iface)
+    src = VG.build_from_spec(spec, hook=_hook or None, vs_in=vs_in, vs_iface=vs_iface,
+                             vo_kind=vo_kind)
     dxbc, err = VG.compile_vs(src)
     return src, dxbc, err
 
@@ -328,7 +329,7 @@ def _vs_iface(inputs, vs_in):
 
 
 def build(material_src, pass_name="Deferred", template="deferred_bare", iface=None,
-          force_full_inputs=False, inputs=None, extra=None):
+          force_full_inputs=False, inputs=None, extra=None, vo_kind=None):
     """-> (mmtr bytes, report)。
 
     inputs: 结构化输入注册(`material_inputs_model`; = `.mmat.json` 的 `inputs`)。None = 空。
@@ -383,7 +384,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
                         gen, _err = VG.compile_vs(
                             VG.build_from_spec(spec_used, hook=vs_hook_src or None,
                                                vs_in=vs_in, depth_full=full,
-                                               vs_iface=vs_iface))
+                                               vs_iface=vs_iface, vo_kind=_vo_kind))
                         if not gen:
                             _fail = _err or "编译返回空"
                     else:
@@ -478,6 +479,8 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     _dp = MIM.presets(inputs, "depth")
     _depth_full = SI.presets_need_interp(_dp)
     _upg = bool(force_full_inputs) or _auto_upg or _depth_full
+    # 顶点输出形态：显式传入优先(调用方知道 lighting_mode); 否则按模板名推断。
+    _vo_kind = vo_kind or ("full" if "custom" in (template or "") else "offset")
     # 主 pass: 基座 = 该 pass 的引擎资源依赖(默认模式); 声明/参数**按 main 的 inputs**。
     base = iface if iface is not None else INP.base_iface_for_pass("main", template)
     iface, ka, _rep = INP.build_iface_and_keepalive(

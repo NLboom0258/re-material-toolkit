@@ -3035,7 +3035,23 @@ class MaterialSystemPanel(QWidget):
     def _on_option_changed(self, *_):
         if self._loading:
             return
+        self._ensure_custom_vertex_presets()
         self.refresh_info()
+
+    def _ensure_custom_vertex_presets(self):
+        """切到自定义光照模式时, 自动补齐 MaterialVertex 默认实现依赖的顶点预设。
+
+        默认实现直接引用 vi.positionWS/NormalWS/TangentWS/bitangentSign/uv0/uv1,
+        缺任一项都会编译失败。只在自定义模式下补, 默认为空(不产生额外输入/升级)。
+        """
+        if self.asset.lighting_mode != "custom":
+            return
+        _vp = list(mimp.presets(self.asset.inputs, "vertex"))
+        _add = [p for p in masset.CUSTOM_VERTEX_PRESETS if p not in _vp]
+        if not _add:
+            return
+        self.asset.inputs["preset"]["vertex"] = _vp + _add
+        self._sync_inputs()
 
     def _repopulate_templates(self):
         """无模板选择: 按 (着色类型, 光照模式) 取默认模板作为"空材质基准"。"""
@@ -3065,6 +3081,10 @@ class MaterialSystemPanel(QWidget):
     def _on_vs_variant_changed(self, *_):
         self._refresh_vs_preview()
 
+    def _vo_kind(self):
+        """顶点输出形态: 自定义光照模式用完整 VertexOutput, 其余只用位置偏移。"""
+        return "full" if self.asset.lighting_mode == "custom" else "offset"
+
     def _refresh_vs_preview(self, *_):
         """组装+编译当前选中变体的标准 VS(注入材质源的顶点钩子)并展示。
 
@@ -3079,7 +3099,8 @@ class MaterialSystemPanel(QWidget):
         src = self.ed_src.toPlainText()
         try:
             vsrc, dxbc, err = nogen.build_standard_vs(src, key, inputs=self.asset.inputs,
-                                                      extra=self.asset.shading_extra)
+                                                      extra=self.asset.shading_extra,
+                                                      vo_kind=self._vo_kind())
         except Exception as e:  # noqa: BLE001
             self.ed_full_vs.setPlainText(";; 组装失败: %s" % e)
             self.lbl_vs.setText("[组装失败] %s" % e)
@@ -3441,14 +3462,16 @@ class MaterialSystemPanel(QWidget):
         params = mimp.params(self.asset.inputs)
         textures = mimp.textures(self.asset.inputs, pass_name)
         engine = mimp.engine(self.asset.inputs, pass_name)
-        # pass 结构依赖的引擎资源: 系统自动添加 + 锁定(只读展示; 不出现在资产)
-        for nm in minp.pass_dep_names(pass_name):
-            if nm != "UserMaterial" and nm not in engine:
-                engine.append(nm)
-        # 有材质参数的 pass: UserMaterial 由系统自动供给 + 锁定
-        if params and "UserMaterial" not in engine:
-            engine.append("UserMaterial")
         lock = self._locked_names(pass_name)
+        _tmpl = self.asset.template.get("pass_template") or "deferred_std"
+        # 自动供给(不进资产)的引擎资源: 模板/pass 结构依赖 + 预设依赖 + UserMaterial。
+        # 它们确实会声明进 RDEF, 但**不在 inputs["engine"]** 里, 所以单独成组展示。
+        _auto = []
+        for _n in list(minp.pass_dep_names(pass_name, _tmpl)) + list(lock):
+            if _n not in engine and _n not in _auto:
+                _auto.append(_n)
+        if params and "UserMaterial" not in engine and "UserMaterial" not in _auto:
+            _auto.append("UserMaterial")
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图/函数)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
@@ -3494,39 +3517,52 @@ class MaterialSystemPanel(QWidget):
             it.setIcon(0, _grip_icon())
             it.setData(0, Qt.UserRole, ("tex", n))
             tnode.addChild(it)
-        enode = QTreeWidgetItem(["引擎资源 (//! engine)", "", "%d" % len(engine)])
+        enode = QTreeWidgetItem(["引擎资源 (已添加)", "", "%d" % len(engine)])
         cust.addChild(enode)
-        for n in engine:
-            e = minp.find(n) or {}
-            kd = e.get("kind", "")
-            if kd == "cbuffer":
-                extra = "%d 成员" % len(e.get("members", []))
-            elif kd == "texture":
-                extra = "%s/%s" % (e.get("fmt"), e.get("dim"))
-            else:
-                extra = ""
-            desc = minp.desc_of(n)
-            if n in lock:
-                extra = ("锁定: 由 %s 依赖" % " / ".join(lock[n])).strip()
-            it = QTreeWidgetItem([n, kd, desc])
-            it.setToolTip(2, ("%s\n%s" % (extra, desc)).strip())
-            if n in lock:
-                it.setForeground(0, QColor("#b8791a"))
-            it.setData(0, Qt.UserRole, ("engine", n))
-            enode.addChild(it)
-            if n == "UserMaterial":
-                # UserMaterial 的成员 = 自定义材质参数(单独声明在 //! param)
-                for pn, pt in params:
-                    cm = QTreeWidgetItem([pn, pt, "(材质参数)"])
-                    cm.setData(0, Qt.UserRole, ("param", pn))
-                    it.addChild(cm)
-            else:
-                for m in (e.get("members") or []):
-                    mn = m.get("name", "")
-                    cm = QTreeWidgetItem([mn, m.get("type", ""),
-                                         minp.member_desc(n, mn)])
-                    cm.setData(0, Qt.UserRole, ("copy", mn))
-                    it.addChild(cm)
+        anode = QTreeWidgetItem(["引擎资源 (自动: 模板/预设依赖)", "", "%d" % len(_auto)])
+        anode.setToolTip(0, "这些资源由 pass 模板或预设输入自动供给, **不写入资产**;\n"
+                            "生成时仍会声明进 RDEF(绑定组按它们构建)。")
+        cust.addChild(anode)
+
+        def _fill_engine(parent, names, is_auto):
+            for n in names:
+                e = minp.find(n) or {}
+                kd = e.get("kind", "")
+                if kd == "cbuffer":
+                    extra = "%d 成员" % len(e.get("members", []))
+                elif kd == "texture":
+                    extra = "%s/%s" % (e.get("fmt"), e.get("dim"))
+                else:
+                    extra = ""
+                desc = minp.desc_of(n)
+                if n in lock:
+                    extra = ("锁定: 由 %s 依赖" % " / ".join(lock[n])).strip()
+                if is_auto:
+                    extra = ("自动供给(不写入资产) %s" % extra).strip()
+                it = QTreeWidgetItem([n, kd, desc])
+                it.setToolTip(2, ("%s\n%s" % (extra, desc)).strip())
+                if is_auto:
+                    it.setForeground(0, QColor("#b8791a"))
+                elif n in lock:
+                    it.setForeground(0, QColor("#b8791a"))
+                it.setData(0, Qt.UserRole, ("engine", n))
+                parent.addChild(it)
+                if n == "UserMaterial":
+                    # UserMaterial 的成员 = 自定义材质参数(单独声明在 //! param)
+                    for pn, pt in params:
+                        cm = QTreeWidgetItem([pn, pt, "(材质参数)"])
+                        cm.setData(0, Qt.UserRole, ("param", pn))
+                        it.addChild(cm)
+                else:
+                    for m in (e.get("members") or []):
+                        mn = m.get("name", "")
+                        cm = QTreeWidgetItem([mn, m.get("type", ""),
+                                             minp.member_desc(n, mn)])
+                        cm.setData(0, Qt.UserRole, ("copy", mn))
+                        it.addChild(cm)
+
+        _fill_engine(enode, engine, False)
+        _fill_engine(anode, _auto, True)
         funcs = mimp.funcs(self.asset.inputs, pass_name)
         fnode = QTreeWidgetItem(["函数 (自定义库)", "", "%d" % len(funcs)])
         cust.addChild(fnode)
@@ -3745,6 +3781,8 @@ class MaterialSystemPanel(QWidget):
         self.ed_src.setPlainText(src)
         self.asset.shading_source = src
         self.asset.inputs = mimp.empty()
+        # 自定义模式的默认 MaterialVertex 直接引用 vi.xxx ⇒ 载入默认材质后立即补齐顶点预设。
+        self._ensure_custom_vertex_presets()
         self.asset.shading_extra = {p: "" for p in mimp.PASSES}
         for _e in getattr(self, "ed_extra", {}).values():
             _e.setPlainText("")
@@ -3939,7 +3977,8 @@ class MaterialSystemPanel(QWidget):
             data, rp = nogen.build(self.asset.shading_source or "",
                                    _pass_of_template(tmpl), tmpl,
                                    inputs=self.asset.inputs,
-                                   extra=self.asset.shading_extra)
+                                   extra=self.asset.shading_extra,
+                                   vo_kind=self._vo_kind())
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "生成失败", str(e))
             return None, None

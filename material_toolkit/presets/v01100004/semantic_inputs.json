@@ -96,6 +96,15 @@
       "impl": ["mi.positionWS = G.worldPos;"]
     },
     {
+      "name": "bitangentSign",
+      "group": "几何",
+      "desc": "双切线符号(±1); 与 NormalWS/TangentWS 一起决定 TBN 手性",
+      "depends": ["INTERPOLATOR2"],
+      "values": ["tangentSign"],
+      "field": {"name": "bitangentSign", "type": "float"},
+      "impl": ["mi.bitangentSign = G.tangentSign;"]
+    },
+    {
       "name": "camPos",
       "group": "相机",
       "desc": "相机世界位置(依赖 SceneInfo.transposeViewInvMat)",

@@ -155,16 +155,18 @@ def build_source(input_family, cbuffers, out_fields, body, srvs=()):
     return "\n".join(L) + "\n"
 
 
-def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=False):
+def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=False,
+             uv0="i.uv0", uv1="i.uv1", bsign="i.tan.w"):
     """材质族统一打包(pos/n/t = float3 世界量; pclip = float4 上一帧裁剪坐标)。
 
+    uv0/uv1/bsign 默认取顶点属性; 自定义模式传 `vo.UV0`/`vo.UV1`/`vo.BitangentSign`。
     clip=True 时额外输出 SV_ClipDistance = dot(clipplane, float4(pos,1))。
     """
     L = [
         "o.pos = mul(float4(%s, 1.0), viewProjMat);" % pos,
-        "o.i0 = float4(%s.xyz, i.uv0.x);" % n,
-        "o.i1 = float4(i.uv0.y, i.uv1.xy, %s.x);" % t,
-        "o.i2 = float4(%s.y, %s.z, i.tan.w, %s.x);" % (t, t, pos),
+        "o.i0 = float4(%s.xyz, %s.x);" % (n, uv0),
+        "o.i1 = float4(%s.y, %s.xy, %s.x);" % (uv0, uv1, t),
+        "o.i2 = float4(%s.y, %s.z, %s, %s.x);" % (t, t, bsign, pos),
         "o.i3 = float4(%s.y, %s.z, %s.xy);" % (pos, pos, pclip),
         # i4 = **prevClip.w**(齐次除法项) —— 千万别写成 .z! 材质 PS 里 `vel = i.v4.zw/i.v5.x - ndc`
         # 把 i.v5.x 当上一帧裁剪坐标的 **W** 用; 写 .z 会让运动矢量全错(TAA 把抖动累积成条状/残影)。
@@ -398,7 +400,27 @@ def _assemble(infields, outs, iface, srvs, body_lines, extra_global=""):
     return "\n".join(L) + "\n"
 
 
-def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None):
+# ============================================================ 顶点输出结构
+# 默认模式: 只有位置偏移(等价于“无钩子”)。
+VO_OFFSET = """struct VertexOutput
+{
+    float3 PositionOffset;   // 世界空间顶点位置偏移(默认 0 = 不偏移)
+};"""
+
+# 自定义模式: 直接给出最终几何量(模板只负责打包)。
+VO_FULL = """struct VertexOutput
+{
+    float3 PositionWS;       // 最终世界位置
+    float3 NormalWS;         // 世界法线
+    float3 TangentWS;        // 世界切线
+    float  BitangentSign;    // 双切线符号(±1)
+    float2 UV0;
+    float2 UV1;
+};"""
+
+
+def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None,
+                    vo_kind="offset"):
     """按 spec(来自 spec_from_blob)生成 VS 源。
 
     hook: 用户 `MaterialVertex`(+辅助)的 HLSL 源; 给定时注入。
@@ -409,6 +431,8 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
            `material_inputs.build_iface_and_keepalive(stage="vs")`)。与内置并集**按名去重**。
     depth_full: 深度族槽专用 —— 为 True 时深度 VS 也输出**材质族插值**(pack=mat),
            使深度 PS 能解包几何值(Phase 3)。
+    vo_kind: 顶点输出形态。"offset" = 默认模式(仅位置偏移); "full" = 自定义模式
+           (PositionWS/NormalWS/TangentWS/BitangentSign/UV0/UV1)。
     资源声明 = **版本级并集**(passes.json vertex.depends; 规范序) ∪ vs_iface; 未用项由编译器
     剔除 ⇒ RDEF 等价按变体。变换公式仍由 **spec**(family/world/shadow)驱动。
     在**世界变换(+shadow)之后、打包之前**构造 VertexInput -> 取世界偏移(`_dv`) -> `wp += _dv`;
@@ -444,15 +468,29 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
     if _has_vi:
         L.append("VertexInput vi;")
         L.extend(vs_in.get("impl") or [])
+    _uv0, _uv1, _bs = "i.uv0", "i.uv1", "i.tan.w"
     if hook:
-        L.append("float3 _dv = MaterialVertex(vi);")
-        L.append("wp += _dv;")
+        # 顶点输出: 默认模式只用 PositionOffset; 自定义模式直接给最终几何量。
+        L.append("VertexOutput vo;")
+        L.append("MaterialVertex(vi, vo);")
+        if vo_kind == "full":
+            L.append("float3 _dv = vo.PositionWS - wp;")
+            L.append("wp = vo.PositionWS;")
+            if need_n:
+                L.append("wN = vo.NormalWS;")
+            if need_t:
+                L.append("wT = vo.TangentWS;")
+            _uv0, _uv1, _bs = "vo.UV0", "vo.UV1", "vo.BitangentSign"
+        else:
+            L.append("float3 _dv = vo.PositionOffset;")
+            L.append("wp += _dv;")
     if _use_mat:
         if hook:
             L.append("float4 pclip = mul(%s + float4(_dv, 0.0), prevViewProjMat);" % prevw)
         else:
             L.append("float4 pclip = mul(%s, prevViewProjMat);" % prevw)
-        L.extend(mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=clip).splitlines())
+        L.extend(mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=clip,
+                          uv0=_uv0, uv1=_uv1, bsign=_bs).splitlines())
         outs = [("float4", "i0", "INTERPOLATOR0"), ("float4", "i1", "INTERPOLATOR1"),
                 ("float4", "i2", "INTERPOLATOR2"), ("float4", "i3", "INTERPOLATOR3"),
                 ("float", "i4", "INTERPOLATOR4")]
@@ -482,9 +520,8 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
     iface = _iface_for(union_cbs)
     if vs_iface:
         iface = _merge_iface(iface, vs_iface)
-    extra = ""
-    if _has_vi:
-        extra = vs_in.get("def", "") + "\n" + (hook or "")
+    _vo_def = VO_FULL if vo_kind == "full" else VO_OFFSET
+    extra = _vo_def + "\n" + ((vs_in.get("def", "") + "\n") if _has_vi else "") + (hook or "")
     return _assemble(infields, outs, iface, union_srvs, L, extra_global=extra)
 
 

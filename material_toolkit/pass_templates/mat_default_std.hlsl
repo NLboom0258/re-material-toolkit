@@ -18,8 +18,8 @@ void MaterialDepth(DepthInput di, inout bool discardPixel)
     discardPixel = false;
 }
 
-// 顶点钩子(必需, VS 级): 缺省不偏移 ⇒ 等价“无钩子”的标准 VS(逐字节一致)。
-float3 MaterialVertex(VertexInput vi)
+// 顶点输出(必需, VS 级): 默认模式只给世界空间位置偏移; 默认 0 ⇒ 等价“无钩子”的标准 VS。
+void MaterialVertex(in VertexInput vi, out VertexOutput vo)
 {
-    return float3(0.0, 0.0, 0.0);
+    vo.PositionOffset = float3(0.0, 0.0, 0.0);
 }
