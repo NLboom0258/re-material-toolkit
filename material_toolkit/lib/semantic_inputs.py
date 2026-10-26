@@ -181,6 +181,19 @@ def _is_interp(name):
     return (name or "").startswith("INTERPOLATOR")
 
 
+def _deps_of(e, stage="ps"):
+    """该预设项在指定 stage 的依赖。
+
+    同一项在三个 pass 的**取值实现不同** ⇒ 依赖也可能不同(如 `uv0` 在 PS 来自
+    INTERPOLATOR, 在 VS 直接是顶点属性 `i.uv0`)。条目里可用 `depends_by_stage`
+    按 stage 覆盖, 未列出时回退到通用 `depends`。
+    """
+    by = e.get("depends_by_stage") or {}
+    if stage in by:
+        return list(by[stage] or [])
+    return list(e.get("depends") or [])
+
+
 def _dedup(seq):
     out = []
     for x in seq:
@@ -219,7 +232,7 @@ def resolve(item_names, existing_names=frozenset(), stage="ps",
 
     deps, lock, interp = [], {}, []
     for n in names:
-        for d in (find(n).get("depends") or []):
+        for d in _deps_of(find(n), stage):
             if d not in deps:
                 deps.append(d)
             lock.setdefault(d, [])
