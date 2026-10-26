@@ -120,6 +120,31 @@ def unsupported_in_stage(names, stage):
     return out
 
 
+def available(name, stage="ps"):
+    """该语义输入项在给定 stage 是否**可选**(全部阶段值都能供值)。
+
+    `values` 为空的项(只依赖引擎资源)三边都可用; 含有当前 stage 拿不到的值(如
+    `variantKind` 在 ps/depth 为 None)则只能在其它 stage 添加。
+    """
+    e = find(name)
+    if not e:
+        return False
+    vals = e.get("values") or []
+    if not vals:
+        return True
+    return all(_stage_expr(v, stage) is not None for v in vals)
+
+
+def available_names(stage="ps"):
+    """该 stage 可添加的全部语义输入项名集合。"""
+    out = set()
+    for g in groups():
+        for e in g.get("items") or ():
+            if available(e["name"], stage):
+                out.add(e["name"])
+    return frozenset(out)
+
+
 def presets_need_interp(names):
     """这些预设是否依赖**需要插值**的值(深度族启用时, 深度 VS 须改为输出材质族插值)。"""
     for n in names:

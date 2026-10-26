@@ -66,6 +66,16 @@ def from_dict(d):
                 if nm and nm not in out[k][p]:
                     out[k][p].append(nm)
     out["param"] = _param_items(d.get("param"))
+    # 引擎资源: 顺序由工具全序(inputs.json candidates)决定 —— 材质 json 的书写顺序
+    # 不参与绑定/显示, 避免“换个写法就换绑定组”。
+    try:
+        from . import material_inputs as _MI
+        _ord = _MI.candidates_order()
+        for p in PASSES:
+            out["engine"][p] = sorted(out["engine"][p],
+                                      key=lambda n: (_ord.get(n, 10 ** 6), n))
+    except Exception:  # noqa: BLE001 —— 目录未就绪时不阻断加载
+        pass
     return out
 
 

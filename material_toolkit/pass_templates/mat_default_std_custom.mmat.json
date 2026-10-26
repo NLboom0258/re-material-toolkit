@@ -23,9 +23,7 @@
         "TangentWS",
         "bitangentSign",
         "uv0",
-        "uv1",
-        "variantKind",
-        "jointOffset"
+        "uv1"
       ]
     },
     "engine": {

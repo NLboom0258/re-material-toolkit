@@ -420,20 +420,13 @@ VO_FULL = """struct VertexOutput
 
 
 # 变体类别(供材质里判断能否访问骨骼矩阵); 数值一旦定下就不要改。
+# 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect
+# 有骨骼矩阵(jointOffset 可用)的是 3~6; 模板不内置常量/helper, 材质需要时自行比较。
 VARIANT_KINDS = {"pre": 0, "world": 1, "worldinst": 2,
                  "inst": 3, "indirect": 4, "skin": 5, "skin_indirect": 6}
 SKIN_WORLDS = ("inst", "indirect", "skin", "skin_indirect")
 
-VO_ENUM = """// 变体类别(供材质里判断能否访问骨骼矩阵); 数值一旦定下就不要改。
-static const uint RE_VAR_PRE = 0u;
-static const uint RE_VAR_WORLD = 1u;
-static const uint RE_VAR_WORLD_INST = 2u;
-static const uint RE_VAR_INST = 3u;
-static const uint RE_VAR_INDIRECT = 4u;
-static const uint RE_VAR_SKIN = 5u;
-static const uint RE_VAR_SKIN_INDIRECT = 6u;
-// 有骨骼矩阵(jointOffset 可用)的变体: INST / INDIRECT / SKIN / SKIN_INDIRECT
-bool RE_HasSkin(uint k) { return k >= 3u; }"""
+
 
 
 def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None,
@@ -546,8 +539,7 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
     if vs_iface:
         iface = _merge_iface(iface, vs_iface)
     _vo_def = VO_FULL if vo_kind == "full" else VO_OFFSET
-    _prefix = (VO_ENUM + "\n") if vo_kind == "full" else ""
-    extra = _prefix + _vo_def + "\n" + ((vs_in.get("def", "") + "\n") if _has_vi else "") + (hook or "")
+    extra = _vo_def + "\n" + ((vs_in.get("def", "") + "\n") if _has_vi else "") + (hook or "")
     return _assemble(infields, outs, iface, union_srvs, L, extra_global=extra)
 
 

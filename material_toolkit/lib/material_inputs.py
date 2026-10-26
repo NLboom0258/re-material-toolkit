@@ -280,6 +280,23 @@ def candidates():
     return load()["candidates"]
 
 
+def candidates_order():
+    """引擎资源的**全序**(= inputs.json candidates 顺序) -> {name: index}。
+
+    材质 json 里 `engine` 的书写顺序不影响绑定/显示: 读入时按这个全序重排。
+    """
+    _o = {}
+    for _i, _e in enumerate(candidates()):
+        _o.setdefault(_e["name"], _i)
+    return _o
+
+
+def sort_names(names):
+    """按引擎资源全序排序(未知名排最后, 同序按名)。"""
+    _o = candidates_order()
+    return sorted(names, key=lambda n: (_o.get(n, 10 ** 6), n))
+
+
 def by_kind(kind, include_std=True):
     out = []
     if include_std:

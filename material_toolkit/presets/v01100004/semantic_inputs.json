@@ -107,7 +107,7 @@
     {
       "name": "variantKind",
       "group": "骨骼",
-      "desc": "当前 VS 变体类别(枚举 REVariantKind; 仅顶点阶段). 用于判断能否访问骨骼矩阵",
+      "desc": "当前 VS 变体类别(仅顶点阶段): 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect; >=3 才有骨骼矩阵",
       "depends": [],
       "values": ["variantKind"],
       "field": {"name": "variantKind", "type": "uint"},

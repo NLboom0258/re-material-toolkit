@@ -3376,8 +3376,9 @@ class MaterialSystemPanel(QWidget):
     def _add_presets(self):
         """从预设(语义)输入目录挑选(**只增删当前 pass 的项**); 依赖的引擎资源自动加入并锁定。"""
         _pass = self._cur_pass()
+        _stage = "vs" if _pass == "vertex" else ("depth" if _pass == "depth" else "ps")
         _own = mimp.presets(self.asset.inputs, _pass)
-        d = PresetDialog(self, selected=set(_own))
+        d = PresetDialog(self, selected=set(_own), stage=_stage)
         if d.exec() != QDialog.Accepted:
             return
         self.asset.inputs["preset"][_pass] = list(d.selected_names())
@@ -3475,6 +3476,7 @@ class MaterialSystemPanel(QWidget):
         if params and "UserMaterial" not in _explicit and "UserMaterial" not in _auto:
             _auto.append("UserMaterial")
         engine.extend(x for x in _auto if x not in engine)
+        engine = minp.sort_names(engine)      # 显示顺序由工具全序决定(不由材质书写顺序)
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图/函数)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
@@ -4141,21 +4143,25 @@ class PresetDialog(QDialog):
     不提供"添加一整类"。
     """
 
-    def __init__(self, parent=None, selected=()):
+    def __init__(self, parent=None, selected=(), stage="ps"):
         super().__init__(parent)
         self.setWindowTitle("添加预设输入")
         self.resize(900, 520)
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("按分组挑选语义输入项(可单独添加); 勾选后其依赖的引擎资源会自动加入(并锁定)。"))
+        v.addWidget(QLabel("按分组挑选语义输入项(可单独添加); 勾选后其依赖的引擎资源会自动加入(并锁定)。\n"
+                           "只列出当前 pass 阶段能供值的项(如 variantKind/jointOffset 仅顶点阶段可用)。"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["预设输入", "类型", "依赖的引擎资源", "说明"])
         for col, w in ((0, 190), (1, 90), (2, 200), (3, 380)):
             self.tree.setColumnWidth(col, w)
         sel = set(selected)
         for g in sinp.groups():
+            _items = [e for e in g["items"] if sinp.available(e["name"], stage)]
+            if not _items:
+                continue
             gnode = QTreeWidgetItem([g["group"], "", "", ""])
             gnode.setFlags(gnode.flags() & ~Qt.ItemIsUserCheckable)
-            for e in g["items"]:
+            for e in _items:
                 f = e.get("field") or {}
                 it = QTreeWidgetItem([e["name"], f.get("type", ""),
                                       ", ".join(e.get("depends") or []) or "(无)",
