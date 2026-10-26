@@ -177,12 +177,12 @@ def mat_pack(pos="wp", n="wN", t="wT", pclip="pclip", clip=False,
     return "\n".join(L)
 
 
-def depth_pack(pos="wp", interp=False, clip=False):
+def depth_pack(pos="wp", interp=False, clip=False, uv0="i.uv0"):
     """深度族打包: o.pos = pos·viewProj; interp=True 时输出 uv0+pos(与 deferred_depth 解包一致);
-    clip=True 时输出 SV_ClipDistance。"""
+    clip=True 时输出 SV_ClipDistance。uv0 可由自定义模式的 `vo.UV0` 覆写。"""
     L = ["o.pos = mul(float4(%s, 1.0), viewProjMat);" % pos]
     if interp:
-        L.append("o.j0 = float4(i.uv0, %s.xy);" % pos)
+        L.append("o.j0 = float4(%s, %s.xy);" % (uv0, pos))
         L.append("o.j1 = float2(%s.z, 0.0);" % pos)
     if clip:
         L.append("o.cd = dot(clipplane, float4(%s, 1.0));" % pos)
@@ -505,7 +505,7 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
         if clip:
             outs.append(("float", "cd", "SV_ClipDistance"))
     else:
-        L.extend(depth_pack(pos="wp", interp=interp, clip=clip).splitlines())
+        L.extend(depth_pack(pos="wp", interp=interp, clip=clip, uv0=_uv0).splitlines())
         outs = []
         if interp:
             outs += [("float4", "j0", "INTERPOLATOR0"), ("float2", "j1", "INTERPOLATOR1")]

@@ -1,13 +1,7 @@
 // deferred_std_custom(自定义光照 / 直控 GBuffer) 的缺省材质:
 // **初始即等价"默认光照"模式** —— 中性 PBR 值, 并按默认模板(deferred_std)的相同规则
 // 打包进 4 个原始 GBuffer RT; 曝光抵消也在此做。因这些逻辑都在材质源里, 用户可**删改**。
-// 依赖的预设输入已声明(下方 `//! preset`); 删掉它们即表示自行接管对应逻辑。
-//! preset Normal
-//! preset Tangent
-//! preset Bitangent
-//! preset velocity
-//! preset exposureScale
-//! engine GBufferType
+// 依赖的输入见配套 `mat_default_std_custom.mmat.json` 的 `inputs`(结构化真源)。
 
 void MaterialMain(in MaterialInput mi, out MaterialOutput m)
 {
