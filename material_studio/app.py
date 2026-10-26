@@ -3446,32 +3446,25 @@ class MaterialSystemPanel(QWidget):
 
     def _fill_input_tree(self, tree, pass_name):
         tree.clear()
-        # 1) 插值输入(pass 依赖; 非资源; 只读展示)
+        # 1) 自定义输入(该 pass: 预设/参数/贴图/函数/引擎资源; 会写进 mmtr)
         _presets = mimp.presets(self.asset.inputs, pass_name)
-        _interps = minp.interp_inputs(pass_name, _presets)
-        if _interps:
-            itop = QTreeWidgetItem(["插值输入 (pass 依赖, 只读)", "",
-                                    "由 pass 声明依赖; 系统自动添加, 不锁定(无依赖自动去除)"])
-            tree.addTopLevelItem(itop)
-            for _n, _d in _interps:
-                ti = QTreeWidgetItem([_n, "", _d])
-                ti.setData(0, Qt.UserRole, ("copy", _n))
-                itop.addChild(ti)
-        # 2) 自定义输入(该 pass: 预设/参数/贴图/引擎资源; 会写进 mmtr)
         presets = list(_presets)
         params = mimp.params(self.asset.inputs)
         textures = mimp.textures(self.asset.inputs, pass_name)
         engine = mimp.engine(self.asset.inputs, pass_name)
         lock = self._locked_names(pass_name)
         _tmpl = self.asset.template.get("pass_template") or "deferred_std"
+        _explicit = set(engine)
         # 自动供给(不进资产)的引擎资源: 模板/pass 结构依赖 + 预设依赖 + UserMaterial。
-        # 它们确实会声明进 RDEF, 但**不在 inputs["engine"]** 里, 所以单独成组展示。
+        # 与手动添加的**同栏展示**, 仅靠橙色+锁定区分。
         _auto = []
         for _n in list(minp.pass_dep_names(pass_name, _tmpl)) + list(lock):
-            if _n not in engine and _n not in _auto:
+            # 只列真正的引擎资源; INTERPOLATOR* 这类插值依赖不进树(不是资源)。
+            if _n not in _explicit and _n not in _auto and minp.find(_n) is not None:
                 _auto.append(_n)
-        if params and "UserMaterial" not in engine and "UserMaterial" not in _auto:
+        if params and "UserMaterial" not in _explicit and "UserMaterial" not in _auto:
             _auto.append("UserMaterial")
+        engine.extend(x for x in _auto if x not in engine)
         cust = QTreeWidgetItem(["自定义输入 (预设/参数/贴图/函数)", "", "写进 mmtr 参数表/绑定"])
         tree.addTopLevelItem(cust)
         pre = QTreeWidgetItem(["预设输入 (//! preset)", "", "%d" % len(presets)])
@@ -3517,14 +3510,10 @@ class MaterialSystemPanel(QWidget):
             it.setIcon(0, _grip_icon())
             it.setData(0, Qt.UserRole, ("tex", n))
             tnode.addChild(it)
-        enode = QTreeWidgetItem(["引擎资源 (已添加)", "", "%d" % len(engine)])
+        enode = QTreeWidgetItem(["引擎资源 (//! engine)", "", "%d" % len(engine)])
         cust.addChild(enode)
-        anode = QTreeWidgetItem(["引擎资源 (自动: 模板/预设依赖)", "", "%d" % len(_auto)])
-        anode.setToolTip(0, "这些资源由 pass 模板或预设输入自动供给, **不写入资产**;\n"
-                            "生成时仍会声明进 RDEF(绑定组按它们构建)。")
-        cust.addChild(anode)
 
-        def _fill_engine(parent, names, is_auto):
+        def _fill_engine(parent, names):
             for n in names:
                 e = minp.find(n) or {}
                 kd = e.get("kind", "")
@@ -3537,13 +3526,12 @@ class MaterialSystemPanel(QWidget):
                 desc = minp.desc_of(n)
                 if n in lock:
                     extra = ("锁定: 由 %s 依赖" % " / ".join(lock[n])).strip()
-                if is_auto:
+                _is_auto = (n not in _explicit)
+                if _is_auto:
                     extra = ("自动供给(不写入资产) %s" % extra).strip()
                 it = QTreeWidgetItem([n, kd, desc])
                 it.setToolTip(2, ("%s\n%s" % (extra, desc)).strip())
-                if is_auto:
-                    it.setForeground(0, QColor("#b8791a"))
-                elif n in lock:
+                if n in lock or _is_auto:
                     it.setForeground(0, QColor("#b8791a"))
                 it.setData(0, Qt.UserRole, ("engine", n))
                 parent.addChild(it)
@@ -3561,8 +3549,7 @@ class MaterialSystemPanel(QWidget):
                         cm.setData(0, Qt.UserRole, ("copy", mn))
                         it.addChild(cm)
 
-        _fill_engine(enode, engine, False)
-        _fill_engine(anode, _auto, True)
+        _fill_engine(enode, engine)
         funcs = mimp.funcs(self.asset.inputs, pass_name)
         fnode = QTreeWidgetItem(["函数 (自定义库)", "", "%d" % len(funcs)])
         cust.addChild(fnode)
