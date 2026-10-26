@@ -50,6 +50,10 @@ STAGE_VALUES = {
     "svpos":        {"ps": "i.svpos", "vs": "_vs_svpos", "depth": "i.svpos"},
     "prevClip":     {"ps": "float4(i.v4.zw, 0.0, i.v5.x)", "vs": "_vs_pclip",
                      "depth": "float4(i.v4.zw, 0.0, i.v5.x)"},
+    # 仅顶点阶段有意义的量: PS/深度阶段拿不到(骨骼矩阵只给 VS) ⇒ 填 None 报“不支持”。
+    # 它们的具体值由 vs_gen 按 world 硬编码(见 build_from_spec), 这里的 0u 只是占位。
+    "variantKind":  {"ps": None, "vs": "0u", "depth": None},
+    "jointOffset":  {"ps": None, "vs": "0u", "depth": None},
 }
 
 # 需要**插值**(INTERPOLATOR)才能供值的值(深度族启用这些时, 深度 VS 须改为输出材质族插值)。

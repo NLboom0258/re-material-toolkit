@@ -3446,8 +3446,18 @@ class MaterialSystemPanel(QWidget):
 
     def _fill_input_tree(self, tree, pass_name):
         tree.clear()
-        # 1) 自定义输入(该 pass: 预设/参数/贴图/函数/引擎资源; 会写进 mmtr)
+        # 1) 插值输入(pass 依赖; 非资源; 只读展示) —— 不属于引擎资源栏
         _presets = mimp.presets(self.asset.inputs, pass_name)
+        _interps = minp.interp_inputs(pass_name, _presets)
+        if _interps:
+            itop = QTreeWidgetItem(["插值输入 (pass 依赖, 只读)", "",
+                                    "由 pass 声明依赖; 系统自动添加, 不锁定(无依赖自动去除)"])
+            tree.addTopLevelItem(itop)
+            for _n, _d in _interps:
+                ti = QTreeWidgetItem([_n, "", _d])
+                ti.setData(0, Qt.UserRole, ("copy", _n))
+                itop.addChild(ti)
+        # 2) 自定义输入(该 pass: 预设/参数/贴图/函数/引擎资源; 会写进 mmtr)
         presets = list(_presets)
         params = mimp.params(self.asset.inputs)
         textures = mimp.textures(self.asset.inputs, pass_name)

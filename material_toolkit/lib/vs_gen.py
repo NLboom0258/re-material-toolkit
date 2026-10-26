@@ -419,6 +419,23 @@ VO_FULL = """struct VertexOutput
 };"""
 
 
+# 变体类别(供材质里判断能否访问骨骼矩阵); 数值一旦定下就不要改。
+VARIANT_KINDS = {"pre": 0, "world": 1, "worldinst": 2,
+                 "inst": 3, "indirect": 4, "skin": 5, "skin_indirect": 6}
+SKIN_WORLDS = ("inst", "indirect", "skin", "skin_indirect")
+
+VO_ENUM = """// 变体类别(供材质里判断能否访问骨骼矩阵); 数值一旦定下就不要改。
+static const uint RE_VAR_PRE = 0u;
+static const uint RE_VAR_WORLD = 1u;
+static const uint RE_VAR_WORLD_INST = 2u;
+static const uint RE_VAR_INST = 3u;
+static const uint RE_VAR_INDIRECT = 4u;
+static const uint RE_VAR_SKIN = 5u;
+static const uint RE_VAR_SKIN_INDIRECT = 6u;
+// 有骨骼矩阵(jointOffset 可用)的变体: INST / INDIRECT / SKIN / SKIN_INDIRECT
+bool RE_HasSkin(uint k) { return k >= 3u; }"""
+
+
 def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None,
                     vo_kind="offset"):
     """按 spec(来自 spec_from_blob)生成 VS 源。
@@ -468,6 +485,14 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
     if _has_vi:
         L.append("VertexInput vi;")
         L.extend(vs_in.get("impl") or [])
+        # 变体相关量: 由模板**硬编码字面量**(编译期常量 ⇒ 未走到的分支连同资源引用一起被 DCE)。
+        if "variantKind" in _vals:
+            L.append("vi.variantKind = %du;" % VARIANT_KINDS.get(world, 0))
+        if "jointOffset" in _vals:
+            if world in SKIN_WORLDS:
+                L.append("vi.jointOffset = iw.jointOffset;")
+            else:
+                L.append("vi.jointOffset = 0u;")
     _uv0, _uv1, _bs = "i.uv0", "i.uv1", "i.tan.w"
     if hook:
         # 顶点输出: 默认模式只用 PositionOffset; 自定义模式直接给最终几何量。
@@ -521,7 +546,8 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
     if vs_iface:
         iface = _merge_iface(iface, vs_iface)
     _vo_def = VO_FULL if vo_kind == "full" else VO_OFFSET
-    extra = _vo_def + "\n" + ((vs_in.get("def", "") + "\n") if _has_vi else "") + (hook or "")
+    _prefix = (VO_ENUM + "\n") if vo_kind == "full" else ""
+    extra = _prefix + _vo_def + "\n" + ((vs_in.get("def", "") + "\n") if _has_vi else "") + (hook or "")
     return _assemble(infields, outs, iface, union_srvs, L, extra_global=extra)
 
 

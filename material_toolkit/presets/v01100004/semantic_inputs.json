@@ -105,6 +105,24 @@
       "impl": ["mi.bitangentSign = G.tangentSign;"]
     },
     {
+      "name": "variantKind",
+      "group": "骨骼",
+      "desc": "当前 VS 变体类别(枚举 REVariantKind; 仅顶点阶段). 用于判断能否访问骨骼矩阵",
+      "depends": [],
+      "values": ["variantKind"],
+      "field": {"name": "variantKind", "type": "uint"},
+      "impl": ["vi.variantKind = G.variantKind;"]
+    },
+    {
+      "name": "jointOffset",
+      "group": "骨骼",
+      "desc": "本次 draw 的骨骼块起点(仅顶点阶段; 与 SkinningMatrices 配合取骨骼矩阵)",
+      "depends": [],
+      "values": ["jointOffset"],
+      "field": {"name": "jointOffset", "type": "uint"},
+      "impl": ["vi.jointOffset = G.jointOffset;"]
+    },
+    {
       "name": "camPos",
       "group": "相机",
       "desc": "相机世界位置(依赖 SceneInfo.transposeViewInvMat)",

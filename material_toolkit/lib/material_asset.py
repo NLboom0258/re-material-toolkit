@@ -66,7 +66,8 @@ def _norm_extra(d):
 # 自定义模式的 `MaterialVertex(in VertexInput vi, out VertexOutput vo)` 默认实现
 # 直接引用这些顶点预设; 切换到自定义模式时需自动加入顶点页(否则 `vi.xxx` 未定义)。
 CUSTOM_VERTEX_PRESETS = ("positionWS", "NormalWS", "TangentWS",
-                         "bitangentSign", "uv0", "uv1")
+                         "bitangentSign", "uv0", "uv1",
+                         "variantKind", "jointOffset")
 
 
 class MaterialAsset(object):
