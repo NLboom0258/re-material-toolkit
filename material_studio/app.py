@@ -3292,6 +3292,10 @@ class MaterialSystemPanel(QWidget):
         attach_menu(tree, self._menu_inputs)
         return w, tree
 
+    def _stage_of(self, pass_name):
+        """pass 名 -> stage(ps/depth/vs); 预设依赖/可用性按 stage 区分。"""
+        return "vs" if pass_name == "vertex" else ("depth" if pass_name == "depth" else "ps")
+
     def _cur_pass(self):
         """输入页当前查看的 pass 名(按钮组: 主/深度/顶点)。"""
         _i = self._in_stack.currentIndex()
@@ -3489,7 +3493,7 @@ class MaterialSystemPanel(QWidget):
             gnode = QTreeWidgetItem([g["group"], "", ""])
             pre.addChild(gnode)
             for e in _items:
-                deps = e.get("depends") or []
+                deps = sinp.deps_of(e["name"], self._stage_of(pass_name))
                 d = e.get("desc", "")
                 if deps:
                     d = ("%s | 依赖: %s" % (d, ", ".join(deps))).strip(" |")
@@ -4164,7 +4168,7 @@ class PresetDialog(QDialog):
             for e in _items:
                 f = e.get("field") or {}
                 it = QTreeWidgetItem([e["name"], f.get("type", ""),
-                                      ", ".join(e.get("depends") or []) or "(无)",
+                                      ", ".join(sinp.deps_of(e["name"], stage)) or "(无)",
                                       e.get("desc", "")])
                 it.setToolTip(3, e.get("desc", ""))
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)

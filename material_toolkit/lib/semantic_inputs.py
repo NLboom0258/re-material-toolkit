@@ -194,6 +194,12 @@ def _deps_of(e, stage="ps"):
     return list(e.get("depends") or [])
 
 
+def deps_of(name, stage="ps"):
+    """该预设项在指定 stage 的依赖名列表(供 GUI 展示/校验)。"""
+    e = find(name)
+    return _deps_of(e, stage) if e else []
+
+
 def _dedup(seq):
     out = []
     for x in seq:
