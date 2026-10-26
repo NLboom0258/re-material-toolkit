@@ -47,6 +47,23 @@ def default_material(template="deferred_env"):
     return _read(fname)
 
 
+def default_asset_file(template="deferred_std"):
+    """该 pass 模板配套的默认材质资产(`mat_default_*.mmat.json`)路径; 无则 None。
+
+    默认资产的 `inputs` 与 `shading.source` 一起存放，避免“源码里的 `//! preset`
+    与结构化真源脱钩”(结构化后注释不再解析)。
+    """
+    suffix = template.split("_", 1)[1] if "_" in template else template
+    cands = [suffix]
+    if suffix.endswith("_instance"):
+        cands.append(suffix[:-len("_instance")])
+    for s in cands:
+        p = os.path.join(_TDIR, "mat_default_%s.mmat.json" % s)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def material_line_offset(template="deferred_env"):
     """组装文里“材质源第一行”之前的行数(用于把编译报错行号映射回用户源码行)。"""
     tpl = _read(template + ".hlsl")

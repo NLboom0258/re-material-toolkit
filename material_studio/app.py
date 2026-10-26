@@ -3773,6 +3773,23 @@ class MaterialSystemPanel(QWidget):
     # ---- 操作 ----
     def _load_default_material(self):
         tmpl = self.asset.template.get("pass_template") or "deferred_std"
+        # 优先用配套的默认材质资产(.mmat.json): 源 + inputs 一起, 与 open_asset 同口径。
+        _jp = mpass.default_asset_file(tmpl)
+        if _jp:
+            try:
+                _d = masset.MaterialAsset.load(_jp)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "载入失败", str(e))
+                return
+            self.ed_src.setPlainText(_d.shading_source)
+            self.asset.shading_source = _d.shading_source
+            self.asset.inputs = mimp.from_dict(mimp.to_dict(_d.inputs))
+            self.asset.shading_extra = dict(_d.shading_extra)
+            for _p, _e in getattr(self, "ed_extra", {}).items():
+                _e.setPlainText(self.asset.shading_extra.get(_p, ""))
+            self.refresh_info()
+            return
+        # 回退(无配套资产): 只给源码, 输入需用户自己加
         try:
             src = mpass.default_material(tmpl)
         except Exception as e:  # noqa: BLE001
