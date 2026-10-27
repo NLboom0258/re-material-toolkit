@@ -130,7 +130,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.Normal = normalize(G.worldNormal.xzy);"
+        "mi.Normal = normalize(G.worldNormal).xzy;"
       ],
       "depends_by_stage": {
         "vs": []
@@ -152,7 +152,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.Tangent = normalize(G.worldTangent.xzy);"
+        "mi.Tangent = normalize(G.worldTangent).xzy;"
       ],
       "depends_by_stage": {
         "vs": []
@@ -177,8 +177,8 @@
         "type": "float3"
       },
       "impl": [
-        "float3 _nM = normalize(G.worldNormal.xzy);",
-        "float3 _tM = normalize(G.worldTangent.xzy);",
+        "float3 _nM = normalize(G.worldNormal).xzy;",
+        "float3 _tM = normalize(G.worldTangent).xzy;",
         "mi.Bitangent = normalize(cross(_nM, _tM)) * G.tangentSign;"
       ],
       "depends_by_stage": {
