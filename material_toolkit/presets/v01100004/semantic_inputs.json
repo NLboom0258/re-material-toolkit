@@ -82,7 +82,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.TangentWS = normalize(G.worldTangent);"
+        "mi.TangentWS = normalize(G.worldTangent).xzy;"
       ],
       "depends_by_stage": {
         "vs": []
