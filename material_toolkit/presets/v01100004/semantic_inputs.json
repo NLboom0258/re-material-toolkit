@@ -82,7 +82,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.TangentWS = normalize(G.worldTangent).xzy;"
+        "mi.TangentWS = normalize(G.worldTangent);"
       ],
       "depends_by_stage": {
         "vs": []
@@ -107,11 +107,9 @@
         "type": "float3"
       },
       "impl": [
-        "float3 _ngW = normalize(G.worldNormal).xzy;",
-        "float3 _tgW = normalize(G.worldTangent);",
-        "float3 _bgW = cross(_ngW, _tgW);",
-        "_bgW = (G.tangentSign < 0.0) ? -_bgW : _bgW;",
-        "mi.BitangentWS = normalize(_bgW).xzy;"
+        "float3 _nW = normalize(G.worldNormal);",
+        "float3 _tW = normalize(G.worldTangent);",
+        "mi.BitangentWS = normalize(cross(_nW, _tW)) * G.tangentSign;"
       ],
       "depends_by_stage": {
         "vs": []
@@ -132,7 +130,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.Normal = normalize(G.worldNormal).xzy;"
+        "mi.Normal = normalize(G.worldNormal.xzy);"
       ],
       "depends_by_stage": {
         "vs": []
@@ -154,7 +152,7 @@
         "type": "float3"
       },
       "impl": [
-        "mi.Tangent = normalize(G.worldTangent);"
+        "mi.Tangent = normalize(G.worldTangent.xzy);"
       ],
       "depends_by_stage": {
         "vs": []
@@ -179,11 +177,9 @@
         "type": "float3"
       },
       "impl": [
-        "float3 _nBW = normalize(G.worldNormal).xzy;",
-        "float3 _tBW = normalize(G.worldTangent);",
-        "float3 _bBW = cross(_nBW, _tBW);",
-        "_bBW = (G.tangentSign < 0.0) ? -_bBW : _bBW;",
-        "mi.Bitangent = normalize(_bBW);"
+        "float3 _nM = normalize(G.worldNormal.xzy);",
+        "float3 _tM = normalize(G.worldTangent.xzy);",
+        "mi.Bitangent = normalize(cross(_nM, _tM)) * G.tangentSign;"
       ],
       "depends_by_stage": {
         "vs": []
