@@ -61,7 +61,7 @@ PSOut main(PSIn i)
     //__MINPUT_BUILD__
 
     // ---- 2. 材质逻辑(直写 4 个 GBuffer RT) ----
-    MaterialOutput m;
+    MaterialOutput m = (MaterialOutput)0;   // 先清 0: out 参数不要求写全字段, 漏写不再是垃圾值
     MaterialMain(mi, m);
 
     // ---- 3. 输出 ----

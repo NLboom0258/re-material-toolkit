@@ -294,7 +294,12 @@ def d30_map():
 
 
 def build_standard_vs(material_src, bank_key, inputs=None, extra=None, vo_kind="offset"):
-    """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。"""
+    """组装+编译一个标准 VS 变体(注入 material_src 的顶点钩子)。-> (src, dxbc, err)。
+
+    与 `build()` 的口径一致但**不模拟 `depth_full`**: 同一个 bank 键(prefix+tech)
+    在多个槽里可以既是 `material_ps` 又是 `cutout_ps`, `pack` 选择无法由键唯一确定,
+    而预览只关心“钩子是否被正确注入且能编译”。
+    """
     data, idx = _load_bank()
     e = idx.get(bank_key)
     if not e:
@@ -307,12 +312,20 @@ def build_standard_vs(material_src, bank_key, inputs=None, extra=None, vo_kind="
     # “补输入”换族: 与 build() 同口径。reduced 族(深度/阴影/拾取)没有 NORMAL/TANGENT
     # 属性, 而顶点预设若引用它们(如 NormalWS/TangentWS)会报 invalid subscript ⇒
     # 预览/编译校验必须与真实构建用同一套换族, 否则会误报大量“编译失败”。
-    if SI.presets_need_upgrade(MIM.presets(inputs, "vertex")) and spec["family"] in VG.FULLMAP:
+    # 触发条件也要一致: 顶点预设缺属性 **或** 深度族预设需插值(build 里两者都会 _upg)。
+    _need = SI.presets_need_upgrade(MIM.presets(inputs, "vertex"))
+    if not _need:
+        _need = SI.presets_need_interp(MIM.presets(inputs, "depth"))
+    if _need and spec["family"] in VG.FULLMAP:
         spec = dict(spec)
         spec["family"] = VG.FULLMAP[spec["family"]]
     _union = set(VG.union_resources()[0]) | set(VG.union_resources()[1])
     vs_in = SI.resolve(MIM.presets(inputs, "vertex"), _union, stage="vs",
                        struct_name="VertexInput", recv="vi")
+    # 与 build() 同口径: 只在某 pass 可用的项被写进其它 pass 时, 直接报清楚的原因
+    # (否则会退化成 HLSL“未定义标识符”, 难定位)。
+    if vs_in.get("unsupported"):
+        return "", None, "顶点预设依赖的值无法在 VS 供值: %s" % vs_in["unsupported"]
     vs_iface, _, _ = _vs_iface(inputs, vs_in)
     from . import custom_functions as CF
     _hook = CF.injection_text(MIM.funcs(inputs, "vertex"), "vs", "vertex") + \

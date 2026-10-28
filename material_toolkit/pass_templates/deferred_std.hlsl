@@ -74,7 +74,7 @@ PSOut main(PSIn i)
 
     // ---- 2. 材质逻辑(PBR 语义; 入参 = 动态生成的 MaterialInput) ----
     //__MINPUT_BUILD__
-    MaterialOutput m;
+    MaterialOutput m = (MaterialOutput)0;   // 先清 0: out 参数不要求写全字段, 漏写不再是垃圾值
     MaterialMain(mi, m);
 
     // ---- 3. 打包进 GBuffer(引擎光照/后处理外置) ----
