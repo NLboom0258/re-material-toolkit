@@ -13,6 +13,7 @@
   python material_toolkit.py pool-rename <in.mmtr> <old_name> <new_name> -o <out.mmtr>
   python material_toolkit.py mdf2-set-texture <in.mdf2> <material> <type> [path] [-o <out.mdf2>] [--null <path>]
   python material_toolkit.py mdf2-new    <master.mmtr> -o <out.mdf2.10> [--name M] [--mmtr-path MasterMaterial/Master/X.mmtr] [--shading-type Standard] [--game-version 10] [--from <src.mdf2> --material M]
+  python material_toolkit.py preview    <asset.mmat.json> --game-root <游戏根> --base-mdf2 <相对natives/x64的mdf2> [--materials A,B] [--keep 20] [--sync]
   python material_toolkit.py model-info  <in.mmtr> [--blob N] [--variants]
   python material_toolkit.py model-verify <in.mmtr>
   python material_toolkit.py variant-map <in.mmtr> [--tech NAME] [--slots] [--by-pass]
@@ -182,6 +183,20 @@ def main():
         n = mf.save(out)
         print(f"OK: mdf2-new {src} -> {out} ({n} bytes) materials={len(mf.materials)}")
         mf.dump()
+    elif cmd == "preview":
+        from lib.material_asset import MaterialAsset          # noqa: PLC0415
+        from lib import preview as pv                          # noqa: PLC0415
+        asset = MaterialAsset.load(a[0])
+        gr = a[a.index("--game-root") + 1] if "--game-root" in a else None
+        bm = a[a.index("--base-mdf2") + 1] if "--base-mdf2" in a else None
+        if not gr or not bm:
+            print("ERR: preview 需要 --game-root <游戏根> --base-mdf2 <相对 natives/x64 的 mdf2>")
+            return
+        mats = (a[a.index("--materials") + 1].split(",")
+                if "--materials" in a else None)
+        keep = int(a[a.index("--keep") + 1]) if "--keep" in a else 20
+        pv.deploy(asset, gr, bm, materials=mats, keep=keep,
+                  sync="--sync" in a)
     elif cmd == "model-info":
         path = a[0]
         m = MmtrModel.load(path)
