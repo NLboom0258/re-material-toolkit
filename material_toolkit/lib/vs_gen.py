@@ -421,10 +421,12 @@ VO_FULL = """struct VertexOutput
 
 # 变体类别(供材质里判断能否访问骨骼矩阵); 数值一旦定下就不要改。
 # 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect
-# 有骨骼矩阵(jointOffset 可用)的是 3~6; 模板不内置常量/helper, 材质需要时自行比较。
+# **骨骼矩阵(SkinningMatrices)只在 5/6 绑定**(实测银行: inst 48 / indirect 44 个变体全无);
+# 3~6 都有 InstanceWorldInfo.jointOffset, 但拿它去索引骨骼矩阵只在 5/6 安全。
 VARIANT_KINDS = {"pre": 0, "world": 1, "worldinst": 2,
                  "inst": 3, "indirect": 4, "skin": 5, "skin_indirect": 6}
-SKIN_WORLDS = ("inst", "indirect", "skin", "skin_indirect")
+# 能取到 InstanceWorldInfo.jointOffset 的变体(供值范围; 不等于"有骨骼矩阵")
+JOINT_OFFSET_WORLDS = ("inst", "indirect", "skin", "skin_indirect")
 
 
 
@@ -482,14 +484,16 @@ def build_from_spec(spec, hook=None, vs_in=None, depth_full=False, vs_iface=None
         if "variantKind" in _vals:
             L.append("vi.variantKind = %du;" % VARIANT_KINDS.get(world, 0))
         if "jointOffset" in _vals:
-            if world in SKIN_WORLDS:
+            if world in JOINT_OFFSET_WORLDS:
                 L.append("vi.jointOffset = iw.jointOffset;")
             else:
                 L.append("vi.jointOffset = 0u;")
     _uv0, _uv1, _bs = "i.uv0", "i.uv1", "i.tan.w"
     if hook:
         # 顶点输出: 默认模式只用 PositionOffset; 自定义模式直接给最终几何量。
-        L.append("VertexOutput vo;")
+        # 先整体清 0: `out` 参数不要求所有字段都被写, 材质漏写任一字段时(如只改位置)
+        # 未初始化值会污染法线/UV/深度 cutout —— 这类静默错位极难排查。
+        L.append("VertexOutput vo = (VertexOutput)0;")
         L.append("MaterialVertex(vi, vo);")
         if vo_kind == "full":
             L.append("float3 _dv = vo.PositionWS - wp;")

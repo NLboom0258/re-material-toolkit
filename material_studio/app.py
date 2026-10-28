@@ -3035,8 +3035,13 @@ class MaterialSystemPanel(QWidget):
     def _on_option_changed(self, *_):
         if self._loading:
             return
+        # 必须先 _sync_asset: _ensure_custom_vertex_presets 读的是 asset.lighting_mode,
+        # 而它只在 refresh_info->_sync_asset 里被写入。先补再同步 ⇒ 用的是**上一次**的模式
+        # (默认→自定义 不补预设; 自定义→默认 反而硬加进去)。
+        self._sync_asset()
         self._ensure_custom_vertex_presets()
         self.refresh_info()
+        self._refresh_vs_preview()      # vo_kind 随模式变 ⇒ 预览需重算
 
     def _ensure_custom_vertex_presets(self):
         """切到自定义光照模式时, 自动补齐 MaterialVertex 默认实现依赖的顶点预设。
@@ -3360,7 +3365,9 @@ class MaterialSystemPanel(QWidget):
     def _locked_names(self, pass_name="main"):
         """被锁定(禁止删除)的引擎资源名 -> [来源...]: pass 依赖 + 预设依赖 + 参数所需 UserMaterial。"""
         _pre = mimp.presets(self.asset.inputs, pass_name)
-        res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)))
+        # 依赖按 stage 区分(如 uv0 在 PS 靠 INTERPOLATOR、在 VS 直接用 i.uv0)
+        res = sinp.resolve(_pre, sinp.names_in(self._base_iface(pass_name)),
+                           stage=self._stage_of(pass_name))
         lock = {k: list(v) for k, v in res["lock"].items()}
         _pt = {"depth": "深度 pass", "vertex": "顶点"}.get(pass_name, "主 pass")
         _tmpl = self.asset.template.get("pass_template") or "deferred_std"

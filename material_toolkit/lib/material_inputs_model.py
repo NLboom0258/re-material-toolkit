@@ -131,10 +131,19 @@ def normalize(inputs):
     from . import semantic_inputs as SI
     from . import custom_functions as CF
     for p in PASSES:
-        res = SI.resolve(out["preset"][p], set())
+        # 依赖按 stage 取(uv0 在 PS 靠 INTERPOLATOR、在 VS 直接用 i.uv0; svpos/velocity 同理)
+        _st = "vs" if p == "vertex" else ("depth" if p == "depth" else "ps")
+        res = SI.resolve(out["preset"][p], set(), stage=_st)
         for nm in res["engine"]:
             if nm not in out["engine"][p]:
                 out["engine"][p].append(nm)
         if out["func"][p]:
             out["func"][p] = CF.topo_order(out["func"][p])   # 展开依赖闭包 + 依赖在前
+    # 追加完预设依赖后重排一次: 顺序由工具全序决定(不由“谁先被追加”决定)。
+    try:
+        from . import material_inputs as _MI
+        for p in PASSES:
+            out["engine"][p] = _MI.sort_names(out["engine"][p])
+    except Exception:  # noqa: BLE001 —— 目录未就绪时不阻断
+        pass
     return out

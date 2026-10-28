@@ -45,7 +45,7 @@ _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
 # 标准 VS 自生结果缓存: 银行键 -> (kind, dxbc); kind ∈ {"gen","bank","none"}。
 # 自生需编译 HLSL(较慢) ⇒ 按键全局缓存, 同一键在多槽/多次构建间复用。
 _vs_cache = {}
-_vs_fail = {}          # (key, hook_h, upg, full) -> 失败原因(生成失败回退银行时记录)
+_vs_fail = {}          # (key, hook_h, upg, full, vo_kind) -> 失败原因(生成失败回退银行时记录)
 
 # 引擎 post 表区: InputLayout 元素表等(PT 指针指向此处); 记录栅格尾部与其交叠。
 POST_LO = 0x46210
@@ -304,6 +304,12 @@ def build_standard_vs(material_src, bank_key, inputs=None, extra=None, vo_kind="
     if not spec or not spec.get("family"):
         return "", None, "无法从银行 blob 反推 spec"
     from . import semantic_inputs as SI
+    # “补输入”换族: 与 build() 同口径。reduced 族(深度/阴影/拾取)没有 NORMAL/TANGENT
+    # 属性, 而顶点预设若引用它们(如 NormalWS/TangentWS)会报 invalid subscript ⇒
+    # 预览/编译校验必须与真实构建用同一套换族, 否则会误报大量“编译失败”。
+    if SI.presets_need_upgrade(MIM.presets(inputs, "vertex")) and spec["family"] in VG.FULLMAP:
+        spec = dict(spec)
+        spec["family"] = VG.FULLMAP[spec["family"]]
     _union = set(VG.union_resources()[0]) | set(VG.union_resources()[1])
     vs_in = SI.resolve(MIM.presets(inputs, "vertex"), _union, stage="vs",
                        struct_name="VertexInput", recv="vi")
@@ -364,7 +370,9 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         结果全局缓存(键含钩子签名 + 补输入标志 + full)。_upg 时对 reduced 族做"补输入"(换完整族);
         full=True(深度族需插值) 时深度 VS 也输出材质族插值(pack=mat, 见 Phase 3)。
         """
-        ck = (key, _hook_h, _upg, full)
+        # 键必须含 _vo_kind: 同一进程内切换光照模式后, "偏移式"与"完整式"
+        # 的 VS 字节完全不同, 漏掉它会让第二次构建整批命中旧模式的缓存(且不报错)。
+        ck = (key, _hook_h, _upg, full, _vo_kind)
         c = _vs_cache.get(ck)
         if c is None:
             ref = bank_blob(key)

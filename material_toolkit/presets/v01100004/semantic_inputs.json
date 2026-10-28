@@ -234,7 +234,7 @@
       "stages": [
         "vs"
       ],
-      "desc": "当前 VS 变体类别(仅顶点阶段): 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect; >=3 才有骨骼矩阵",
+      "desc": "当前 VS 变体类别(仅顶点阶段): 0=pre 1=world 2=worldinst 3=inst 4=indirect 5=skin 6=skin_indirect; 只有 >=5(skin/skin_indirect) 才绑定 SkinningMatrices",
       "depends": [],
       "values": [
         "variantKind"
@@ -253,7 +253,7 @@
       "stages": [
         "vs"
       ],
-      "desc": "本次 draw 的骨骼块起点(仅顶点阶段; 取自模板已备好的 InstanceWorldInfo.jointOffset, 不额外引入资源依赖)",
+      "desc": "本次 draw 的骨骼块起点(仅顶点阶段; 取自模板已备好的 InstanceWorldInfo.jointOffset, 不额外引入资源依赖)。注意: 只有 variantKind>=5 时用它索引 SkinningMatrices 才安全",
       "depends": [],
       "values": [
         "jointOffset"
