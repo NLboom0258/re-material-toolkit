@@ -11,7 +11,7 @@
   每个文件 = 左「材质列表」 + 右「贴图槽」(type 双击改名/路径常驻输入框/增·删) / 「材质参数」(名字双击改名·类型·值可编辑) / 「材质属性」(着色类型+flags)。
 - 材质系统页: **语义级“材质资产”编辑**(与 MMTR/MDF2 的结构/字节级编辑分开; 见 analysis §9)。
   左=选项(光照模式/着色类型/材质模板/基础 mmtr/材质名) + 操作(载入默认材质/新建/打开·保存 .mmat.json/编译校验/生成 mmtr/导出材质实例);
-  右=「材质源(HLSL)」(带 HLSL 高亮 + 编译报错红线) / 「组装结果」 / 「输入」(pass 输入·系统预制输入·自定义输入(可编辑)) / 「语义输出·校验」。
+  右=「材质源(HLSL)」(带 HLSL 高亮 + 编译报错红线) / 「组装结果」 / 「输入」(pass 输入·系统预制输入·自定义输入(可编辑)) / 「预览」(写盘 + 通知游戏热重载) / 「语义输出·校验」。
 交互: 常用按钮 + 对选中项**右键菜单**; 名称列**双击内联改名**(预选原名); 支持**拖拽文件**导入。
 MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/float4 额外带**颜色块**(点击取色)。
 
@@ -20,6 +20,7 @@ MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/fl
 截图: python app.py --shot <out.png> [--pane bind|param] <file>   (渲染截图, 调试用)
 """
 import os
+import json
 import re
 import sys
 from collections import Counter, namedtuple
@@ -65,6 +66,7 @@ from material_toolkit.lib import material_asset as masset  # noqa: E402
 from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
+from material_toolkit.lib import preview as prev  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -76,12 +78,13 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QColorDialog,
     QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGridLayout, QGroupBox, QHBoxLayout,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMenu, QMessageBox,
     QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTabBar, QTabWidget, QTextEdit, QTreeWidget,
+    QStyleOptionViewItem, QTabBar, QTabWidget, QTableWidget, QTableWidgetItem,
+    QTextEdit, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -2991,6 +2994,7 @@ class MaterialSystemPanel(QWidget):
         self._asm_btns[2].clicked.connect(self._refresh_vs_preview)
         self.tabs.addTab(self._asm_page, "组装")
         self.tabs.addTab(self._wrap_inputs(), "输入")
+        self.tabs.addTab(self._wrap_preview(), "预览")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
         self.tabs.addTab(self.tree_info, "语义输出 / 校验")
@@ -3245,6 +3249,260 @@ class MaterialSystemPanel(QWidget):
         page, self._in_btns, self._in_stack = _seg_switch(
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
+
+    # ---- 预览（REF 运行时热重载） ------------------------------------------
+    # 同路径 create_resource 恒返回缓存 ⇒ 每次预览都生成**全新文件名**的 mmtr + mdf2，
+    # 由游戏内脚本轮询 natives/x64/materialTemp/index.txt 自动应用（~0.5s）。
+    # 详见 analysis/runtime_preview_plan.md。
+    def _pv_cfg_path(self):
+        return os.path.join(os.path.expanduser("~"), ".re-material-toolkit", "preview.json")
+
+    def _pv_load_cfg(self):
+        try:
+            with open(self._pv_cfg_path(), encoding="utf-8") as f:
+                return json.load(f) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def _pv_save_cfg(self):
+        try:
+            p = self._pv_cfg_path()
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"game_root": self.ed_pv_root.text().strip(),
+                           "base_mdf2": self.ed_pv_mdf2.text().strip(),
+                           "keep": self.sp_pv_keep.value()}, f,
+                          ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _pv_check_root(self, *_):
+        r = self.ed_pv_root.text().strip().strip('"')
+        ok = bool(r) and os.path.isdir(os.path.join(r, "natives", "x64"))
+        self.lbl_pv_root.setText("OK" if ok else "找不到 natives/x64")
+        self.lbl_pv_root.setStyleSheet("color:%s" % ("#2e7d32" if ok else "#b00020"))
+        return ok
+
+    def _pv_rel_mdf2(self):
+        """输入框里的路径 -> 相对 natives/x64、不带 .10 的 posix 路径。"""
+        raw = self.ed_pv_mdf2.text().strip().strip('"')
+        if not raw:
+            return ""
+        p = raw.replace("\\", "/")
+        root = self.ed_pv_root.text().strip().strip('"')
+        if root:
+            nat = os.path.join(root, "natives", "x64").replace("\\", "/").rstrip("/")
+            if p.lower().startswith(nat.lower() + "/"):
+                p = p[len(nat) + 1:]
+        return prev.norm_rel(p)
+
+    def _pv_abs_mdf2(self):
+        rel = self._pv_rel_mdf2()
+        root = self.ed_pv_root.text().strip().strip('"')
+        if not rel or not root:
+            return ""
+        return os.path.join(root, "natives", "x64", rel.replace("/", os.sep) + prev.MDF2_EXT)
+
+    def _pv_browse_root(self):
+        d = QFileDialog.getExistingDirectory(self, "选择游戏根目录 (含 natives)")
+        if d:
+            self.ed_pv_root.setText(os.path.normpath(d))
+            self._pv_check_root()
+
+    def _pv_browse_mdf2(self):
+        root = self.ed_pv_root.text().strip().strip('"')
+        start = os.path.join(root, "natives", "x64") if root else ""
+        p, _ = QFileDialog.getOpenFileName(self, "选择参照 mdf2", start,
+                                           "mdf2 (*.mdf2.*);;所有文件 (*)")
+        if p:
+            self.ed_pv_mdf2.setText(os.path.normpath(p))
+            self._pv_load_slots()
+
+    def _pv_fill_combo(self, combo, cur=None):
+        """下拉: 不修改 / 当前材质 / 已选过的资产文件。"""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(不修改)", None)
+        combo.addItem("当前材质 (%s)" % (self.asset.name or "?"), "__current__")
+        for p in self._pv_assets:
+            combo.addItem(os.path.basename(p), p)
+        i = combo.findData(cur)
+        combo.setCurrentIndex(i if i >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _pv_pick_asset(self, row):
+        p, _ = QFileDialog.getOpenFileName(self, "选择材质资产", "", "材质资产 (*.mmat.json)")
+        if not p:
+            return
+        p = os.path.normpath(p)
+        if p not in self._pv_assets:
+            self._pv_assets[p] = True
+        self._pv_fill_combo(self.tbl_pv.cellWidget(row, 2), p)
+
+    def _pv_load_slots(self):
+        path = self._pv_abs_mdf2()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "读取失败", "找不到 mdf2：\n%s" % (path or "(路径为空)"))
+            return
+        try:
+            mf = Mdf2.load(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "读取失败", str(e))
+            return
+        auto = set(prev.pick_materials(mf))     # 占比最多的那组 -> 当前材质
+        self.tbl_pv.setRowCount(0)
+        for m in mf.materials:
+            r = self.tbl_pv.rowCount()
+            self.tbl_pv.insertRow(r)
+            self.tbl_pv.setItem(r, 0, QTableWidgetItem(m.name))
+            self.tbl_pv.setItem(r, 1, QTableWidgetItem(getattr(m, "mmtr_path", "") or ""))
+            combo = QComboBox()
+            self._pv_fill_combo(combo, "__current__" if m.name in auto else None)
+            self.tbl_pv.setCellWidget(r, 2, combo)
+            b = QPushButton("…")
+            b.setFixedWidth(28)
+            b.clicked.connect(lambda _c=False, _r=r: self._pv_pick_asset(_r))
+            self.tbl_pv.setCellWidget(r, 3, b)
+        self.tbl_pv.setColumnWidth(0, 130)
+        self.tbl_pv.setColumnWidth(2, 230)
+        self.tbl_pv.setColumnWidth(3, 32)
+        self._pv_say("读入 %s：%d 个材质槽（预选 %d 个）" % (
+            os.path.basename(path), len(mf.materials), len(auto)))
+
+    def _pv_say(self, text):
+        self.ed_pv_log.appendPlainText(text)
+
+    def _pv_open_dir(self):
+        root = self.ed_pv_root.text().strip().strip('"')
+        d = os.path.join(root, "natives", "x64", prev.TEMP_DIR) if root else ""
+        if d and os.path.isdir(d):
+            try:
+                os.startfile(d)      # noqa: S606 —— Windows 桌面工具, 打开资源管理器
+            except OSError as e:
+                self._pv_say("打开目录失败: %s" % e)
+        else:
+            self._pv_say("还没有生成过预览: %s" % (d or "(请先填游戏根目录)"))
+
+    def _pv_refresh(self):
+        root = self.ed_pv_root.text().strip().strip('"')
+        rel = self._pv_rel_mdf2()
+        if not (root and rel):
+            QMessageBox.warning(self, "无法预览", "请先填游戏根目录与目标 mdf2。")
+            return
+        if self.tbl_pv.rowCount() == 0:
+            self._pv_load_slots()
+            if self.tbl_pv.rowCount() == 0:
+                return
+        self._sync_asset()          # 把界面上的编辑落进 asset（预览的是当前状态）
+        cache = {}
+        slots = {}
+        for r in range(self.tbl_pv.rowCount()):
+            name = self.tbl_pv.item(r, 0).text()
+            d = self.tbl_pv.cellWidget(r, 2).currentData()
+            if d is None:
+                slots[name] = None
+            elif d == "__current__":
+                slots[name] = self.asset
+            else:
+                if d not in cache:
+                    try:
+                        cache[d] = masset.MaterialAsset.load(d)
+                    except Exception as e:  # noqa: BLE001
+                        QMessageBox.warning(self, "载入资产失败", "%s\n\n%s" % (d, e))
+                        return
+                slots[name] = cache[d]
+        lines = []
+        try:
+            res = prev.deploy_slots(slots, root, rel,
+                                    keep=self.sp_pv_keep.value(), log=lines.append)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "预览失败", str(e))
+            return
+        self._pv_save_cfg()
+        self._pv_say("---")
+        for ln in lines:
+            self._pv_say(ln)
+        self._pv_say("已写盘。游戏内脚本需勾选 'enable preview'（面板日志应出现 auto:<ver>）")
+        return res
+
+    def _wrap_preview(self):
+        """预览页: 游戏根 + 目标 mdf2 + 逐槽指定材质资产 -> 写盘并通知游戏加载。"""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("游戏根目录:"))
+        self.ed_pv_root = QLineEdit()
+        self.ed_pv_root.setPlaceholderText("含 natives 与 DMC5.exe 的那层")
+        row.addWidget(self.ed_pv_root, 1)
+        _b = QPushButton("浏览…")
+        _b.clicked.connect(self._pv_browse_root)
+        row.addWidget(_b)
+        self.lbl_pv_root = QLabel("未校验")
+        row.addWidget(self.lbl_pv_root)
+        self.ed_pv_root.textChanged.connect(self._pv_check_root)
+        v.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("目标 mdf2:"))
+        self.ed_pv_mdf2 = QLineEdit()
+        self.ed_pv_mdf2.setPlaceholderText("相对 natives/x64（粘贴绝对路径会自动转换）")
+        row2.addWidget(self.ed_pv_mdf2, 1)
+        _b = QPushButton("浏览…")
+        _b.clicked.connect(self._pv_browse_mdf2)
+        row2.addWidget(_b)
+        _b = QPushButton("读取材质槽")
+        _b.clicked.connect(self._pv_load_slots)
+        row2.addWidget(_b)
+        v.addLayout(row2)
+
+        hint = QLabel("每个槽可选「不修改」/「当前材质」/ 其它 .mmat.json；"
+                      "选「当前材质」的多个槽共用同一个 mmtr。")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        self.tbl_pv = QTableWidget(0, 4)
+        self.tbl_pv.setHorizontalHeaderLabels(["材质槽", "当前 mmtr", "预览用材质", ""])
+        self.tbl_pv.verticalHeader().setVisible(False)
+        self.tbl_pv.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        v.addWidget(self.tbl_pv, 3)
+
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("保留最近"))
+        self.sp_pv_keep = QSpinBox()
+        self.sp_pv_keep.setRange(1, 999)
+        self.sp_pv_keep.setValue(10)
+        bar.addWidget(self.sp_pv_keep)
+        bar.addWidget(QLabel("组预览文件"))
+        _b = QPushButton("刷新预览")
+        _b.clicked.connect(self._pv_refresh)
+        bar.addWidget(_b)
+        _b = QPushButton("打开预览目录")
+        _b.clicked.connect(self._pv_open_dir)
+        bar.addWidget(_b)
+        bar.addStretch(1)
+        v.addLayout(bar)
+
+        self.ed_pv_log = QPlainTextEdit()
+        self.ed_pv_log.setReadOnly(True)
+        self.ed_pv_log.setMaximumBlockCount(400)
+        v.addWidget(self.ed_pv_log, 2)
+
+        self._pv_assets = {}
+        cfg = self._pv_load_cfg()
+        if cfg.get("game_root"):
+            self.ed_pv_root.setText(cfg["game_root"])
+        if cfg.get("base_mdf2"):
+            self.ed_pv_mdf2.setText(cfg["base_mdf2"])
+        try:
+            self.sp_pv_keep.setValue(int(cfg.get("keep") or 10))
+        except (TypeError, ValueError):
+            pass
+        self._pv_check_root()
+        self._pv_say("游戏内脚本: <游戏根>/reframework/autorun/mmtr_preview.lua"
+                     "，面板里勾选 'enable preview'")
+        return w
 
     def _sync_force_full(self):
         """同步「强制完整输入」指示框: 由**顶点预设依赖**自动推导(只读)。

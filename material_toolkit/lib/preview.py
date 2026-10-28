@@ -103,16 +103,39 @@ def _prune(tmp, keep):
     return removed
 
 
+def _uniq_name(base, used):
+    """同名材质的预览文件加序号（两个不同资产可能同名，不能撞）。"""
+    nm, n = base, 2
+    while nm in used:
+        nm = "%s_%d" % (base, n)
+        n += 1
+    used.add(nm)
+    return nm
+
+
 def deploy(asset, game_root, base_mdf2, materials=None, keep=20, sync=False,
            log=print):
-    """生成一对新的 mmtr + mdf2 写进游戏根 natives，并更新索引。
+    """单资产便捷入口：把若干个槽都重指向**同一个**材质资产。
 
-    asset     : MaterialAsset（材质资产）
-    game_root : 游戏根目录（含 natives 的那层）
-    base_mdf2 : 参照的 mdf2，相对 natives/x64（如 character/.../pl0800.mdf2）
-    materials : 要重指向的材质槽名；None = 自动取占比最多的那组
-    keep      : 保留最近多少组预览文件（0 = 不清理）
-    sync      : 是否按新 mmtr 重新同步 mdf2 的参数定义（默认关，保留 base 的参数值）
+    materials=None 时自动取 mmtr_path 占比最多的那组（详见 `pick_materials`）。
+    """
+    root = os.path.abspath(game_root)
+    nat = os.path.join(root, "natives", "x64")
+    base_path = os.path.join(nat, norm_rel(base_mdf2) + MDF2_EXT)
+    if not os.path.exists(base_path):
+        raise RuntimeError("base mdf2 不存在：%s" % base_path)
+    mats = pick_materials(MDF.Mdf2.load(base_path), materials)
+    if not mats:
+        raise RuntimeError("base mdf2 里没有可重指向的材质")
+    return deploy_slots({m: asset for m in mats}, game_root, base_mdf2,
+                        keep=keep, sync=sync, log=log)
+
+
+def deploy_slots(slots, game_root, base_mdf2, keep=20, sync=False, log=print):
+    """按「材质槽 → 材质资产」逐槽生成 mmtr，克隆并重指向 mdf2，写索引。
+
+    slots : {mdf2 里的材质槽名: MaterialAsset 或 None}；None = 不改该槽。
+            多个槽指向**同一个资产对象**时共用一个 mmtr（按对象身份去重）。
     """
     root = os.path.abspath(game_root)
     nat = os.path.join(root, "natives", "x64")
@@ -131,30 +154,48 @@ def deploy(asset, game_root, base_mdf2, materials=None, keep=20, sync=False,
     os.makedirs(tmp, exist_ok=True)
 
     ts = _stamp()
-    name = (getattr(asset, "name", "") or "material").replace(" ", "_")
-    mmtr_rel = "%s/%s_p%s.mmtr" % (TEMP_DIR, name, ts)
-    mdf2_rel = "%s/%s_p%s.mdf2" % (TEMP_DIR, base_stem, ts)
-
-    # 1) mmtr
-    tmpl = asset.template.get("pass_template") or "deferred_std"
-    data, rep = nogen.build(
-        asset.shading_source or "", _pass_of_template(tmpl), tmpl,
-        inputs=asset.inputs, extra=asset.shading_extra,
-        vo_kind=_vo_kind(asset.lighting_mode))
-    failed = rep.get("vs_gen_failed") or 0
-    if failed:
-        log("  [warn] VS 生成失败 %d 个（已回退银行）" % failed)
-    mmtr_file = os.path.join(tmp, "%s_p%s.mmtr%s" % (name, ts, MMTR_EXT))
-    with open(mmtr_file, "wb") as f:
-        f.write(data)
-
-    # 2) mdf2：克隆参照，把目标材质重指向新 mmtr
     mf = MDF.Mdf2.load(base_path)
-    mats = pick_materials(mf, materials)
-    if not mats:
-        raise RuntimeError("base mdf2 里没有可重指向的材质")
-    for mn in mats:
-        minst.repoint(mf, mn, mmtr_rel, data if sync else None, sync=sync)
+    have = {m.name for m in mf.materials}
+    bad = [k for k, v in slots.items() if v is not None and k not in have]
+    if bad:
+        raise RuntimeError("mdf2 里没有这些材质槽：%s" % ", ".join(bad))
+
+    # 1) mmtr：按资产对象去重（同一资产给多个槽 → 只生成一份）
+    built = {}          # id(asset) -> (rel, bytes)
+    used = set()
+    mmtr_map = {}       # 槽名 -> mmtr rel
+    total_bytes = 0
+    for mn, a in slots.items():
+        if a is None:
+            continue
+        k = id(a)
+        if k not in built:
+            nm = _uniq_name((getattr(a, "name", "") or "material").replace(" ", "_"), used)
+            tmpl = a.template.get("pass_template") or "deferred_std"
+            data, rep = nogen.build(
+                a.shading_source or "", _pass_of_template(tmpl), tmpl,
+                inputs=a.inputs, extra=a.shading_extra,
+                vo_kind=_vo_kind(a.lighting_mode))
+            failed = rep.get("vs_gen_failed") or 0
+            if failed:
+                log("  [warn] %s: VS 生成失败 %d 个（已回退银行）" % (nm, failed))
+            mrel = "%s/%s_p%s.mmtr" % (TEMP_DIR, nm, ts)
+            with open(os.path.join(tmp, "%s_p%s.mmtr%s" % (nm, ts, MMTR_EXT)), "wb") as f:
+                f.write(data)
+            built[k] = (mrel, data)
+            total_bytes += len(data)
+        mmtr_map[mn] = built[k][0]
+
+    if not mmtr_map:
+        raise RuntimeError("没有任何槽被指定预览材质（全部是“不修改”）")
+
+    # 2) mdf2：克隆参照，把目标槽重指向新 mmtr
+    for mn, a in slots.items():
+        if a is None:
+            continue
+        mrel, data = built[id(a)]
+        minst.repoint(mf, mn, mrel, data if sync else None, sync=sync)
+    mdf2_rel = "%s/%s_p%s.mdf2" % (TEMP_DIR, base_stem, ts)
     mdf2_file = os.path.join(tmp, "%s_p%s.mdf2%s" % (base_stem, ts, MDF2_EXT))
     nbytes = mf.save(mdf2_file)
 
@@ -167,7 +208,9 @@ def deploy(asset, game_root, base_mdf2, materials=None, keep=20, sync=False,
     #      - 已经套上预览：材质变成 materialTemp/pl0800_pXXX.mdf2
     #    否则第二次应用就会 hits=0（实测踩过）。多个前缀用 '|' 分隔。
     match = "%s|%s/%s" % (((d + "/") if d else "") + base_stem, TEMP_DIR, base_stem)
-    body = "ver=%s\nmdf=%s\nmatch=%s\nmmtr=%s\n" % (ts, mdf2_rel, match, mmtr_rel)
+    mmtrs = sorted(set(mmtr_map.values()))
+    body = "ver=%s\nmdf=%s\nmatch=%s\nmmtr=%s\n" % (
+        ts, mdf2_rel, match, ",".join(mmtrs))
     idx_files = [os.path.join(tmp, IDX_NAME)]
     data_dir = os.path.join(root, "reframework", "data", TEMP_DIR)
     try:
@@ -186,13 +229,17 @@ def deploy(asset, game_root, base_mdf2, materials=None, keep=20, sync=False,
     # 4) 清理旧预览
     removed = _prune(tmp, keep)
 
+    mats = [k for k, v in slots.items() if v is not None]
     log("OK  preview  ver=%s" % ts)
-    log("    mmtr : %s  (%d B)" % (mmtr_rel, len(data)))
+    for r in mmtrs:
+        log("    mmtr : %s" % r)
     log("    mdf2 : %s  (%d B)" % (mdf2_rel, nbytes))
-    log("    材质 : %s" % ", ".join(mats))
+    for mn in mats:
+        log("    槽   : %-10s -> %s" % (mn, mmtr_map[mn]))
     for p in idx_files:
         log("    索引 : %s" % p)
     if removed:
         log("    清理 : 删除 %d 个旧预览文件（保留最近 %d 组）" % (removed, keep))
-    return {"ver": ts, "mmtr": mmtr_rel, "mdf2": mdf2_rel,
-            "materials": mats, "index": idx_file}
+    return {"ver": ts, "mmtr": mmtr_map, "mmtrs": mmtrs, "mdf2": mdf2_rel,
+            "materials": mats, "index": idx_file, "mmtr_bytes": total_bytes}
+
