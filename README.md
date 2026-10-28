@@ -16,7 +16,9 @@
 - **凭空生成 mmtr**(主路线):自写"材质源"(HLSL) → 编译并生成可用 mmtr;三 pass(主 / 深度 / 顶点)各自独立。
 - **材质系统**:默认光照(PBR)/ 自定义输出(直控 GBuffer);预设(语义)输入;结构化输入注册;
   全局材质参数;引擎资源;自定义函数库(含噪声)。
-- **顶点效果**:世界空间偏移(WPO)钩子,可读材质参数/贴图。
+- **顶点输出可编程**:`void MaterialVertex(in VertexInput vi, out VertexOutput vo)`。
+  默认光照模式只给位置偏移(WPO);自定义光照模式可直接给出**最终几何量**
+  (`PositionWS / NormalWS / TangentWS / BitangentSign / UV0 / UV1`),即法线、切线、UV 都能改。
 - **深度族**:近距渐隐 / 防穿模(`discard`)。
 - **GUI(Material Studio)**:多标签编辑 + 编辑器内查找(Ctrl+F)+ 实时编译校验;CLI 供脚本/批处理。
 
