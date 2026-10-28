@@ -85,6 +85,8 @@ if ($trackedFn.Count -gt 0) {
     Copy-Tree $fnSrc $fnDst
 }
 Copy-Tree (Join-Path $tkSrc "pass_templates") (Join-Path $tkDst "pass_templates") @("_archive")
+# ref_scripts/: REF 侧 Lua 脚本(预览热重载), 供 GUI 的「安装/更新游戏内脚本」一键部署
+Copy-Tree (Join-Path $tkSrc "ref_scripts") (Join-Path $tkDst "ref_scripts")
 
 # ---- binaries into package bin/ ----
 $bin = Join-Path $tkDst "bin"

@@ -3383,6 +3383,22 @@ class MaterialSystemPanel(QWidget):
         else:
             self._pv_say("还没有生成过预览: %s" % (d or "(请先填游戏根目录)"))
 
+    def _pv_install_script(self):
+        root = self.ed_pv_root.text().strip().strip('"')
+        if not root:
+            QMessageBox.warning(self, "无法安装", "请先填游戏根目录。")
+            return
+        lines = []
+        try:
+            _dst, changed = prev.install_script(root, log=lines.append)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "安装失败", str(e))
+            return
+        for ln in lines:
+            self._pv_say(ln)
+        if changed:
+            self._pv_say("脚本已更新。游戏正在运行时：REF 菜单 → Reset Scripts（或重启游戏）。")
+
     def _pv_refresh(self):
         root = self.ed_pv_root.text().strip().strip('"')
         rel = self._pv_rel_mdf2()
@@ -3480,6 +3496,10 @@ class MaterialSystemPanel(QWidget):
         bar.addWidget(_b)
         _b = QPushButton("打开预览目录")
         _b.clicked.connect(self._pv_open_dir)
+        bar.addWidget(_b)
+        _b = QPushButton("安装/更新游戏内脚本")
+        _b.setToolTip("把随包发布的 mmtr_preview.lua 装到 <游戏根>/reframework/autorun/")
+        _b.clicked.connect(self._pv_install_script)
         bar.addWidget(_b)
         bar.addStretch(1)
         v.addLayout(bar)

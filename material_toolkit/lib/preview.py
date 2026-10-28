@@ -36,6 +36,7 @@ TEMP_DIR = "materialTemp"       # natives/x64 下的专用目录
 IDX_NAME = "index.txt"
 MMTR_EXT = ".1808168797"
 MDF2_EXT = ".10"
+SCRIPT_NAME = "mmtr_preview.lua"   # REF 侧脚本（随包发布，见 ref_scripts/）
 _TS_RE = re.compile(r"_p(\d{8}_\d{6})")
 
 
@@ -101,6 +102,40 @@ def _prune(tmp, keep):
         except OSError:
             pass
     return removed
+
+
+def install_script(game_root, log=print):
+    """把随包发布的 REF 脚本装到 <游戏根>/reframework/autorun/。
+
+    返回 (目标路径, 是否有变化)。旧版会先备成 `.bak`，便于回退。
+    """
+    root = os.path.abspath(game_root)
+    auto = os.path.join(root, "reframework", "autorun")
+    if not os.path.isdir(auto):
+        raise RuntimeError(
+            "找不到 %s\n该目录不存在 ⇒ 游戏没装 REFramework（或根目录选错了）" % auto)
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "ref_scripts", SCRIPT_NAME)
+    if not os.path.exists(src):
+        raise RuntimeError("发布包里缺少脚本：%s" % src)
+    with open(src, "rb") as f:
+        new = f.read()
+    dst = os.path.join(auto, SCRIPT_NAME)
+    old = None
+    if os.path.exists(dst):
+        with open(dst, "rb") as f:
+            old = f.read()
+    if old == new:
+        log("脚本已是最新：%s" % dst)
+        return dst, False
+    if old is not None:
+        with open(dst + ".bak", "wb") as f:
+            f.write(old)
+    with open(dst, "wb") as f:
+        f.write(new)
+    log("已安装脚本：%s（%d B）%s" % (dst, len(new),
+                                    "，旧版已备为 .bak" if old is not None else ""))
+    return dst, True
 
 
 def _uniq_name(base, used):
