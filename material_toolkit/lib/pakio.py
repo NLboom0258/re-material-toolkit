@@ -182,39 +182,78 @@ def archives(game_root):
     return archs
 
 
-def to_pak_path(rel: str) -> str:
-    """把游戏里的资源路径规范化成 pak 里用的形式。
+# 各类资源在 pak 里的版本后缀（实测：mdf2 用 ``.10``，mmtr 用 ``.1808168797``）。
+# 猜错就查不到 —— 所以按类型给候选，逐个试（见 ``to_pak_paths``）。
+_VERSION_SUFFIX = {
+    ".mdf2": (".10",),
+    ".mmtr": (".1808168797", ".10"),
+    ".tex": (".10",),
+    ".mesh": (".10",),
+}
+# 已经带版本后缀：不再补
+_HAS_VERSION = (".10", ".1808168797")
 
-    ``Character/Player/.../pl0800.mdf2`` → ``natives/x64/Character/.../pl0800.mdf2.10``
-    """
+
+def _strip_natives(rel: str) -> str:
     s = (rel or "").replace("\\", "/").strip()
     low = s.lower()
     for pre in ("natives/x64/", "natives/stm/", "natives/"):
         if low.startswith(pre):
             s = s[len(pre):]
-            low = s.lower()
             break
-    s = s.lstrip("/")
-    if not low.endswith(".mdf2") and not low.endswith(".mdf2.10"):
-        s += ".mdf2"
-    if not s.lower().endswith(".10"):
-        s += ".10"
-    return "natives/x64/" + s
+    return s.lstrip("/")
+
+
+def to_pak_paths(rel: str):
+    """资源路径 → pak 路径**候选列表**（按可能性排序）。
+
+    只猜一种后缀不够：``.mdf2`` 是 ``X.mdf2.10``，``.mmtr`` 却是
+    ``X.mmtr.1808168797``（实测 DMC5）。猜错就静默查不到，所以给候选逐个试。
+    """
+    s = _strip_natives(rel)
+    if not s:
+        return []
+    low = s.lower()
+    out = []
+    if low.endswith(_HAS_VERSION):
+        out.append(s)
+    else:
+        vers = None
+        for ext, cand in _VERSION_SUFFIX.items():
+            if low.endswith(ext):
+                vers = cand
+                break
+        if vers:
+            out.extend(s + v for v in vers)
+        else:
+            # 没带已知扩展名：按 mdf2 处理（向后兼容旧调用）
+            out.extend([s + ".mdf2.10", s + ".10"])
+    return ["natives/x64/" + x for x in out]
+
+
+def to_pak_path(rel: str) -> str:
+    """主候选路径（仅用于显示 / 兼容旧调用）。查文件请用 ``find_entry``。"""
+    cands = to_pak_paths(rel)
+    return cands[0] if cands else ""
 
 
 def find_entry(game_root, rel):
     """按资源路径查 entry。返回 ``(archive, entry)`` 或 ``None``。
 
-    同一个 hash 可能同时出现在主 pak 和 patch 里 —— 取**优先级最高**（序号最大）的。
+    多个候选后缀逐个试；同一个 hash 可能同时出现在主 pak 和 patch 里 ——
+    取**优先级最高**（序号最大）的。
     """
-    p = to_pak_path(rel)
-    h = pak_path_hash(p)
-    found = None
-    for arch in archives(game_root):
-        e = arch.entries.get(h)
-        if e is not None:
-            found = (arch, e)                 # 后面的覆盖前面的
-    return found
+    archs = archives(game_root)
+    for p in to_pak_paths(rel):
+        h = pak_path_hash(p)
+        found = None
+        for arch in archs:
+            e = arch.entries.get(h)
+            if e is not None:
+                found = (arch, e)                 # 后面的覆盖前面的
+        if found is not None:
+            return found
+    return None
 
 
 def read_resource(game_root, rel) -> bytes | None:

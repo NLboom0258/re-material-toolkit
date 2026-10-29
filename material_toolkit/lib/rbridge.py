@@ -120,6 +120,17 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
     return p
 
 
+def paths(port=DEFAULT_PORT):
+    """游戏目录与资源版本后缀（工具侧写产物用，不需要用户手填路径）。
+
+    返回 {ok, gameRoot, natives, temp, tempRel, mmtrRelDir, mdf2Ver, mmtrVer, ...}
+    """
+    d = _get("/paths", None, port=port, timeout=15.0)
+    if d.get("err") or d.get("ok") is False:
+        raise BridgeError(d.get("err") or "取不到游戏目录")
+    return d
+
+
 def holds(port=DEFAULT_PORT):
     """当前每帧保持项的快照（不需 go）。
 

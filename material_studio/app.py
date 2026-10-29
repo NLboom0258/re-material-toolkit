@@ -19,6 +19,7 @@ MDF2 参数: 类型列为常驻下拉; 值列按分量拆分输入框, float3/fl
 自检: python app.py --selftest <file.mmtr.*>                 (offscreen 构建并打印)
 截图: python app.py --shot <out.png> [--pane bind|param] <file>   (渲染截图, 调试用)
 """
+import hashlib
 import os
 import json
 import re
@@ -69,6 +70,7 @@ from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import preview as prev  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
+from material_toolkit.lib import mmatlib as mlab  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -2938,6 +2940,7 @@ class MaterialSystemPanel(QWidget):
 
     # ---- UI ----
     def _build_ui(self):
+        self._asset_path = ""
         root = QHBoxLayout(self)
         left = QVBoxLayout()
 
@@ -2980,6 +2983,30 @@ class MaterialSystemPanel(QWidget):
             b.clicked.connect(cb)
             btns2.addWidget(b)
         left.addLayout(btns2)
+
+        # 编译到预览目录：产物进缓存并登记，供「实时调参」换母材质时选用。
+        # 目录由游戏内 REF 桥（/paths）给出，用户不用填游戏路径。
+        # 未连接时禁用 —— 没连接就不知道往哪写，也不能保证游戏能加载到。
+        btns3 = QHBoxLayout()
+        self.btn_compile_prev = QPushButton("编译到预览目录")
+        self.btn_compile_prev.setToolTip(
+            "把当前材质资产编译成 mmtr，写进游戏缓存目录（materialTemp/mmtr）并登记。\n"
+            "文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。\n\n"
+            "需要先连上游戏内的 REF 桥（实时调参页的端口 :8899）。")
+        self.btn_compile_prev.setEnabled(False)
+        self.btn_compile_prev.clicked.connect(self.compile_to_preview)
+        btns3.addWidget(self.btn_compile_prev)
+        self.lbl_prev_state = QLabel("未连接 REF 服务")
+        self.lbl_prev_state.setStyleSheet("color:#b00020")
+        btns3.addWidget(self.lbl_prev_state, 1)
+        left.addLayout(btns3)
+        self._prev_ok = None
+        self._prev_timer = QTimer(self)
+        self._prev_timer.setInterval(3000)
+        self._prev_timer.timeout.connect(self._refresh_prev_state)
+        # 不在启动时同步探活：桥不在线时 alive() 会阻塞到超时，界面会卡一下。
+        # 交给首次定时触发（3s），期间按钮保持禁用（初始就是未连接）。
+        self._prev_timer.start()
 
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setWordWrap(True)
@@ -5090,6 +5117,7 @@ class MaterialSystemPanel(QWidget):
             QMessageBox.critical(self, "打开失败", str(e))
             return
         self._last_mmtr_bytes = None
+        self._asset_path = path
         self._sync_inputs()
         self._apply_asset()
         self.lbl_status.setText("已打开 %s" % os.path.basename(path))
@@ -5107,6 +5135,7 @@ class MaterialSystemPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(e))
             return
+        self._asset_path = path
         self.lbl_status.setText("已保存 %s" % os.path.basename(path))
 
     def compile_check(self):
@@ -5329,6 +5358,77 @@ class MaterialSystemPanel(QWidget):
                                 % (os.path.basename(path), n, mpath))
         QMessageBox.information(self, "导出成功",
                                 "-> %s (%d B)\nmaster=%s" % (path, n, mpath))
+
+
+    # ---- 编译到预览目录 -------------------------------------------------
+    # 产物进游戏缓存目录（目录由服务 /paths 给出，用户不用填游戏路径），并登记到
+    # mmatlib 的「母材质库」；「实时调参」页换母材质时**只能用登记过的**。
+    # 文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。
+    def _refresh_prev_state(self):
+        """定时探活：连上桥才允许「编译到预览目录」。"""
+        try:
+            ok = bool(rb.alive(timeout=1.5))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok == self._prev_ok:
+            return
+        self._prev_ok = ok
+        self.btn_compile_prev.setEnabled(ok)
+        self.lbl_prev_state.setText("已连接 · 可编译" if ok else "未连接 REF 服务")
+        self.lbl_prev_state.setStyleSheet("color:#1a7f37" if ok else "color:#b00020")
+
+    def compile_to_preview(self):
+        """编译当前资产 → 写进服务给出的缓存目录 → 登记 → 清理旧产物。"""
+        if not rb.alive(timeout=2.0):
+            QMessageBox.warning(self, "未连接",
+                                "需要先连上游戏内的 REF 桥（:8899）。\n\n"
+                                "请确认游戏在运行、C# 插件已加载。")
+            return
+        try:
+            info = rb.paths()
+        except rb.BridgeError as e:
+            QMessageBox.warning(self, "取不到目录", "服务没给出游戏目录：\n%s" % e)
+            return
+        game_root = info.get("gameRoot")
+        if not game_root:
+            QMessageBox.warning(self, "取不到目录",
+                                "服务返回的 gameRoot 为空（插件版本过旧？）")
+            return
+
+        self._sync_asset()
+        self._sync_inputs()
+        data, _rep = self._generate()
+        if data is None:
+            return
+        digest = hashlib.sha1(
+            json.dumps(self.asset.to_dict(), sort_keys=True,
+                       ensure_ascii=False).encode("utf-8")).hexdigest()
+        logs = []
+        try:
+            item = mlab.register(
+                game_root, self.asset.name, data,
+                asset_path=getattr(self, "_asset_path", "") or "",
+                shading={"lighting_mode": self.asset.lighting_mode,
+                         "shading_type": self.asset.shading_type},
+                source_hash=digest, log=logs.append)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "写产物失败", str(e))
+            return
+        try:
+            mlab.prune(game_root, dry_run=False, log=logs.append)
+        except Exception as e:  # noqa: BLE001
+            logs.append("清理旧产物失败（不影响本次结果）：%s" % e)
+
+        prof = item.get("userMaterial") or []
+        self.lbl_status.setStyleSheet("color:#1a7f37")
+        self.lbl_status.setText("已编译 %s（%dB，UserMaterial=%d）"
+                                % (os.path.basename(item["rel"]), item["bytes"], len(prof)))
+        QMessageBox.information(
+            self, "编译成功",
+            "产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n\n"
+            "接下来在「实时调参」页把某个材质槽的母材质换成它。\n\n%s"
+            % (item["rel"], item["bytes"], len(prof),
+               len(item.get("textureSlots") or []), "\n".join(logs)))
 
 
 class EngineResDialog(QDialog):
