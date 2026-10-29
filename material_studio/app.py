@@ -3607,6 +3607,7 @@ class MaterialSystemPanel(QWidget):
             return
         go = self.ed_rb_filter.text().strip()
         root = self._rb_root()
+        self._rb_sync_src_box()
         try:
             d = rb.identity(go=go, limit=120, names=False)
         except rb.BridgeError as e:
@@ -3623,18 +3624,24 @@ class MaterialSystemPanel(QWidget):
             cur = ps.norm_rel(m.get("mdf2Path") or "")
             hit = self._rb_lookup_by_path(idx_doc, cur) if cur else None
             m["prev"] = hit["dh"] if (hit and hit["kind"] == "edit") else None
-            # 标出「源 mdf2 不在磁盘」（还在 pak 里没解包）——预览需要一份真实的
-            # 文件做副本，这种对象勾选会直接报错，先标出来免得白点。
+            # 磁盘上没有时，还能从 pak 按需提取（只部分模型被解包）
             missing = False
+            pak_only = False
             if root and cur and not m["prev"]:
                 try:
-                    missing = not os.path.exists(ps.mdf2_abs(root, cur))
+                    if not os.path.exists(ps.mdf2_abs(root, cur)):
+                        if ps.pak_has(root, cur):
+                            pak_only = True
+                        else:
+                            missing = True
                 except Exception:
-                    missing = False
+                    pass
             m["noSrc"] = missing
+            m["pakOnly"] = pak_only
+            tag = "   [不可用]" if missing else ("   [pak]" if pak_only else "")
             it = QListWidgetItem("%s   [%s]   %d 槽%s" % (
                 m.get("go") or "?", _rb_addr_short(m.get("addr")),
-                m.get("matCount") or 0, "   ⚠源文件未解包" if missing else ""))
+                m.get("matCount") or 0, tag))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if m["prev"] else Qt.Unchecked)
             it.setData(Qt.UserRole, m.get("addr"))
@@ -3654,8 +3661,9 @@ class MaterialSystemPanel(QWidget):
             self.lst_rb.setCurrentRow(row)      # 触发 _rb_pick_mesh
         else:
             self._rb_clear_params()
-        self._rb_say("列表: %d 个 mesh（预览中 %d 个，源文件未解包 %d 个）" % (
+        self._rb_say("列表: %d 个 mesh（预览中 %d 个，从 pak 提取 %d 个，不可用 %d 个）" % (
             len(ms), sum(1 for m in ms if m.get("prev")),
+            sum(1 for m in ms if m.get("pakOnly")),
             sum(1 for m in ms if m.get("noSrc"))))
 
     def _rb_cur_ent(self):
@@ -4073,6 +4081,38 @@ class MaterialSystemPanel(QWidget):
     def _rb_root(self):
         return (self.ed_pv_root.text() or "").strip()
 
+    # ---- 额外源目录（解包目录）------------------------------------------
+    def _rb_sync_src_box(self):
+        """把 sources.json 里的解包目录填到输入框（用户正在编辑时不覆盖）。"""
+        box = getattr(self, "ed_rb_src", None)
+        if box is None or box.text().strip():
+            return
+        root = self._rb_root()
+        if not root:
+            return
+        roots = ps.load_sources(root)
+        if roots:
+            box.setText(roots[0].replace("\\", "/"))
+
+    def _rb_browse_src(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "选择解包目录（应指向 natives/x64）",
+            self.ed_rb_src.text().strip() or self._rb_root() or "")
+        if d:
+            self.ed_rb_src.setText(d.replace("\\", "/"))
+
+    def _rb_apply_src(self):
+        root = self._rb_root()
+        if not root:
+            self._rb_say("先配置游戏根目录（预览页）")
+            return
+        p = self.ed_rb_src.text().strip().replace("\\", "/")
+        if p and not os.path.isdir(p):
+            QMessageBox.warning(self, "目录不存在", "这个目录不存在：\n%s" % p)
+            return
+        ps.save_sources(root, [p] if p else [], log=self._rb_say)
+        self._rb_refresh()
+
     def _rb_find_identity(self, ent):
         """重新查一次对象的身份（按 addr 匹配）。
 
@@ -4361,6 +4401,23 @@ class MaterialSystemPanel(QWidget):
         b.clicked.connect(self._rb_save_to_mdf2)
         iso.addWidget(b)
         v.addLayout(iso)
+
+        # 额外源目录：只有部分模型被解包到游戏根，其余还在 pak 里。
+        # 这里可以指向自己解包出的另一个 natives/x64。
+        srcrow = QHBoxLayout()
+        srcrow.addWidget(QLabel("解包目录(可选):"))
+        self.ed_rb_src = QLineEdit()
+        self.ed_rb_src.setPlaceholderText(
+            "另一个 natives/x64（REE / REtool 的解包目录）；游戏根找不到 mdf2 时从这里取")
+        srcrow.addWidget(self.ed_rb_src, 1)
+        b = QPushButton("浏览…")
+        b.clicked.connect(self._rb_browse_src)
+        srcrow.addWidget(b)
+        b = QPushButton("应用")
+        b.setToolTip("保存后在列表里重新判断哪些对象的源 mdf2 可用")
+        b.clicked.connect(self._rb_apply_src)
+        srcrow.addWidget(b)
+        v.addLayout(srcrow)
 
         f = QHBoxLayout()
         f.addWidget(QLabel("GameObject 过滤:"))

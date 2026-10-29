@@ -36,6 +36,10 @@ from . import mdf2 as mdf2lib
 
 TEMP_DIR = "materialTemp"
 SESSIONS = "sessions.json"
+# 额外的 mdf2 源目录（解包目录）。游戏根下找不到时从这里取：
+# 只有部分模型被解包到游戏根的 natives/x64，其余还在 pak 里；
+# 用户自己的解包目录（如 REtool / REE 导出的 natives/x64）可以补上。
+SOURCES = "sources.json"
 MDF2_EXT = ".10"
 _TS_RE = re.compile(r"_p(\d{8}_\d{6})")
 
@@ -183,18 +187,81 @@ def _copy(src, dst):
     return len(data)
 
 
-def mdf2_abs(game_root, mdf_rel):
-    """``Character/.../pl0800.mdf2`` → 绝对路径（自动补 ``.10``）。"""
-    nat = os.path.join(os.path.abspath(game_root), "natives", "x64")
-    rel = norm_rel(mdf_rel)
-    p = os.path.join(nat, rel.replace("/", os.sep))
-    if os.path.exists(p):
-        return p
-    if not p.lower().endswith(MDF2_EXT):
-        p2 = p + MDF2_EXT
-        if os.path.exists(p2):
-            return p2
+# ---------------------------------------------------------------- 额外源目录
+
+_sources_cache = {}
+_sources_ts = {}
+
+
+def load_sources(game_root, ttl=3.0):
+    """读取 ``materialTemp/sources.json`` 里登记的额外源目录列表。
+
+    存在理由：只有部分模型被解包到**游戏根**的 ``natives/x64``，其余还在
+    ``re_chunk_000.pak`` 里。用户自己的解包目录（REE / REtool 导出的
+    ``natives/x64``）可以登记在这里，``mdf2_abs`` 找不到时会去那里取。
+
+    带 3 秒缓存：GUI 刷列表时每个 mesh 都会问一次，不能每次都读盘。
+    """
+    key = os.path.abspath(game_root)
+    now = time.time()
+    if key in _sources_cache and now - _sources_ts.get(key, 0.0) < ttl:
+        return _sources_cache[key]
+    p = os.path.join(temp_root(game_root), SOURCES)
+    roots = []
+    try:
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            roots = [str(r) for r in (d.get("extraRoots") or []) if r and os.path.isdir(str(r))]
+    except Exception:
+        roots = []
+    _sources_cache[key] = roots
+    _sources_ts[key] = now
+    return roots
+
+
+def save_sources(game_root, roots, log=None):
+    """写入额外源目录列表。传空列表 = 清空（只靠游戏根）。"""
+    root = temp_root(game_root)
+    os.makedirs(root, exist_ok=True)
+    p = os.path.join(root, SOURCES)
+    clean = []
+    for r in (roots or []):
+        r = str(r).strip()
+        if r and r not in clean:
+            clean.append(r)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"extraRoots": clean}, f, ensure_ascii=False, indent=2)
+    key = os.path.abspath(game_root)
+    _sources_cache.pop(key, None)
+    _sources_ts.pop(key, None)
+    if log:
+        log("源目录已更新：%d 个%s" % (len(clean), ("（" + clean[0] + "）") if clean else ""))
     return p
+
+
+def mdf2_abs(game_root, mdf_rel, extra_roots=None):
+    """``Character/.../pl0800.mdf2`` → 绝对路径（自动补 ``.10``）。
+
+    查找顺序：游戏根 ``natives/x64`` → ``sources.json`` 里登记的额外源目录
+    （解包目录）。后者用于「该资源还在 pak 里没解包」的模型。
+    """
+    rel = norm_rel(mdf_rel)
+    rel_os = rel.replace("/", os.sep)
+    roots = [os.path.join(os.path.abspath(game_root), "natives", "x64")]
+    if extra_roots is None:
+        extra_roots = load_sources(game_root)
+    roots += [os.path.abspath(r) for r in (extra_roots or []) if r]
+
+    first = None
+    for base in roots:
+        p = os.path.join(base, rel_os)
+        if first is None:
+            first = p
+        for cand in (p, p + MDF2_EXT):
+            if os.path.exists(cand):
+                return cand
+    return first
 
 
 def new_edit_rel(mh, dh, ts=None):
@@ -234,22 +301,59 @@ def parse_temp_rel(rel):
 
 
 def _missing_mdf2_msg(path, rel):
-    """base mdf2 不在磁盘上的报错文案。
+    """两处都找不到 mdf2 时的报错文案。
 
-    实测（2026-10-30）：只有部分模型被解包到 ``natives/x64``（如 pl0800 body/hair），
-    其余（pl0800_01 head、pl0200 等）还在 ``re_chunk_000.pak`` 里。
-    直接报“文件不存在”会让人以为是工具 bug，这里把原因和做法写清楚。
+    查找顺序：游戏根 ``natives/x64`` → 登记的额外源目录 → **从 pak 按需提取**。
+    三者都没有才报错（通常是游戏版本不一致 / pak 里本来就没这个资源）。
     """
     return (
-        "找不到 mdf2 源文件：\n%s\n\n"
+        "找不到 mdf2：\n%s\n\n"
         "资源路径：%s\n\n"
-        "原因：该资源还在游戏的 pak（re_chunk_000.pak）里，没有解包到 natives/x64。\n"
-        "本工具的预览需要一份真实的 mdf2 文件做副本，所以必须先解包。\n\n"
-        "做法：用 Fluffy Manager / REtool 把该文件提取到\n"
-        "     natives/x64/<上面的资源路径>.10\n"
-        "然后重新勾选即可（不用重启游戏）。"
+        "已经试过：游戏根 natives/x64、登记的额外源目录、从 re_chunk_*.pak 提取。\n"
+        "如果游戏刚更新过，可能是 pak 里该资源的路径变了。"
         % (path, norm_rel(rel))
     )
+
+
+def pak_has(game_root, mdf_rel):
+    """该资源能不能从 pak 里取到（不实际解压）。"""
+    try:
+        from . import pakio
+        return pakio.find_entry(game_root, mdf_rel) is not None
+    except Exception:
+        return False
+
+
+def ensure_mdf2(game_root, mdf_rel, log=None):
+    """拿一份**可用的** mdf2 文件（磁盘优先，其次从 pak 提取到缓存）。
+
+    只有部分模型被解包到游戏根，其余还在 ``re_chunk_000.pak`` 里。
+    pak 只存路径 hash，而游戏给的 ``mdf2Path`` 正好能算出它，所以不需要 listfile。
+    提取结果缓存在 ``materialTemp/src/<mdf2Hash>.mdf2.10``，同一资源只解压一次。
+    """
+    p = mdf2_abs(game_root, mdf_rel)
+    if os.path.exists(p):
+        return p
+
+    from . import pakio
+    data = pakio.read_resource(game_root, mdf_rel)
+    if data is None:
+        raise RuntimeError(_missing_mdf2_msg(p, mdf_rel))
+
+    cache_dir = os.path.join(temp_root(game_root), "src")
+    os.makedirs(cache_dir, exist_ok=True)
+    dst = os.path.join(cache_dir, mdf2_hash(mdf_rel) + ".mdf2" + MDF2_EXT)
+    try:
+        fresh = (not os.path.exists(dst)) or os.path.getsize(dst) != len(data)
+    except OSError:
+        fresh = True
+    if fresh:
+        with open(dst, "wb") as f:
+            f.write(data)
+    if log:
+        log("从 pak 提取 mdf2 → materialTemp/src/%s (%d B)"
+            % (os.path.basename(dst), len(data)))
+    return dst
 
 
 def create_edit(game_root, mh, dh, base_mdf2, log=None):
@@ -259,9 +363,7 @@ def create_edit(game_root, mh, dh, base_mdf2, log=None):
     磁盘上实际写的是 ``....mdf2.10`` —— 与 ``/material apply`` 的约定一致：
     相对路径不带扩展名，引擎自己补。
     """
-    src = mdf2_abs(game_root, base_mdf2)
-    if not os.path.exists(src):
-        raise RuntimeError(_missing_mdf2_msg(src, base_mdf2))
+    src = ensure_mdf2(game_root, base_mdf2, log=log)
     rel = new_edit_rel(mh, dh)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
@@ -272,9 +374,7 @@ def create_edit(game_root, mh, dh, base_mdf2, log=None):
 
 def create_orig(game_root, dh, base_mdf2, log=None):
     """新建一份 orig 副本（重置用，路径必须全新）。"""
-    src = mdf2_abs(game_root, base_mdf2)
-    if not os.path.exists(src):
-        raise RuntimeError(_missing_mdf2_msg(src, base_mdf2))
+    src = ensure_mdf2(game_root, base_mdf2, log=log)
     rel = new_orig_rel(dh)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
