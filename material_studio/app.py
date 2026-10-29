@@ -3623,8 +3623,18 @@ class MaterialSystemPanel(QWidget):
             cur = ps.norm_rel(m.get("mdf2Path") or "")
             hit = self._rb_lookup_by_path(idx_doc, cur) if cur else None
             m["prev"] = hit["dh"] if (hit and hit["kind"] == "edit") else None
-            it = QListWidgetItem("%s   [%s]   %d 槽" % (
-                m.get("go") or "?", _rb_addr_short(m.get("addr")), m.get("matCount") or 0))
+            # 标出「源 mdf2 不在磁盘」（还在 pak 里没解包）——预览需要一份真实的
+            # 文件做副本，这种对象勾选会直接报错，先标出来免得白点。
+            missing = False
+            if root and cur and not m["prev"]:
+                try:
+                    missing = not os.path.exists(ps.mdf2_abs(root, cur))
+                except Exception:
+                    missing = False
+            m["noSrc"] = missing
+            it = QListWidgetItem("%s   [%s]   %d 槽%s" % (
+                m.get("go") or "?", _rb_addr_short(m.get("addr")),
+                m.get("matCount") or 0, "   ⚠源文件未解包" if missing else ""))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if m["prev"] else Qt.Unchecked)
             it.setData(Qt.UserRole, m.get("addr"))
@@ -3644,8 +3654,9 @@ class MaterialSystemPanel(QWidget):
             self.lst_rb.setCurrentRow(row)      # 触发 _rb_pick_mesh
         else:
             self._rb_clear_params()
-        self._rb_say("列表: %d 个 mesh（预览中 %d 个）" % (
-            len(ms), sum(1 for m in ms if m.get("prev"))))
+        self._rb_say("列表: %d 个 mesh（预览中 %d 个，源文件未解包 %d 个）" % (
+            len(ms), sum(1 for m in ms if m.get("prev")),
+            sum(1 for m in ms if m.get("noSrc"))))
 
     def _rb_cur_ent(self):
         """当前列表行对应的 mesh 条目（含 addr / prev）。"""

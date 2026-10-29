@@ -233,6 +233,25 @@ def parse_temp_rel(rel):
     return None
 
 
+def _missing_mdf2_msg(path, rel):
+    """base mdf2 不在磁盘上的报错文案。
+
+    实测（2026-10-30）：只有部分模型被解包到 ``natives/x64``（如 pl0800 body/hair），
+    其余（pl0800_01 head、pl0200 等）还在 ``re_chunk_000.pak`` 里。
+    直接报“文件不存在”会让人以为是工具 bug，这里把原因和做法写清楚。
+    """
+    return (
+        "找不到 mdf2 源文件：\n%s\n\n"
+        "资源路径：%s\n\n"
+        "原因：该资源还在游戏的 pak（re_chunk_000.pak）里，没有解包到 natives/x64。\n"
+        "本工具的预览需要一份真实的 mdf2 文件做副本，所以必须先解包。\n\n"
+        "做法：用 Fluffy Manager / REtool 把该文件提取到\n"
+        "     natives/x64/<上面的资源路径>.10\n"
+        "然后重新勾选即可（不用重启游戏）。"
+        % (path, norm_rel(rel))
+    )
+
+
 def create_edit(game_root, mh, dh, base_mdf2, log=None):
     """新建一份 edit 副本（内容 = base_mdf2 的字节）。
 
@@ -242,7 +261,7 @@ def create_edit(game_root, mh, dh, base_mdf2, log=None):
     """
     src = mdf2_abs(game_root, base_mdf2)
     if not os.path.exists(src):
-        raise RuntimeError("base mdf2 不存在：%s" % src)
+        raise RuntimeError(_missing_mdf2_msg(src, base_mdf2))
     rel = new_edit_rel(mh, dh)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
@@ -255,7 +274,7 @@ def create_orig(game_root, dh, base_mdf2, log=None):
     """新建一份 orig 副本（重置用，路径必须全新）。"""
     src = mdf2_abs(game_root, base_mdf2)
     if not os.path.exists(src):
-        raise RuntimeError("base mdf2 不存在：%s" % src)
+        raise RuntimeError(_missing_mdf2_msg(src, base_mdf2))
     rel = new_orig_rel(dh)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
