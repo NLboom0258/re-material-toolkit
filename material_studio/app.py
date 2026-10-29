@@ -128,6 +128,16 @@ def _rb_addr_short(a, n=8):
     s = (a or "").strip()
     return s[-n:] if len(s) > n else s
 
+def _rb_addr_key(a):
+    """地址归一化：去 0x 前缀 + 小写。
+
+    各端点的格式不一致：``/identity`` 给 ``0x1FB6F532250``，``/holds`` 给
+    ``1FB6F532250``。跨端点比对（比如用 holds 的地址去查 _rb_edits）必须先归一，
+    否则会静默对不上。
+    """
+    s = str(a or "").strip().lower()
+    return s[2:] if s.startswith("0x") else s
+
 
 def _rb_parse_vec(value, n):
     """把 "0, 1.78, -0.06" 解析成 n 个 float；解析不了的置 0。"""
@@ -3836,6 +3846,13 @@ class MaterialSystemPanel(QWidget):
             after = [x.get("after") for x in res]
             via = next((x.get("via") for x in res if x.get("via")), "?")
             self._rb_say("set %s = %s  ->  %s  (%s)" % (name, sval, after, via))
+            # 记下改动，供「保存到 mdf2」写盘（按对象地址分组）
+            try:
+                vec = [float(t) for t in str(sval).split(",")]
+            except ValueError:
+                continue
+            (self._rb_edits.setdefault(_rb_addr_key(ent.get("addr")), {})
+                            .setdefault(self._rb_matname, {}))[name] = vec
 
     def _rb_obj_gone(self, ent, why):
         """对象已被游戏重载：清掉该行的勾选与状态，并提示重选。"""
@@ -3845,11 +3862,128 @@ class MaterialSystemPanel(QWidget):
             self._rb_mesh_i = None
         self._rb_set_item_check(addr, False)
         self._rb_sync_enabled()
+        self._rb_edits.pop(_rb_addr_key(addr), None)
         self._rb_say("⚠ 对象已失效（%s）：%s" % (_rb_addr_short(addr), why))
         QMessageBox.warning(
             self, "对象已失效",
             "该对象已被游戏重载，预览状态已清除。\n\n地址：%s\n原因：%s\n\n"
             "请点「刷新列表」后重新选择对象。" % (addr, why))
+
+    # ---- 参数写盘 -------------------------------------------------------
+    # 流程：内存里的改动（_rb_edits） → 原地覆盖进工作副本 → 换全新路径让引擎重载
+    #       → 所有共用该副本的对象一起切过去 → 更新 sessions.json → 删旧文件
+    # 为什么必须换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重新加载（§13.4）。
+    def _rb_save_to_mdf2(self):
+        """把本会话改过的参数写进工作副本（新路径），并让游戏重载。"""
+        ent = self._rb_cur_ent()
+        if ent is None:
+            self._rb_say("保存：没有选中对象")
+            return
+        if not ent.get("prev"):
+            self._rb_say("保存：当前对象未启用预览（勾选后才能保存到 mdf2）")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("保存：未配置游戏根目录")
+            return
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent.get("prev")
+        doc = ps.load_index(root)
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        edit_rel = ps.norm_rel(e.get("edit") or "")
+        if not edit_rel or not ps.exists_edit(root, edit_rel):
+            self._rb_say("保存：登记的工作副本不存在（%s）" % (edit_rel or "未登记"))
+            return
+
+        # 谁在用这份副本：holds 里 wantPath 相同的对象（可能多个，共用同一模型的多个实例）
+        # key = 归一化地址（holds 不带 0x、identity 带），value = (原始地址, go)
+        addr_go = {}
+        try:
+            hd = rb.holds().get("holdDetail") or []
+        except rb.BridgeError as ex:
+            self._rb_say("保存：读 holds 失败（%s），只处理当前对象" % ex)
+            hd = []
+        for h in hd:
+            raw = h.get("addr")
+            k = _rb_addr_key(raw)
+            if not k:
+                continue
+            if ps.norm_rel(h.get("wantPath") or "").lower() == edit_rel.lower():
+                addr_go[k] = (raw, h.get("go") or ent.get("go"))
+        if not addr_go:
+            addr_go[_rb_addr_key(ent.get("addr"))] = (ent.get("addr"), ent.get("go"))
+
+        # 合并改动（同名参数后写覆盖先写）
+        merged = {}
+        for k in addr_go:
+            for mat, props in (self._rb_edits.get(k) or {}).items():
+                merged.setdefault(mat, {}).update(props)
+        if not merged:
+            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
+            QMessageBox.information(
+                self, "没有可保存的改动",
+                "本会话还没有改过这个对象的参数。\n\n"
+                "「保存到 mdf2」只写你在工具里改过的参数；未改的保持文件原值。")
+            return
+
+        # 写盘（生成新路径）
+        try:
+            r = ps.save_params(root, edit_rel, merged, log=self._rb_say)
+        except Exception as ex:
+            self._rb_say("保存失败: %s" % ex)
+            QMessageBox.warning(self, "保存失败", str(ex))
+            return
+        new_rel = r["rel"]
+
+        # 所有共用该副本的对象切到新文件（keep 保持）
+        moved, failed = [], []
+        for k, (raw, g) in addr_go.items():
+            try:
+                d = rb.material(g, "apply", mdf=new_rel, addr=raw, keep=True)
+            except rb.BridgeError as ex:
+                failed.append("%s: %s" % (_rb_addr_short(k), ex))
+                continue
+            ms = d.get("meshes") or []
+            if d.get("err") or not ms or not ms[0].get("ok"):
+                why = d.get("err") or (ms[0].get("err") if ms else "无命中")
+                failed.append("%s: %s" % (_rb_addr_short(k), why))
+            else:
+                moved.append(k)
+
+        if moved:
+            ps.upsert_mdf2(doc, mh, dh,
+                           e.get("originalMdf2") or e.get("baseMdf2") or "",
+                           e.get("baseMdf2") or "",
+                           edit_rel=new_rel)
+            # 同一条链上可能有多条登记（湿身/正常各登过一次），全部改到新路径，
+            # 否则会留下指向刚被删掉的旧文件的死引用。
+            fixed = ps.update_edit_paths(doc, edit_rel, new_rel)
+            # 同一模型下其它指向已删文件的登记也一并修好（湿身/正常各登一次的历史遗留）
+            fixed += ps.heal_missing_edits(root, doc, mh, new_rel)
+            if len(fixed) > 1:
+                self._rb_say("同步了 %d 条登记到新副本" % len(fixed))
+            ps.save_index(root, doc, log=self._rb_say)
+            # 旧文件此时已无 mesh 引用（都切到 new_rel 了）
+            try:
+                os.remove(ps.rel_to_abs(root, edit_rel))
+                self._rb_say("已删除旧副本: %s" % edit_rel)
+            except OSError as ex:
+                self._rb_say("旧副本删除失败（可忽略）: %s" % ex)
+            for a in moved:
+                self._rb_edits.pop(a, None)
+            self._rb_iso_mdf = new_rel
+
+        self._rb_update_mdf_label()
+        if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
+            # 重新读参数（引擎从新文件加载，值就是刚写进去的）
+            self._rb_pick_mat(self.cmb_rb_mat.currentIndex())
+
+        msg = ("已写入 %d 个参数到：\n%s\n\n切到新副本的对象：%d 个"
+               % (len(r.get("touched") or []), new_rel, len(moved)))
+        if failed:
+            msg += "\n\n未切换成功：\n" + "\n".join(failed)
+        self._rb_say(msg.replace("\n", "  "))
+        QMessageBox.information(self, "保存到 mdf2", msg)
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
@@ -4116,10 +4250,17 @@ class MaterialSystemPanel(QWidget):
         d = rb.material(ent.get("go"), "apply", mdf=orig, addr=ent.get("addr"), keep=False)
         if d.get("err"):
             raise rb.BridgeError(d["err"])
+        ms = d.get("meshes") or []
+        if not ms or not ms[0].get("ok"):
+            # addr 没命中 = 对象被重载了；这里不静默通过，否则会出现
+            # “看着取消了勾选、参数却没重置”。
+            raise rb.BridgeError("重置失败：apply 没有命中对象（addr=%s）" % ent.get("addr"))
         ps.upsert_mdf2(idx_doc, mh_hit, dh_hit, orig_target, orig_target,
                        orig_rel=orig, active=False)
         ps.save_index(root, idx_doc, log=self._rb_say)
         self._rb_iso_mdf = None
+        # 取消 = 放弃本会话的改动，写盘记录一并丢弃（否则下次保存会把旧值写回去）
+        self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_say("已重置：挂到 orig 副本 %s（参数回到原始值，keep 已关）" % orig)
 
     def _rb_poll_hold(self):
@@ -4135,15 +4276,14 @@ class MaterialSystemPanel(QWidget):
         for it in (k.get("holdDetail") or []):
             if "ticks" in it or not it.get("dead"):
                 continue
-            a = (it.get("addr") or "").lower()
+            a = _rb_addr_key(it.get("addr"))
             if a:
                 dead[a] = it.get("deadReason") or "gone"
         if not dead:
             return
         for m in ms:
-            a = (m.get("addr") or "").lower()
-            if a in dead and m.get("prev"):
-                self._rb_obj_gone(m, dead[a])
+            if (_rb_addr_key(m.get("addr")) in dead) and m.get("prev"):
+                self._rb_obj_gone(m, dead[_rb_addr_key(m.get("addr"))])
                 return          # 一次只提示一个，避免连环弹窗
 
     def _wrap_rbridge(self):
@@ -4174,6 +4314,14 @@ class MaterialSystemPanel(QWidget):
         self.lbl_rb_mdf.setStyleSheet("color:#666")
         self.lbl_rb_mdf.setTextInteractionFlags(Qt.TextSelectableByMouse)
         iso.addWidget(self.lbl_rb_mdf, 1)
+        b = QPushButton("保存到 mdf2")
+        b.setToolTip(
+            "把本会话改过的参数值写进工作副本，并生成一份**新路径**的副本让游戏重载。\n"
+            "为什么换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重新加载。\n\n"
+            "只写「改过的参数」（同名参数后写覆盖先写），未改的保持文件原值。\n"
+            "所有共用该副本的对象会一起切到新文件。")
+        b.clicked.connect(self._rb_save_to_mdf2)
+        iso.addWidget(b)
         v.addLayout(iso)
 
         f = QHBoxLayout()
@@ -4241,6 +4389,9 @@ class MaterialSystemPanel(QWidget):
         self._rb_iso_mdf = None
         self._rb_matname = None
         self._rb_pending = {}
+        # 本会话改过的参数：{对象地址: {材质名: {参数名: [float...]}}}
+        # 保存到 mdf2 时只写这些（不动文件里其他参数）。
+        self._rb_edits = {}
         self._rb_timer = QTimer(self)
         self._rb_timer.setSingleShot(True)
         self._rb_timer.setInterval(250)

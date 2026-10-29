@@ -85,6 +85,45 @@ def layout_prop_offsets(properties) -> int:
     return off
 
 
+class ParamWriteError(ValueError):
+    """参数值写回失败（参数名/值个数与 mdf2 不匹配）。"""
+
+
+def patch_param_floats(data: bytearray, mat, changes: dict, strict=True):
+    """把 {参数名: [float...]} **原地**写进 data 里 mat 的值区。
+
+    只覆盖 float 字节，不动参数头 / 字符串池 / 其他材质 —— 因为引擎只在加载时
+    读 mdf2 的结构，值区改了多少字节都不影响布局。
+
+    值的个数必须与 mdf2 里 ``param_count`` 一致：mdf2 不存类型，个数变了等于
+    改类型，会打乱后面所有参数的 data_offset（需要完整 ``save()`` 重排）。
+
+    返回 [(参数名, 绝对偏移, 旧值, 新值)]。
+    """
+    out = []
+    for name, vals in (changes or {}).items():
+        pr = mat.get_parameter(name)
+        if pr is None:
+            if strict:
+                raise ParamWriteError(
+                    "材质 %r 没有参数 %r（现有: %s）"
+                    % (mat.name, name, ", ".join(p.name for p in mat.properties)))
+            continue
+        vals = [float(v) for v in vals]
+        if len(vals) != pr.param_count:
+            raise ParamWriteError(
+                "参数 %r 在 mdf2 里是 %d 个 float（%s），传入 %d 个。"
+                "改类型必须走完整 save() 重排，不能原地覆盖"
+                % (name, pr.param_count, pr.type, len(vals)))
+        base = mat.prop_data_offset + pr.data_offset
+        old = list(pr.values)
+        for i, v in enumerate(vals):
+            struct.pack_into("<f", data, base + i * 4, v)
+        pr.values = vals
+        out.append((name, base, old, vals))
+    return out
+
+
 # 材质着色类型(MaterialShadingType; 权威 = 逆向 DMC5 exe 的 via.render.MaterialShadingType)。
 # ⚠ DMC5 实际只有 11 项(下表); 社区工具(MDF-Manager/RE-Mesh-Editor)列的是"跨游戏并集":
 #   在 PrimitiveMesh(6) 之后多插了 PrimitiveSolidMesh/SpeedTree/GUI/GUIMeshTransparent/

@@ -32,6 +32,8 @@ import posixpath
 import re
 import time
 
+from . import mdf2 as mdf2lib
+
 TEMP_DIR = "materialTemp"
 SESSIONS = "sessions.json"
 MDF2_EXT = ".10"
@@ -271,6 +273,104 @@ def rel_to_abs(game_root, rel):
     return p
 
 
+# ---------------------------------------------------------------- 参数写盘
+
+def read_params(game_root, rel_edit, material=None):
+    """读 mdf2 副本里的参数值 → ``{材质名: {参数名: [float...]}}``。
+
+    注意这是**文件里**的值，不是引擎内存里的当前值（后者要用
+    ``/probe?what=params``）。给 material 时只返回该材质。
+    """
+    src = rel_to_abs(game_root, rel_edit)
+    if not os.path.exists(src):
+        raise RuntimeError("mdf2 副本不存在：%s" % src)
+    doc = mdf2lib.Mdf2.load(src)
+    out = {}
+    for mat in doc.materials:
+        if material and mat.name != material:
+            continue
+        out[mat.name] = {pr.name: list(pr.values) for pr in mat.properties}
+    return out
+
+
+def save_params(game_root, rel_edit, changes, log=None):
+    """把 changes **原地**写进一份**新路径**副本，返回 ``{rel, bytes, touched}``。
+
+    ``changes`` = ``{材质名: {参数名: [float...]}}``（值个数必须与 mdf2 一致）。
+
+    为什么必须换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重载
+    （见 analysis/runtime_preview_plan.md §13.4）。新路径 = 同一个
+    ``edit/<mh>/<dh>_p<新时间戳>.mdf2``，dh 不变，只换时间戳。
+
+    为什么原地覆盖而不是 ``Mdf2.save()``：引擎只在加载时读结构，值区改多少字节
+    都不影响布局；``save()`` 会重排整个文件（偏移 + hash），风险大且无必要。
+    写完会重新 load 逐值比对，不一致就删掉新文件不留半成品。
+    """
+    src = rel_to_abs(game_root, rel_edit)
+    if not os.path.exists(src):
+        raise RuntimeError("mdf2 副本不存在：%s" % src)
+    if not changes:
+        raise RuntimeError("changes 为空")
+
+    with open(src, "rb") as f:
+        data = bytearray(f.read())
+    doc = mdf2lib.Mdf2.load(src)
+    touched = []
+    for mat_name, props in changes.items():
+        mat = doc.get_material(mat_name)
+        if mat is None:
+            raise mdf2lib.ParamWriteError(
+                "mdf2 里没有材质 %r（现有: %s）"
+                % (mat_name, ", ".join(m.name for m in doc.materials)))
+        touched += mdf2lib.patch_param_floats(data, mat, props)
+
+    parsed = parse_temp_rel(rel_edit)
+    if not parsed or parsed.get("kind") != "edit":
+        raise RuntimeError("不是可识别的 edit 副本路径：%s" % rel_edit)
+
+    # 新路径：同 dh、新时间戳。同秒多次保存时逐秒后挪，避免撞名
+    new_rel = new_edit_rel(parsed["mh"], parsed["dh"])
+    guard = 0
+    while (new_rel.lower() == rel_edit.lower()
+           or os.path.exists(rel_to_abs(game_root, new_rel))):
+        guard += 1
+        if guard > 8:
+            raise RuntimeError("无法生成新路径（时间戳冲突）：%s" % new_rel)
+        new_rel = new_edit_rel(
+            parsed["mh"], parsed["dh"],
+            ts=time.strftime("%Y%m%d_%H%M%S", time.localtime(time.time() + guard)))
+
+    dst = rel_to_abs(game_root, new_rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "wb") as f:
+        f.write(bytes(data))
+
+    # 校验：重新 load 逐值比对
+    try:
+        chk = mdf2lib.Mdf2.load(dst)
+        for mat_name, props in changes.items():
+            mat = chk.get_material(mat_name)
+            for pname, vals in props.items():
+                pr = mat.get_parameter(pname)
+                got = [round(x, 6) for x in pr.values]
+                want = [round(float(v), 6) for v in vals]
+                if got != want:
+                    raise RuntimeError(
+                        "写盘校验失败 %s.%s: 期望 %s，读回 %s"
+                        % (mat_name, pname, want, got))
+    except Exception:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        raise
+
+    if log:
+        log("写盘 %s  (%d B, %d 个参数)" % (new_rel, len(data), len(touched)))
+    return {"rel": new_rel, "bytes": len(data), "touched": touched}
+
+
+
 # ---------------------------------------------------------------- 清理
 
 def _referenced(idx):
@@ -354,6 +454,44 @@ def prune(game_root, idx, keep_edit=2, keep_orig=1, dry_run=True, log=None):
     if log:
         log("%s %d 个旧副本" % ("可清理" if dry_run else "已删除", len(candidates)))
     return candidates
+
+
+def update_edit_paths(idx, old_rel, new_rel):
+    """把**所有**借旧副本路径的登记项改成新路径，返回改了哪几条 ``[(mh, dh)]``。
+
+    为什么不是只改当前 dh：同一份文件可能被两条登记链到（历史遗留：同一个 mdf2
+    在正常 / 湿身两种状态下各被登记过一次），只改一条会留下指向已删文件的死引用。
+    """
+    old = norm_rel(old_rel).lower()
+    out = []
+    for mh, o in (idx.get("objects") or {}).items():
+        for dh, e in (o.get("mdfs") or {}).items():
+            if norm_rel(e.get("edit") or "").lower() == old:
+                e["edit"] = new_rel
+                e["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                out.append((mh, dh))
+    return out
+
+
+def heal_missing_edits(game_root, idx, mh, good_rel):
+    """把某个模型下指向**已不存在文件**的 edit 登记改到 good_rel，返回 s[(mh, dh)]。
+
+    起因（实测）：同一个 mdf2 在正常 / 湿身两种状态下各被登记过一次，早期保存
+    只更新了当前 dh，另一条就变成指向已删文件的死引用 —— 下次点勾选时才报
+    「登记的副本已丢失，重新生成」并白白重建一次。
+    """
+    o = (idx.get("objects") or {}).get(mh) or {}
+    out = []
+    for dh, e in (o.get("mdfs") or {}).items():
+        rel = norm_rel(e.get("edit") or "")
+        if not rel or rel.lower() == norm_rel(good_rel).lower():
+            continue
+        if os.path.exists(rel_to_abs(game_root, rel)):
+            continue
+        e["edit"] = good_rel
+        e["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        out.append((mh, dh))
+    return out
 
 
 def exists_edit(game_root, rel):
