@@ -3626,6 +3626,9 @@ class MaterialSystemPanel(QWidget):
             self._rb_pick_mat(0)
         self._rb_say("mesh [%s] %s: %d 个材质" % (idx, go, len(self._rb_mats)))
         self._rb_update_mdf_label()
+        # 未勾选预览时参数表禁用（只读展示，不向游戏写入）
+        chk = getattr(self, "chk_rb_iso", None)
+        self.tbl_rb.setEnabled(bool(chk and chk.isChecked()))
 
     def _rb_pick_mat(self, idx):
         mats = getattr(self, "_rb_mats", None) or []
@@ -3692,10 +3695,14 @@ class MaterialSystemPanel(QWidget):
         self._rb_timer.start()
 
     def _rb_flush(self):
-        if not self._rb_pending or not getattr(self, "_rb_go", None) \
-                or not getattr(self, "_rb_matname", None):
+        if not self._rb_pending:
             return
         pending, self._rb_pending = self._rb_pending, {}
+        # 未勾选「启用预览」时**不向游戏发任何请求**：避免直接改还在用原 mdf2 的对象。
+        chk = getattr(self, "chk_rb_iso", None)
+        if chk is None or not chk.isChecked():
+            self._rb_say("未启用预览，已忽略 %d 项修改（勾选「启用预览」后才会写入游戏）" % len(pending))
+            return
         for name, val in pending.items():
             sval = val if isinstance(val, str) else ("%.6f" % float(val))
             try:
@@ -3834,14 +3841,15 @@ class MaterialSystemPanel(QWidget):
         self.tbl_rb.setHorizontalHeaderLabels(["参数", "类型", "值"])
         self.tbl_rb.verticalHeader().setVisible(False)
         self.tbl_rb.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tbl_rb.setEnabled(False)      # 勾选「启用预览」后才可编辑
         rv.addWidget(self.tbl_rb, 1)
         split.addWidget(right)
         split.setSizes([230, 520])
         v.addWidget(split, 3)
 
-        hint = QLabel("改值后约 0.25 秒自动写入（下一帧生效）。内存修改是临时的 — 重启游戏恢复 mdf2 原值。"
-                      "float / float3 / float4 都可改：float 走 REF setter；float3/4 直写内存，"
-                      "并用同材质另一个 float 参数触发刷新（日志里 via=mem+flush）。")
+        hint = QLabel("必须先勾选「启用预览」才能改参数：勾选时会把当前 mesh 的 mdf2 换成一份副本，"
+                      "只改副本；取消勾选换回原 mdf2，参数自动重置（不用重启游戏）。"
+                      "float / float3 / float4 均可改，内存修改需点勾选才会生效。")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
