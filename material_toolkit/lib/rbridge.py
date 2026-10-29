@@ -5,9 +5,10 @@
 REFramework.NET 起了个 HttpListener（默认 :8899），暴露：
 
     GET /ping                  存活
-    GET /api                   反射出 REFramework.NET 的公开 API（排查用）
-    GET /probe?what=<...>      探测：materials / params / methods ...
-    GET /set?go=&mat=&var=&value=   写一个材质参数（下一帧生效）
+    GET /api                   反射出 REFrameworkNET 的公开 API（排查用）
+    GET /probe?what=<...>      探测：materials / params / meshptr ...
+    GET /set?go=&mat=&var=&value=    REF setter 路径（float 可用；float3 无效）
+    GET /set3?go=&mat=&var=&value=   直写内存路径，float/float3/float4 全支持
 
 本模块只负责“发请求 + 解析 JSON”，不碰 REF 本身。
 所有函数在连不上时抛 BridgeError，GUI 侧统一提示。
@@ -95,7 +96,8 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
     """读某个 GameObject 下 mesh 的材质参数。
 
     返回 {meshes: [{i, go, mats: [{name, varCount, vars: [{j,name,type,value}]}]}]}
-    type: 1=float, 2/3/4=float2/3/4（后者的 value 目前是 REFrameworkNET.ValueType，读不出分量）
+    type = 分量数（1=float, 2=float2, 3=float3, 4=float4）；
+    float2/3/4 的 value 已是解包后的 "x, y, z" 形式（老版本会是 REFrameworkNET.ValueType）。
     """
     d = probe("params", go=go, limit=limit, port=port, timeout=40.0)
     p = d.get("params") or {}
@@ -107,10 +109,17 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
 def set_param(go, mat, var, value, port=DEFAULT_PORT):
     """写一个参数。value 传字符串：float 用 "1.5"，float3 用 "x,y,z"。
 
-    返回 {ok, touched, results:[{mesh, matIdx, matName, before, after, err?}]}
+    走 `/set3`（超集）：
+      - float   -> REF 原生 setMaterialFloat
+      - float3/4 -> 直写引擎内存 + 自动 flush（preFlush 激活 mgr + 版本号自增）
+
+    返回 {ok, touched, results:[{mesh, matIdx, matName, varIdx, type, before, after,
+                                via, preFlush, flush, err?}]}
+    其中 via = "setMaterialFloat" / "mem+flush" / "mem-only"（mem-only 表示找不到
+    可用来 flush 的 float 参数，画面不会刷新）。
     """
-    return _get("/set", {"go": go, "mat": mat, "var": var, "value": value},
-                port=port, timeout=20.0)
+    return _get("/set3", {"go": go, "mat": mat, "var": var, "value": value},
+                port=port, timeout=40.0)
 
 
 def apply_slot(go, mat, var, value, port=DEFAULT_PORT):

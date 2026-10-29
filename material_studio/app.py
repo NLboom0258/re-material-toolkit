@@ -122,6 +122,22 @@ def _rb_typename(t):
     return {1: "float", 2: "float2", 3: "float3", 4: "float4"}.get(t, "type=%s" % (t,))
 
 
+def _rb_parse_vec(value, n):
+    """把 "0, 1.78, -0.06" 解析成 n 个 float；解析不了的置 0。"""
+    out = [0.0] * n
+    if isinstance(value, (int, float)):
+        out[0] = float(value)
+        return out
+    s = str(value or "").replace("[", "").replace("]", "").replace("(", "").replace(")", "")
+    parts = [p.strip() for p in s.split(",")]
+    for i in range(min(n, len(parts))):
+        try:
+            out[i] = float(parts[i])
+        except ValueError:
+            pass
+    return out
+
+
 def _iter_items(tree):
     """深度遍历 QTreeWidget 的所有条目。"""
     stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
@@ -3606,6 +3622,7 @@ class MaterialSystemPanel(QWidget):
         self._rb_matname = m.get("name")
         self.tbl_rb.setRowCount(0)
         self._rb_spins = {}
+        self._rb_vec_spins = {}
         for vv in (m.get("vars") or []):
             r = self.tbl_rb.rowCount()
             self.tbl_rb.insertRow(r)
@@ -3625,8 +3642,26 @@ class MaterialSystemPanel(QWidget):
                 sp.valueChanged.connect(lambda _v, n=name, s=sp: self._rb_schedule(n, s))
                 self.tbl_rb.setCellWidget(r, 2, sp)
                 self._rb_spins[name] = sp
+            elif vt in (2, 3, 4):
+                # float2/3/4：每个分量一个输入框。写入走 /set3（直写内存 + 自动 flush）。
+                vals = _rb_parse_vec(vv.get("value"), vt)
+                cont = QWidget()
+                h = QHBoxLayout(cont)
+                h.setContentsMargins(0, 0, 0, 0)
+                h.setSpacing(2)
+                sps = []
+                for c in range(vt):
+                    sp = QDoubleSpinBox()
+                    sp.setDecimals(4)
+                    sp.setRange(-100000.0, 100000.0)
+                    sp.setSingleStep(0.05)
+                    sp.setValue(vals[c])
+                    sp.valueChanged.connect(lambda _v, n=name: self._rb_vec_changed(n))
+                    h.addWidget(sp)
+                    sps.append(sp)
+                self.tbl_rb.setCellWidget(r, 2, cont)
+                self._rb_vec_spins[name] = sps
             else:
-                # float2/3/4 目前只能拿到 REFrameworkNET.ValueType，先只读
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
         self.tbl_rb.setColumnWidth(1, 72)
 
@@ -3635,16 +3670,27 @@ class MaterialSystemPanel(QWidget):
         self._rb_pending[name] = spin.value()
         self._rb_timer.start()
 
+    def _rb_vec_changed(self, name):
+        """float2/3/4 的任一分量变动：拼成 "x,y,z" 交给防抖写入。"""
+        sps = self._rb_vec_spins.get(name) or []
+        if not sps:
+            return
+        self._rb_pending[name] = ",".join("%.6f" % s.value() for s in sps)
+        self._rb_timer.start()
+
     def _rb_flush(self):
         if not self._rb_pending or not getattr(self, "_rb_go", None) \
                 or not getattr(self, "_rb_matname", None):
             return
         pending, self._rb_pending = self._rb_pending, {}
         for name, val in pending.items():
+            sval = val if isinstance(val, str) else ("%.6f" % float(val))
             try:
-                r = rb.apply_slot(self._rb_go, self._rb_matname, name, "%.6f" % float(val))
-                after = [x.get("after") for x in (r.get("results") or [])]
-                self._rb_say("set %s = %g  ->  %s" % (name, val, after))
+                r = rb.apply_slot(self._rb_go, self._rb_matname, name, sval)
+                res = r.get("results") or []
+                after = [x.get("after") for x in res]
+                via = next((x.get("via") for x in res if x.get("via")), "?")
+                self._rb_say("set %s = %s  ->  %s  (%s)" % (name, sval, after, via))
             except rb.BridgeError as e:
                 self._rb_say("set %s 失败: %s" % (name, e))
 
@@ -3700,7 +3746,8 @@ class MaterialSystemPanel(QWidget):
         v.addWidget(split, 3)
 
         hint = QLabel("改值后约 0.25 秒自动写入（下一帧生效）。内存修改是临时的 — 重启游戏恢复 mdf2 原值。"
-                      "float2/3/4 目前只能读不能改（返回值是 REF 的 ValueType）。")
+                      "float / float3 / float4 都可改：float 走 REF setter；float3/4 直写内存，"
+                      "并用同材质另一个 float 参数触发刷新（日志里 via=mem+flush）。")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
@@ -3712,6 +3759,7 @@ class MaterialSystemPanel(QWidget):
         self._rb_meshes = []
         self._rb_mats = []
         self._rb_spins = {}
+        self._rb_vec_spins = {}
         self._rb_go = None
         self._rb_matname = None
         self._rb_pending = {}
