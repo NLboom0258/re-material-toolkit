@@ -92,6 +92,20 @@ def list_meshes(go="", limit=60, port=DEFAULT_PORT):
     return lst.get("meshes") or []
 
 
+def identity(go="", limit=40, names=False, port=DEFAULT_PORT):
+    """mesh 身份：meshPath / mdf2Path / materialNames / mgrBases。
+
+    工具侧用前两者算 meshHash / mdf2Hash（见 lib/psession.py）；
+    mgrBases 用于判断「两个 mesh 挂同一份 mdf2 时是否共用参数数据块」。
+    返回 {count, meshes:[{i, go, matCount, addr, meshPath, mdf2Path, ...}], sharedMdf2}
+    """
+    d = _get("/identity", {"go": go, "limit": limit, "names": 1 if names else 0},
+             port=port, timeout=60.0)
+    if d.get("err") and not (d.get("meshes") or []):
+        raise BridgeError(d["err"])
+    return d
+
+
 def list_params(go, limit=1, port=DEFAULT_PORT):
     """读某个 GameObject 下 mesh 的材质参数。
 

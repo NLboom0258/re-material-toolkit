@@ -203,6 +203,34 @@ def new_orig_rel(dh, ts=None):
     return posixpath.join(TEMP_DIR, "orig", "%s_p%s.mdf2" % (dh, ts or _stamp()))
 
 
+def parse_temp_rel(rel):
+    """从 materialTemp 下的路径反推身份，认不出返回 None。
+
+    支持两种（都是本模块生成的）：
+
+        materialTemp/edit/<meshHash>/<mdf2Hash>_p<ts>.mdf2
+        materialTemp/orig/<mdf2Hash>_p<ts>.mdf2
+
+    用途：sessions.json 丢了（手动清理 / 旧版流程）时还能把当前挂着的副本
+    「接管」回来，而不用重启游戏。
+    """
+    s = norm_rel(rel)
+    if not s.lower().startswith(TEMP_DIR.lower() + "/"):
+        return None
+    parts = s[len(TEMP_DIR) + 1:].split("/")
+    if len(parts) == 3 and parts[0] == "edit":
+        m = _TS_RE.search(parts[2])
+        if m and "_p" in parts[2]:
+            return {"kind": "edit", "mh": parts[1],
+                    "dh": parts[2].split("_p")[0], "ts": m.group(1)}
+    if len(parts) == 2 and parts[0] == "orig":
+        m = _TS_RE.search(parts[1])
+        if m and "_p" in parts[1]:
+            return {"kind": "orig", "mh": None,
+                    "dh": parts[1].split("_p")[0], "ts": m.group(1)}
+    return None
+
+
 def create_edit(game_root, mh, dh, base_mdf2, log=None):
     """新建一份 edit 副本（内容 = base_mdf2 的字节）。
 
