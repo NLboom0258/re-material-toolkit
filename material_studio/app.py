@@ -123,6 +123,12 @@ def _rb_typename(t):
     return {1: "float", 2: "float2", 3: "float3", 4: "float4"}.get(t, "type=%s" % (t,))
 
 
+def _rb_addr_short(a, n=8):
+    """对象地址只显示后 n 位（完整值太长，列表里看不清楚）。"""
+    s = (a or "").strip()
+    return s[-n:] if len(s) > n else s
+
+
 def _rb_parse_vec(value, n):
     """把 "0, 1.78, -0.06" 解析成 n 个 float；解析不了的置 0。"""
     out = [0.0] * n
@@ -3568,62 +3574,109 @@ class MaterialSystemPanel(QWidget):
         return True
 
     def _rb_refresh(self):
+        """重建列表：每项带独立的预览勾选框，状态以游戏**实际挂载**的 mdf2 为准。
+
+        用 /identity 而不是 /probe?what=materials：一次就能拿到 addr / meshPath / mdf2Path，
+        之后所有操作按 addr 定位。**绝不能用 i=**：findComponents 的索引会因重启 / 变体切换
+        整体位移（1812→1479→2295），用 i= 定位会在湿身后直接打空（touched=0）。
+        """
         if not self._rb_check():
             return
         go = self.ed_rb_filter.text().strip()
+        root = self._rb_root()
         try:
-            ms = rb.list_meshes(go=go, limit=120)
+            d = rb.identity(go=go, limit=120, names=False)
         except rb.BridgeError as e:
             self._rb_say("拉取失败: %s" % e)
             return
-        # 不按 GameObject 名合并：同名下可能有多个 mesh，**各自 mdf2 不同**
-        # （pl0800 名下就有 分身/本体/头/发 四份不同 mdf2）
-        self._rb_meshes = ms
+        ms = d.get("meshes") or []
+        idx_doc = ps.load_index(root) if root else {"objects": {}}
+
+        prev_addr = getattr(self, "_rb_cur_addr", None)
+        self._rb_building = True
         self.lst_rb.blockSignals(True)
         self.lst_rb.clear()
         for m in ms:
-            self.lst_rb.addItem("%s   [%s]   %d 槽" % (
-                m.get("go") or "?", m.get("i"), m.get("matCount") or 0))
+            cur = ps.norm_rel(m.get("mdf2Path") or "")
+            hit = self._rb_lookup_by_path(idx_doc, cur) if cur else None
+            m["prev"] = hit["dh"] if (hit and hit["kind"] == "edit") else None
+            it = QListWidgetItem("%s   [%s]   %d 槽" % (
+                m.get("go") or "?", _rb_addr_short(m.get("addr")), m.get("matCount") or 0))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if m["prev"] else Qt.Unchecked)
+            it.setData(Qt.UserRole, m.get("addr"))
+            self.lst_rb.addItem(it)
         self.lst_rb.blockSignals(False)
-        self._rb_say("列表: %d 个 mesh 组件" % len(ms))
+        self._rb_building = False
+        self._rb_meshes = ms
 
-    def _rb_pick_mesh(self, row, keep_iso=False):
+        row = -1
+        for r, m in enumerate(ms):
+            if prev_addr and m.get("addr") == prev_addr:
+                row = r
+                break
+        if row < 0 and ms:
+            row = 0
+        if row >= 0:
+            self.lst_rb.setCurrentRow(row)      # 触发 _rb_pick_mesh
+        else:
+            self._rb_clear_params()
+        self._rb_say("列表: %d 个 mesh（预览中 %d 个）" % (
+            len(ms), sum(1 for m in ms if m.get("prev"))))
+
+    def _rb_cur_ent(self):
+        """当前列表行对应的 mesh 条目（含 addr / prev）。"""
+        lst = getattr(self, "lst_rb", None)
+        ms = getattr(self, "_rb_meshes", None) or []
+        if lst is None:
+            return None
+        row = lst.currentRow()
+        return ms[row] if 0 <= row < len(ms) else None
+
+    def _rb_pick_mesh(self, row):
+        """切换当前编辑对象。**不动任何一行的勾选**：每行的预览状态是独立的。"""
         if row < 0 or row >= len(getattr(self, "_rb_meshes", [])):
             return
         ent = self._rb_meshes[row]
-        go, idx = ent.get("go"), ent.get("i")
-        # 切走 = 结束当前对象的预览（重置）。否则 keep 项会在旧对象上一直跑，
-        # 而且用户也看不到“已经离开预览”的明确反馈。
-        # keep_iso=True 供 _rb_toggle_iso 换完 mdf2 后刷新参数表用。
-        chk = getattr(self, "chk_rb_iso", None)
-        if chk is not None and chk.isChecked() and not keep_iso:
-            try:
-                root = self._rb_root()
-                old_go = getattr(self, "_rb_go", None)
-                old_i = getattr(self, "_rb_mesh_i", None)
-                if root and old_go and old_i is not None:
-                    self._rb_iso_end(root, old_go, old_i)
-            except (rb.BridgeError, RuntimeError, OSError) as e:
-                self._rb_say("切走时重置失败（可手动取消勾选重试）: %s" % e)
-            self._rb_set_iso_check(False)
-        self._rb_go = go
-        self._rb_mesh_i = idx
-        # 先更新 mdf 标签：即使下面读参数失败，也能看到当前挂的是哪份 mdf2
+        self._rb_cur_addr = ent.get("addr")
+        self._rb_go = ent.get("go")
+        self._rb_mesh_i = ent.get("i")
         self._rb_update_mdf_label()
+        self._rb_load_params(ent)
+
+    def _rb_load_params(self, ent):
+        """按 addr 读这个对象的材质参数（索引变了也能对上）。"""
+        go, addr = ent.get("go"), ent.get("addr")
         try:
             p = rb.list_params(go, limit=32)
         except rb.BridgeError as e:
             self._rb_say("读参数失败: %s" % e)
+            self._rb_mats = []
+            self._rb_fill_mats()
             return
         target = None
         for mm in (p.get("meshes") or []):
-            if mm.get("i") == idx:
+            if addr and mm.get("addr") == addr:
                 target = mm
                 break
+        if target is None and not addr:
+            for mm in (p.get("meshes") or []):
+                if mm.get("i") == ent.get("i"):
+                    target = mm
+                    break
         if target is None:
-            self._rb_say("读不到 mesh [%s] 的参数" % idx)
-            return
-        self._rb_mats = target.get("mats") or []
+            self._rb_say("读不到该对象的参数（addr=%s）——可能已被游戏重载，请刷新列表"
+                         % _rb_addr_short(addr))
+            self._rb_mesh_i = None
+            self._rb_mats = []
+        else:
+            self._rb_mesh_i = target.get("i")
+            self._rb_mats = target.get("mats") or []
+        self._rb_fill_mats()
+        self._rb_say("mesh [%s] %s: %d 个材质（i=%s）" % (
+            _rb_addr_short(addr), go, len(self._rb_mats), self._rb_mesh_i))
+
+    def _rb_fill_mats(self):
         self.cmb_rb_mat.blockSignals(True)
         self.cmb_rb_mat.clear()
         for i, m in enumerate(self._rb_mats):
@@ -3632,11 +3685,68 @@ class MaterialSystemPanel(QWidget):
         if self._rb_mats:
             self.cmb_rb_mat.setCurrentIndex(0)
             self._rb_pick_mat(0)
-        self._rb_say("mesh [%s] %s: %d 个材质" % (idx, go, len(self._rb_mats)))
-        self._rb_update_mdf_label()
-        # 未勾选预览时参数表禁用（只读展示，不向游戏写入）
-        chk = getattr(self, "chk_rb_iso", None)
-        self.tbl_rb.setEnabled(bool(chk and chk.isChecked()))
+        else:
+            self.tbl_rb.setRowCount(0)
+        self._rb_sync_enabled()
+
+    def _rb_clear_params(self):
+        self._rb_mats = []
+        self._rb_fill_mats()
+        lbl = getattr(self, "lbl_rb_mdf", None)
+        if lbl is not None:
+            lbl.setText("")
+
+    def _rb_sync_enabled(self):
+        """参数表只在「当前对象处于预览中」时可编辑。"""
+        ent = self._rb_cur_ent()
+        self.tbl_rb.setEnabled(bool(ent and ent.get("prev")))
+
+    def _rb_set_item_check(self, addr, on):
+        """不触发 itemChanged 地设置某一行的勾选状态。"""
+        self.lst_rb.blockSignals(True)
+        for r in range(self.lst_rb.count()):
+            it = self.lst_rb.item(r)
+            if it.data(Qt.UserRole) == addr:
+                it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+                break
+        self.lst_rb.blockSignals(False)
+
+    def _rb_on_item_changed(self, item):
+        """列表项的勾选框变化 → 该对象的预览开关（每行独立）。"""
+        if getattr(self, "_rb_building", False):
+            return
+        addr = item.data(Qt.UserRole)
+        ent = None
+        for m in (getattr(self, "_rb_meshes", None) or []):
+            if m.get("addr") == addr:
+                ent = m
+                break
+        if ent is None:
+            return
+        want = item.checkState() == Qt.Checked
+        if want == bool(ent.get("prev")):
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("先在「预览」页设置游戏根目录")
+            self._rb_set_item_check(addr, not want)
+            return
+        try:
+            if want:
+                ent["prev"] = self._rb_iso_begin(root, ent)
+            else:
+                self._rb_iso_end(root, ent)
+                ent["prev"] = None
+        except (rb.BridgeError, RuntimeError, OSError) as e:
+            self._rb_say("预览开关失败: %s" % e)
+            self._rb_set_item_check(addr, not want)
+            return
+        self._rb_set_item_check(addr, want)
+        # 换 mdf2 后参数块重建，重新读一遍（只针对当前显示的那一行）
+        if self._rb_cur_addr == addr:
+            self._rb_update_mdf_label()
+            self._rb_load_params(ent)
+        self._rb_sync_enabled()
 
     def _rb_pick_mat(self, idx):
         mats = getattr(self, "_rb_mats", None) or []
@@ -3706,42 +3816,61 @@ class MaterialSystemPanel(QWidget):
         if not self._rb_pending:
             return
         pending, self._rb_pending = self._rb_pending, {}
-        # 未勾选「启用预览」时**不向游戏发任何请求**：避免直接改还在用原 mdf2 的对象。
-        chk = getattr(self, "chk_rb_iso", None)
-        if chk is None or not chk.isChecked():
-            self._rb_say("未启用预览，已忽略 %d 项修改（勾选「启用预览」后才会写入游戏）" % len(pending))
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            self._rb_say("当前对象未启用预览，已忽略 %d 项修改" % len(pending))
             return
         for name, val in pending.items():
             sval = val if isinstance(val, str) else ("%.6f" % float(val))
             try:
-                r = rb.apply_slot(self._rb_go, self._rb_matname, name, sval,
-                                  idx=getattr(self, "_rb_mesh_i", None))
-                res = r.get("results") or []
-                after = [x.get("after") for x in res]
-                via = next((x.get("via") for x in res if x.get("via")), "?")
-                self._rb_say("set %s = %s  ->  %s  (%s)" % (name, sval, after, via))
+                r = rb.apply_slot(ent.get("go"), self._rb_matname, name, sval,
+                                  addr=ent.get("addr"))
             except rb.BridgeError as e:
                 self._rb_say("set %s 失败: %s" % (name, e))
+                continue
+            res = r.get("results") or []
+            if not res:
+                # addr 没命中任何 mesh = 对象已被游戏重载（索引和地址都对不上了）
+                self._rb_obj_gone(ent, "写参数失败：addr 未命中任何 mesh")
+                return
+            after = [x.get("after") for x in res]
+            via = next((x.get("via") for x in res if x.get("via")), "?")
+            self._rb_say("set %s = %s  ->  %s  (%s)" % (name, sval, after, via))
+
+    def _rb_obj_gone(self, ent, why):
+        """对象已被游戏重载：清掉该行的勾选与状态，并提示重选。"""
+        addr = ent.get("addr")
+        ent["prev"] = None
+        if getattr(self, "_rb_cur_addr", None) == addr:
+            self._rb_mesh_i = None
+        self._rb_set_item_check(addr, False)
+        self._rb_sync_enabled()
+        self._rb_say("⚠ 对象已失效（%s）：%s" % (_rb_addr_short(addr), why))
+        QMessageBox.warning(
+            self, "对象已失效",
+            "该对象已被游戏重载，预览状态已清除。\n\n地址：%s\n原因：%s\n\n"
+            "请点「刷新列表」后重新选择对象。" % (addr, why))
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
     #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
     # 实测：同路径重载无效（引擎按路径缓存），必须换路径。
     def _rb_update_mdf_label(self):
-        go, idx = getattr(self, "_rb_go", None), getattr(self, "_rb_mesh_i", None)
+        """顶部只显示**当前行**对象的 mdf2（按 addr 查，而不是按索引）。"""
         lbl = getattr(self, "lbl_rb_mdf", None)
         if lbl is None:
             return
-        if not go or idx is None:
+        ent = self._rb_cur_ent()
+        if ent is None:
             lbl.setText("")
             return
+        p = None
         try:
-            d = rb.material(go, "info", idx=idx)
+            d = rb.material(ent.get("go"), "info", addr=ent.get("addr"))
             ms = d.get("meshes") or []
             p = ms[0].get("path") if ms else None
         except rb.BridgeError:
-            lbl.setText("")
-            return
+            p = ent.get("mdf2Path")
         if not p:
             lbl.setText("当前 mdf2: ?")
             return
@@ -3764,26 +3893,22 @@ class MaterialSystemPanel(QWidget):
     #            有模型无该 mdf2 → 弹窗选择「新建 / 用该模型下别的副本」
     #            有该 mdf2       → 直接复用（文件丢了就重建）
     #        → create_edit 生成**全新时间戳路径**（避开引擎的路径缓存）
-    #        → /material apply(i=) + keep=1
+    #        → /material apply(addr=) + keep=1
     #   取消 → create_orig 生成全新路径 → /material apply(keep=0) → 参数回到原始值
-    #   轮询 → holdDetail.dead 为真则提示重新选择对象
+    #   轮询 /holds → dead 为真则清勾选 + 提示重选
     def _rb_root(self):
         return (self.ed_pv_root.text() or "").strip()
 
-    def _rb_set_iso_check(self, on):
-        """不触发 toggled 地设置勾选态（避免递归）。"""
-        chk = getattr(self, "chk_rb_iso", None)
-        if chk is None:
-            return
-        chk.blockSignals(True)
-        chk.setChecked(bool(on))
-        chk.blockSignals(False)
-        self.tbl_rb.setEnabled(bool(on))
+    def _rb_find_identity(self, ent):
+        """重新查一次对象的身份（按 addr 匹配）。
 
-    def _rb_find_identity(self, go, idx):
+        勾选/取消前必须现查：ent 里的 mdf2Path 是 refresh 时的快照，
+        湿身/燃烧变体切换后它会过期。
+        """
+        go, addr = ent.get("go"), (ent.get("addr") or "").lower()
         d = rb.identity(go=go, limit=64, names=False)
         for m in (d.get("meshes") or []):
-            if m.get("i") == idx:
+            if addr and (m.get("addr") or "").lower() == addr:
                 return m
         return None
 
@@ -3809,14 +3934,15 @@ class MaterialSystemPanel(QWidget):
                         return {"mh": mh, "dh": dh, "ent": e, "kind": kind}
         return None
 
-    def _rb_apply_iso(self, go, idx, rel):
+    def _rb_apply_iso(self, ent, rel):
         """把 mesh 挂到指定副本并开启每帧保持（被游戏抢走时自动抢回 + 重写参数）。"""
-        d = rb.material(go, "apply", mdf=rel, idx=idx, keep=True)
+        d = rb.material(ent.get("go"), "apply", mdf=rel, addr=ent.get("addr"), keep=True)
         if d.get("err"):
             raise rb.BridgeError(d["err"])
         ms = d.get("meshes") or []
         if not ms:
-            raise rb.BridgeError("apply 没有命中任何 mesh（可能刚被游戏重载）")
+            raise rb.BridgeError("apply 没有命中任何 mesh（addr=%s，对象可能已被重载）"
+                                 % ent.get("addr"))
         for m in ms:
             if not m.get("ok"):
                 raise rb.BridgeError("apply 失败: %s" % (m.get("err") or "?"))
@@ -3856,16 +3982,19 @@ class MaterialSystemPanel(QWidget):
         i = items.index(pick)
         return "__new__" if i == 0 else cands[i - 1]
 
-    def _rb_iso_begin(self, root, go, idx):
-        ident = self._rb_find_identity(go, idx)
+    def _rb_iso_begin(self, root, ent):
+        """开启某对象的预览。返回该对象对应的 mdf2Hash（写入 ent["prev"]）。"""
+        ident = self._rb_find_identity(ent)
         if not ident:
             raise rb.BridgeError(
-                "读不到 mesh [%s] 的身份（对象可能已被游戏重载，请刷新列表后重选）" % idx)
+                "读不到该对象的身份（addr=%s）——已被游戏重载，请刷新列表后重选"
+                % _rb_addr_short(ent.get("addr")))
         mesh_path = ident.get("meshPath") or ""
         mdf_path = ident.get("mdf2Path") or ""
         if not mesh_path or not mdf_path:
             raise rb.BridgeError("meshPath / mdf2Path 为空，稍后再试（变体切换中？）")
         cur = ps.norm_rel(mdf_path)
+        go = ent.get("go")
         idx_doc = ps.load_index(root)
 
         # ① 当前路径已在 sessions.json 里登记（edit 或 orig）→ 直接取登记信息。
@@ -3874,13 +4003,13 @@ class MaterialSystemPanel(QWidget):
         if hit and hit["kind"] == "edit":
             # 已经在预览中（比如切回之前选过的对象），继续用当前副本，
             # 不要重新 clone —— 换新路径会让引擎重载 mdf2，调好的参数全丢。
-            self._rb_apply_iso(go, idx, cur)
-            return
+            self._rb_apply_iso(ent, cur)
+            return hit["dh"]
 
         if hit:
             mh, dh = hit["mh"], hit["dh"]
-            ent = hit["ent"]
-            base = ps.norm_rel(ent.get("originalMdf2") or ent.get("baseMdf2") or cur)
+            reg = hit["ent"]
+            base = ps.norm_rel(reg.get("originalMdf2") or reg.get("baseMdf2") or cur)
             obj = ps.get_object(idx_doc, mh)
             self._rb_say("已重置过（挂在 orig 副本上），从原始 mdf2 重新开始")
         else:
@@ -3894,28 +4023,28 @@ class MaterialSystemPanel(QWidget):
                         "该对象挂在无法识别的临时副本上：\n%s\n\n请重启游戏后再试。" % cur)
                 mh, dh = ps.mesh_hash(mesh_path), parsed["dh"]
                 self._rb_say("接管未登记的副本（身份从路径反推）: mh=%s dh=%s" % (mh, dh))
-                self._rb_apply_iso(go, idx, cur)
+                self._rb_apply_iso(ent, cur)
                 ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
                 ps.upsert_mdf2(idx_doc, mh, dh, cur, cur, edit_rel=cur)
                 ps.save_index(root, idx_doc, log=self._rb_say)
-                return
+                return dh
             mh, dh = ps.mesh_hash(mesh_path), ps.mdf2_hash(cur)
             base = cur
             obj = ps.get_object(idx_doc, mh)
-            ent = ps.get_mdf2(idx_doc, mh, dh) if obj else None
+            reg = ps.get_mdf2(idx_doc, mh, dh) if obj else None
 
         self._rb_say("身份 mesh=%s / mdf2=%s" % (mh, dh))
         self._rb_say("  mesh = %s" % mesh_path)
         self._rb_say("  base = %s" % base)
 
         edit = None
-        cand = (ent or {}).get("edit")
+        cand = (reg or {}).get("edit")
         if cand and ps.exists_edit(root, cand):
             edit = cand
             self._rb_say("复用已有工作副本: %s" % cand)
             # 如果这次是从**真实原 mdf2** 进来的，顺手把 base 矫正成它。
             # 接管分支只能拿临时副本当 base（不可靠：那份文件被清掉就没法重置了）。
-            reg_base = ps.norm_rel((ent or {}).get("baseMdf2") or "")
+            reg_base = ps.norm_rel((reg or {}).get("baseMdf2") or "")
             if not cur.lower().startswith(ps.TEMP_DIR.lower() + "/") and reg_base != cur:
                 self._rb_say("base 校正为原 mdf2: %s" % cur)
                 base = cur
@@ -3930,11 +4059,11 @@ class MaterialSystemPanel(QWidget):
                 if pick is None:
                     raise RuntimeError("已取消")
                 if pick != "__new__":
-                    self._rb_apply_iso(go, idx, pick)
+                    self._rb_apply_iso(ent, pick)
                     ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
                     ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=pick)
                     ps.save_index(root, idx_doc, log=self._rb_say)
-                    return
+                    return dh
             elif not self._rb_ask_first(mesh_path, base):
                 raise RuntimeError("已取消")
             edit = ps.create_edit(root, mh, dh, base, log=self._rb_say)
@@ -3942,17 +4071,19 @@ class MaterialSystemPanel(QWidget):
             ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=edit)
             ps.save_index(root, idx_doc, log=self._rb_say)
 
-        self._rb_apply_iso(go, idx, edit)
+        self._rb_apply_iso(ent, edit)
+        return dh
 
-    def _rb_iso_end(self, root, go, idx):
-        """取消 / 切走时重置：新建一份 orig 副本再挂上去。
+    def _rb_iso_end(self, root, ent):
+        """取消某对象的预览：新建一份 orig 副本再挂上去。
 
         不能挂回原路径——引擎按路径缓存，同路径不会重建参数块（§13.6 实测）。
         原文件本身从不改动，orig 只是它的字节拷贝。
         """
-        ident = self._rb_find_identity(go, idx)
+        ident = self._rb_find_identity(ent)
         if not ident:
-            raise rb.BridgeError("读不到 mesh [%s] 的身份（对象可能已重载）" % idx)
+            raise rb.BridgeError("读不到该对象的身份（addr=%s）——已被游戏重载"
+                                 % _rb_addr_short(ent.get("addr")))
         cur = ps.norm_rel(ident.get("mdf2Path") or "")
         idx_doc = ps.load_index(root)
 
@@ -3966,7 +4097,7 @@ class MaterialSystemPanel(QWidget):
             raise rb.BridgeError("登记项里没有原始 mdf2 路径，无法重置")
 
         orig = ps.create_orig(root, dh_hit, orig_target, log=self._rb_say)
-        d = rb.material(go, "apply", mdf=orig, idx=idx, keep=False)
+        d = rb.material(ent.get("go"), "apply", mdf=orig, addr=ent.get("addr"), keep=False)
         if d.get("err"):
             raise rb.BridgeError(d["err"])
         ps.upsert_mdf2(idx_doc, mh_hit, dh_hit, orig_target, orig_target,
@@ -3975,56 +4106,36 @@ class MaterialSystemPanel(QWidget):
         self._rb_iso_mdf = None
         self._rb_say("已重置：挂到 orig 副本 %s（参数回到原始值，keep 已关）" % orig)
 
-    def _rb_toggle_iso(self, on):
-        go, idx = getattr(self, "_rb_go", None), getattr(self, "_rb_mesh_i", None)
-        if not go or idx is None:
-            self._rb_say("先选一个 mesh 再启用预览")
-            self._rb_set_iso_check(False)
-            return
-        root = self._rb_root()
-        if not root:
-            self._rb_say("先在「预览」页设置游戏根目录")
-            self._rb_set_iso_check(False)
-            return
-        try:
-            if on:
-                self._rb_iso_begin(root, go, idx)
-            else:
-                self._rb_iso_end(root, go, idx)
-        except (rb.BridgeError, RuntimeError, OSError) as e:
-            self._rb_say("预览开关失败: %s" % e)
-            self._rb_set_iso_check(not on)
-            return
-        # 换 mdf2 后材质参数块重建，重新读一遍参数表
-        self._rb_pick_mesh(self.lst_rb.currentRow(), keep_iso=True)
-        self.tbl_rb.setEnabled(True)
-
     def _rb_poll_hold(self):
-        """轮询每帧保持状态：对象被游戏重载时提示用户重新选择。"""
-        chk = getattr(self, "chk_rb_iso", None)
-        go = getattr(self, "_rb_go", None)
-        if chk is None or not chk.isChecked() or not go:
+        """定时查保持项：发现 dead 就清掉那行勾选并提示重选。"""
+        ms = getattr(self, "_rb_meshes", None) or []
+        if not any(m.get("prev") for m in ms):
             return
         try:
-            k = rb.material(go, "keep", idx=99999, keep=True)
+            k = rb.holds()
         except rb.BridgeError:
             return
+        dead = {}
         for it in (k.get("holdDetail") or []):
-            if "ticks" in it or it.get("go") != go or not it.get("dead"):
+            if "ticks" in it or not it.get("dead"):
                 continue
-            self._rb_say("⚠ 对象已被游戏重载（%s），预览失效" % (it.get("deadReason") or "gone"))
-            self._rb_set_iso_check(False)
-            QMessageBox.warning(
-                self, "对象已失效",
-                "该对象已被游戏重载，预览状态已失效。\n\n原因：%s\n\n"
-                "请点「刷新列表」后重新选择对象。" % (it.get("deadReason") or "object gone"))
+            a = (it.get("addr") or "").lower()
+            if a:
+                dead[a] = it.get("deadReason") or "gone"
+        if not dead:
             return
+        for m in ms:
+            a = (m.get("addr") or "").lower()
+            if a in dead and m.get("prev"):
+                self._rb_obj_gone(m, dead[a])
+                return          # 一次只提示一个，避免连环弹窗
 
     def _wrap_rbridge(self):
-        """实时调参页：选 mesh → 选材质 → 改参数。
+        """实时调参页：列表里每个 mesh 前面一个勾选框（**每行独立**开启预览）→ 选材质 → 改参数。
 
-        默认只改内存（下一帧生效，重启游戏恢复）。
-        勾选「启用预览」后换成独立 mdf2，取消勾选即重置。
+        未勾选的行完全只读（不向游戏发任何写请求）；勾选后为该对象建一份 mdf2 工作副本，
+        调参只作用于副本，取消勾选即重置。
+        所有操作按 **addr**（对象地址）定位：findComponents 的索引会随重启 / 变体切换位移。
         """
         w = QWidget()
         v = QVBoxLayout(w)
@@ -4043,16 +4154,6 @@ class MaterialSystemPanel(QWidget):
         v.addLayout(top)
 
         iso = QHBoxLayout()
-        self.chk_rb_iso = QCheckBox("启用预览（独立 mdf2 工作副本）")
-        self.chk_rb_iso.setToolTip(
-            "勾选后：为该对象建一份 mdf2 工作副本（materialTemp/ 下，原文件不改），\n"
-            "并每帧保持——游戏自己的变体切换（湿身/燃烧）抢不走；\n"
-            "被抢时还会把改过的参数重写回去。\n\n"
-            "取消勾选：挂回一份全新的 orig 副本（原 mdf2 的字节拷贝），\n"
-            "引擎重建参数块 → 参数回到原始值，不用重启游戏。\n"
-            "实测：同路径重载无效（引擎按路径缓存），必须换路径。")
-        self.chk_rb_iso.toggled.connect(self._rb_toggle_iso)
-        iso.addWidget(self.chk_rb_iso)
         self.lbl_rb_mdf = QLabel("")
         self.lbl_rb_mdf.setStyleSheet("color:#666")
         self.lbl_rb_mdf.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -4062,9 +4163,10 @@ class MaterialSystemPanel(QWidget):
         f = QHBoxLayout()
         f.addWidget(QLabel("GameObject 过滤:"))
         self.ed_rb_filter = QLineEdit()
-        self.ed_rb_filter.setPlaceholderText("留空 = 列出全部（上限 60）；可与「预览」页的目标 mdf2 对应")
+        self.ed_rb_filter.setPlaceholderText("留空 = 列出全部（上限 120）；可填 GameObject 名子串")
         f.addWidget(self.ed_rb_filter, 1)
         b = QPushButton("刷新列表")
+        b.setToolTip("重新拉取场景里的 mesh。刷新不会丢掉任何一行的勾选（按对象地址匹配）")
         b.clicked.connect(self._rb_refresh)
         f.addWidget(b)
         v.addLayout(f)
@@ -4072,6 +4174,12 @@ class MaterialSystemPanel(QWidget):
         split = QSplitter(Qt.Horizontal)
         self.lst_rb = QListWidget()
         self.lst_rb.currentRowChanged.connect(self._rb_pick_mesh)
+        # 每行一个勾选框 = 该对象是否处于预览状态（互不影响）
+        self.lst_rb.itemChanged.connect(self._rb_on_item_changed)
+        self.lst_rb.setToolTip(
+            "勾选 = 为该对象建 mdf2 工作副本并实时改参（每行独立，可同时开多个）\n"
+            "取消 = 挂回 orig 副本把参数重置回原始值\n"
+            "点击行文字 = 切换当前编辑对象（不影响任何一行的勾选）")
         split.addWidget(self.lst_rb)
 
         right = QWidget()
@@ -4087,16 +4195,17 @@ class MaterialSystemPanel(QWidget):
         self.tbl_rb.setHorizontalHeaderLabels(["参数", "类型", "值"])
         self.tbl_rb.verticalHeader().setVisible(False)
         self.tbl_rb.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.tbl_rb.setEnabled(False)      # 勾选「启用预览」后才可编辑
+        self.tbl_rb.setEnabled(False)      # 只有该行勾选了预览才可编辑
         rv.addWidget(self.tbl_rb, 1)
         split.addWidget(right)
         split.setSizes([230, 520])
         v.addWidget(split, 3)
 
-        hint = QLabel("必须先勾选「启用预览」才能改参数：勾选时复制一份当前 mdf2 作为工作副本（不改原文件），"
-                      "调参只作用于这份副本；取消勾选挂回 orig 副本，参数自动重置（不用重启游戏）。"
-                      "float / float3 / float4 均可改。工作副本按 meshHash / mdf2Hash 登记在 "
-                      "materialTemp/sessions.json，重启后再勾选同一对象会接续上次的副本。")
+        hint = QLabel("勾选列表里某个对象 = 给它建一份 mdf2 工作副本（不改原文件）并实时改参；"
+                      "取消勾选 = 挂回 orig 副本，参数重置（不用重启游戏）。"
+                      "每行独立，可同时开多个；点行文字只是切换当前编辑对象。"
+                      "对象被游戏重载时会自动提示重选。"
+                      "工作副本按 meshHash / mdf2Hash 登记在 materialTemp/sessions.json。")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
@@ -4111,6 +4220,8 @@ class MaterialSystemPanel(QWidget):
         self._rb_vec_spins = {}
         self._rb_go = None
         self._rb_mesh_i = None
+        self._rb_cur_addr = None      # 当前行的对象地址（一切操作的定位键）
+        self._rb_building = False     # 重建列表时忽略 itemChanged
         self._rb_iso_mdf = None
         self._rb_matname = None
         self._rb_pending = {}

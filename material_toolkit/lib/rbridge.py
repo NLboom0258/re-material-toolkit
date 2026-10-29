@@ -120,7 +120,17 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
     return p
 
 
-def set_param(go, mat, var, value, idx=None, port=DEFAULT_PORT):
+def holds(port=DEFAULT_PORT):
+    """当前每帧保持项的快照（不需 go）。
+
+    返回 {holds, holdDetail:[{go,i,addr,ok,err,dead,deadReason,refCount,dying,
+                              wantPath,curPath,savedParams,rewrites}, {ticks,holds}]}
+    工具侧用它轮询「对象是否已被游戏重载」。
+    """
+    return _get("/holds", None, port=port, timeout=20.0)
+
+
+def set_param(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
     """写一个参数。value 传字符串：float 用 "1.5"，float3 用 "x,y,z"。
 
     走 `/set3`（超集）：
@@ -129,19 +139,20 @@ def set_param(go, mat, var, value, idx=None, port=DEFAULT_PORT):
 
     idx：mesh 组件索引。同名 GameObject 下可能有多个 mesh（如 pl0800 名下的分身/本体/头/发，
     各自 mdf2 不同），不传则写全部同名 mesh。
+    addr：**对象地址**（/identity 返回的 addr），优先于 idx。
+    索引会随重启 / 变体切换整体位移（1812→1479→2295），长期持有的句柄必须用地址。
 
-    返回 {ok, touched, results:[{mesh, matIdx, matName, varIdx, type, before, after,
-                                via, preFlush, flush, err?}]}
-    其中 via = "setMaterialFloat" / "mem+flush" / "mem-only"（mem-only 表示找不到
-    可用来 flush 的 float 参数，画面不会刷新）。
+    返回 {ok, touched, results:[{mesh, meshAddr, matIdx, matName, varIdx, type, before,
+                                after, via, preFlush, flush, err?}]}
+    touched=0 且 results 为空 = addr/idx 没命中任何 mesh（对象已被重载）。
     """
     return _get("/set3", {"go": go, "mat": mat, "var": var, "value": value,
-                          "i": idx}, port=port, timeout=40.0)
+                          "i": idx, "addr": addr}, port=port, timeout=40.0)
 
 
-def apply_slot(go, mat, var, value, idx=None, port=DEFAULT_PORT):
+def apply_slot(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
     """set_param 的严格版：只要有一个 mesh 报错就抛异常。"""
-    r = set_param(go, mat, var, value, idx=idx, port=port)
+    r = set_param(go, mat, var, value, idx=idx, addr=addr, port=port)
     if not r.get("ok"):
         raise BridgeError(r.get("err") or "set 失败：%s" % (r,))
     bad = [x for x in (r.get("results") or []) if x.get("err")]
@@ -150,14 +161,17 @@ def apply_slot(go, mat, var, value, idx=None, port=DEFAULT_PORT):
     return r
 
 
-def material(go, action="info", mdf=None, idx=None, keep=None, port=DEFAULT_PORT):
+def material(go, action="info", mdf=None, idx=None, keep=None, addr=None,
+             port=DEFAULT_PORT):
     """独立 mdf2 预览：info / apply / restore / keep。
 
     apply  需要 mdf（相对 natives/x64、不带 .10 后缀的路径）
     keep   仅 apply 用：是否每帧保持（None = 用服务端默认，即保持）。
            游戏会主动换 mdf2（湿身/燃烧变体），保持后永远以我们指定的为准。
-    restore 换回首次 apply 时按 go#i 记录的原始 mdf2，并解除保持
+    restore 换回首次 apply 时记录的原始 mdf2，并解除保持
+    addr   **对象地址**，优先于 idx（索引会变，地址不会）
     """
     return _get("/material", {"go": go, "action": action, "mdf": mdf, "i": idx,
-                              "keep": None if keep is None else (1 if keep else 0)},
+                              "keep": None if keep is None else (1 if keep else 0),
+                              "addr": addr},
                 port=port, timeout=60.0)
