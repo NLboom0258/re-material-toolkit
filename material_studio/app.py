@@ -139,6 +139,19 @@ def _rb_addr_key(a):
     return s[2:] if s.startswith("0x") else s
 
 
+def _rb_is_variant(rel):
+    """当前 mdf2 是不是**引擎变体**（湿身 / 燃烧…）。
+
+    DMC5 的变体是在原文件名后加后缀（``pl0800.mdf2`` → ``pl0800_Wet.mdf2``）。
+    变体路径不能当 base：那样「重置」会回到变体参数，而不是原始参数。
+    """
+    stem = (rel or "").lower().rsplit("/", 1)[-1]
+    for tag in ("_wet", "_burn", "_dirt", "_blood", "_poison", "_mud", "_ash"):
+        if tag in stem:
+            return True
+    return False
+
+
 def _rb_parse_vec(value, n):
     """把 "0, 1.78, -0.06" 解析成 n 个 float；解析不了的置 0。"""
     out = [0.0] * n
@@ -4183,6 +4196,19 @@ class MaterialSystemPanel(QWidget):
             obj = ps.get_object(idx_doc, mh)
             reg = ps.get_mdf2(idx_doc, mh, dh) if obj else None
 
+            # 当前挂的是引擎变体（湿身 _Wet / 燃烧…）：不能拿它当 base，
+            # 否则「重置」会回到变体参数。同一个模型若已有正常登记，优先用它。
+            if reg is None and _rb_is_variant(cur):
+                for d2, e2 in ((obj or {}).get("mdfs") or {}).items():
+                    ed2 = ps.norm_rel(e2.get("edit") or "")
+                    if ed2 and ps.exists_edit(root, ed2):
+                        self._rb_say("当前是引擎变体（%s），改用正常登记 dh=%s"
+                                     % (cur.rsplit("/", 1)[-1], d2))
+                        dh, reg = d2, e2
+                        base = ps.norm_rel(e2.get("baseMdf2")
+                                           or e2.get("originalMdf2") or cur)
+                        break
+
         self._rb_say("身份 mesh=%s / mdf2=%s" % (mh, dh))
         self._rb_say("  mesh = %s" % mesh_path)
         self._rb_say("  base = %s" % base)
@@ -4195,7 +4221,8 @@ class MaterialSystemPanel(QWidget):
             # 如果这次是从**真实原 mdf2** 进来的，顺手把 base 矫正成它。
             # 接管分支只能拿临时副本当 base（不可靠：那份文件被清掉就没法重置了）。
             reg_base = ps.norm_rel((reg or {}).get("baseMdf2") or "")
-            if not cur.lower().startswith(ps.TEMP_DIR.lower() + "/") and reg_base != cur:
+            if (not cur.lower().startswith(ps.TEMP_DIR.lower() + "/")
+                    and not _rb_is_variant(cur) and reg_base != cur):
                 self._rb_say("base 校正为原 mdf2: %s" % cur)
                 base = cur
                 ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=edit)
