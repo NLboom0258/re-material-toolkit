@@ -67,6 +67,7 @@ from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import preview as prev  # noqa: E402
+from material_toolkit.lib import rbridge as rb  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -114,6 +115,11 @@ def _grip_icon(size=16):
 _DIMNAME = {0: "?", 1: "buffer", 2: "tex1d", 3: "tex2d", 4: "tex2dms", 5: "tex3d",
             6: "texcube", 7: "tex1darr", 8: "tex2darr", 9: "tex2dmsarr",
             10: "texcubearr", 11: "bufferex"}
+
+
+def _rb_typename(t):
+    """材质参数类型：1=float, 2/3/4=floatN（getMaterialVariableType 返回分量数）。"""
+    return {1: "float", 2: "float2", 3: "float3", 4: "float4"}.get(t, "type=%s" % (t,))
 
 
 def _iter_items(tree):
@@ -2995,6 +3001,7 @@ class MaterialSystemPanel(QWidget):
         self.tabs.addTab(self._asm_page, "组装")
         self.tabs.addTab(self._wrap_inputs(), "输入")
         self.tabs.addTab(self._wrap_preview(), "预览")
+        self.tabs.addTab(self._wrap_rbridge(), "实时调参")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
         self.tabs.addTab(self.tree_info, "语义输出 / 校验")
@@ -3522,6 +3529,197 @@ class MaterialSystemPanel(QWidget):
         self._pv_check_root()
         self._pv_say("游戏内脚本: <游戏根>/reframework/autorun/mmtr_preview.lua"
                      "，面板里勾选 'enable preview'")
+        return w
+
+    # ---- 实时调参（游戏内 C# 桥） ---------------------------------------
+    # 见 analysis/runtime_preview_plan.md §10：游戏内跑 mmtr_bridge.cs（REFramework.NET），
+    # 暴露 /probe 与 /set；setMaterialFloat 改的是内存值，**下一帧就生效**，且重启即恢复。
+    def _rb_say(self, s):
+        self.ed_rb_log.appendPlainText(s)
+
+    def _rb_check(self, quiet=False):
+        try:
+            d = rb.ping()
+        except rb.BridgeError as e:
+            self.lbl_rb.setText("未连接")
+            self.lbl_rb.setStyleSheet("color:#b00020")
+            if not quiet:
+                self._rb_say(str(e))
+            return False
+        self.lbl_rb.setText("已连接 · stage %s" % d.get("stage"))
+        self.lbl_rb.setStyleSheet("color:#2e7d32")
+        return True
+
+    def _rb_refresh(self):
+        if not self._rb_check():
+            return
+        go = self.ed_rb_filter.text().strip()
+        try:
+            ms = rb.list_meshes(go=go, limit=60)
+        except rb.BridgeError as e:
+            self._rb_say("拉取失败: %s" % e)
+            return
+        # 按 GameObject 名分组：一个模型可能拆成多个 mesh 组件（pl0800 就有两个）
+        groups = {}
+        for m in ms:
+            k = m.get("go") or "?"
+            g = groups.setdefault(k, {"n": 0, "mats": m.get("mats") or []})
+            g["n"] += 1
+        self._rb_meshes = sorted(groups.items())
+        self.lst_rb.blockSignals(True)
+        self.lst_rb.clear()
+        for k, g in self._rb_meshes:
+            self.lst_rb.addItem("%s    (%d 槽 / %d 组件)" % (k, len(g["mats"]), g["n"]))
+        self.lst_rb.blockSignals(False)
+        self._rb_say("列表: %d 个 GameObject，%d 个 mesh 组件" % (len(self._rb_meshes), len(ms)))
+
+    def _rb_pick_mesh(self, row):
+        if row < 0 or row >= len(getattr(self, "_rb_meshes", [])):
+            return
+        go = self._rb_meshes[row][0]
+        self._rb_go = go
+        try:
+            p = rb.list_params(go, limit=1)
+        except rb.BridgeError as e:
+            self._rb_say("读参数失败: %s" % e)
+            return
+        meshes = p.get("meshes") or []
+        if not meshes:
+            self._rb_say("该 GameObject 没有可读材质")
+            return
+        self._rb_mats = meshes[0].get("mats") or []
+        self.cmb_rb_mat.blockSignals(True)
+        self.cmb_rb_mat.clear()
+        for i, m in enumerate(self._rb_mats):
+            self.cmb_rb_mat.addItem("%s  (%d 参数)" % (m.get("name"), m.get("varCount") or 0), i)
+        self.cmb_rb_mat.blockSignals(False)
+        if self._rb_mats:
+            self.cmb_rb_mat.setCurrentIndex(0)
+            self._rb_pick_mat(0)
+        self._rb_say("mesh %s: %d 个材质" % (meshes[0].get("i"), len(self._rb_mats)))
+
+    def _rb_pick_mat(self, idx):
+        mats = getattr(self, "_rb_mats", None) or []
+        if idx < 0 or idx >= len(mats):
+            return
+        m = mats[idx]
+        self._rb_matname = m.get("name")
+        self.tbl_rb.setRowCount(0)
+        self._rb_spins = {}
+        for vv in (m.get("vars") or []):
+            r = self.tbl_rb.rowCount()
+            self.tbl_rb.insertRow(r)
+            name = vv.get("name") or "?"
+            vt = vv.get("type")
+            self.tbl_rb.setItem(r, 0, QTableWidgetItem(name))
+            self.tbl_rb.setItem(r, 1, QTableWidgetItem(_rb_typename(vt)))
+            if vt == 1:
+                sp = QDoubleSpinBox()
+                sp.setDecimals(4)
+                sp.setRange(-100000.0, 100000.0)
+                sp.setSingleStep(0.05)
+                try:
+                    sp.setValue(float(vv.get("value")))
+                except (TypeError, ValueError):
+                    pass
+                sp.valueChanged.connect(lambda _v, n=name, s=sp: self._rb_schedule(n, s))
+                self.tbl_rb.setCellWidget(r, 2, sp)
+                self._rb_spins[name] = sp
+            else:
+                # float2/3/4 目前只能拿到 REFrameworkNET.ValueType，先只读
+                self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
+        self.tbl_rb.setColumnWidth(1, 72)
+
+    def _rb_schedule(self, name, spin):
+        """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
+        self._rb_pending[name] = spin.value()
+        self._rb_timer.start()
+
+    def _rb_flush(self):
+        if not self._rb_pending or not getattr(self, "_rb_go", None) \
+                or not getattr(self, "_rb_matname", None):
+            return
+        pending, self._rb_pending = self._rb_pending, {}
+        for name, val in pending.items():
+            try:
+                r = rb.apply_slot(self._rb_go, self._rb_matname, name, "%.6f" % float(val))
+                after = [x.get("after") for x in (r.get("results") or [])]
+                self._rb_say("set %s = %g  ->  %s" % (name, val, after))
+            except rb.BridgeError as e:
+                self._rb_say("set %s 失败: %s" % (name, e))
+
+    def _wrap_rbridge(self):
+        """实时调参页：选 GameObject → 选材质 → 改参数（下一帧生效，重启恢复）。"""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("游戏内 C# 桥:"))
+        self.lbl_rb = QLabel("未检查")
+        top.addWidget(self.lbl_rb)
+        top.addSpacing(12)
+        top.addWidget(QLabel("（共 %d）" % rb.DEFAULT_PORT))
+        top.addStretch(1)
+        b = QPushButton("重新连接")
+        b.clicked.connect(lambda: self._rb_check())
+        top.addWidget(b)
+        v.addLayout(top)
+
+        f = QHBoxLayout()
+        f.addWidget(QLabel("GameObject 过滤:"))
+        self.ed_rb_filter = QLineEdit()
+        self.ed_rb_filter.setPlaceholderText("留空 = 列出全部（上限 60）；可与「预览」页的目标 mdf2 对应")
+        f.addWidget(self.ed_rb_filter, 1)
+        b = QPushButton("刷新列表")
+        b.clicked.connect(self._rb_refresh)
+        f.addWidget(b)
+        v.addLayout(f)
+
+        split = QSplitter(Qt.Horizontal)
+        self.lst_rb = QListWidget()
+        self.lst_rb.currentRowChanged.connect(self._rb_pick_mesh)
+        split.addWidget(self.lst_rb)
+
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        mr = QHBoxLayout()
+        mr.addWidget(QLabel("材质:"))
+        self.cmb_rb_mat = NoWheelComboBox()
+        self.cmb_rb_mat.currentIndexChanged.connect(self._rb_pick_mat)
+        mr.addWidget(self.cmb_rb_mat, 1)
+        rv.addLayout(mr)
+        self.tbl_rb = QTableWidget(0, 3)
+        self.tbl_rb.setHorizontalHeaderLabels(["参数", "类型", "值"])
+        self.tbl_rb.verticalHeader().setVisible(False)
+        self.tbl_rb.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        rv.addWidget(self.tbl_rb, 1)
+        split.addWidget(right)
+        split.setSizes([230, 520])
+        v.addWidget(split, 3)
+
+        hint = QLabel("改值后约 0.25 秒自动写入（下一帧生效）。内存修改是临时的 — 重启游戏恢复 mdf2 原值。"
+                      "float2/3/4 目前只能读不能改（返回值是 REF 的 ValueType）。")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        self.ed_rb_log = QPlainTextEdit()
+        self.ed_rb_log.setReadOnly(True)
+        self.ed_rb_log.setMaximumBlockCount(300)
+        v.addWidget(self.ed_rb_log, 1)
+
+        self._rb_meshes = []
+        self._rb_mats = []
+        self._rb_spins = {}
+        self._rb_go = None
+        self._rb_matname = None
+        self._rb_pending = {}
+        self._rb_timer = QTimer(self)
+        self._rb_timer.setSingleShot(True)
+        self._rb_timer.setInterval(250)
+        self._rb_timer.timeout.connect(self._rb_flush)
+        self._rb_check(quiet=True)
         return w
 
     def _sync_force_full(self):
