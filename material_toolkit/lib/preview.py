@@ -148,6 +148,42 @@ def _uniq_name(base, used):
     return nm
 
 
+def clone_mdf2(game_root, base_mdf2, log=print):
+    """把 base mdf2 **原样拷贝**一份到 materialTemp/，路径不同、内容相同。
+
+    用途（独立 mdf2 预览）：勾选目标对象后，把它的 mesh 换到这份副本上；
+    之后所有实时改参都作用于**新加载的参数块**；取消勾选时换回原 mdf2，
+    引擎重建参数块 = 一键重置，不需要重启游戏。
+
+    用字节级拷贝而不是重新序列化：保证副本与原文件完全等价。
+
+    返回 {"mdf2": 相对 natives/x64 的路径（无 .10 后缀）, "bytes": 文件大小}
+    """
+    root = os.path.abspath(game_root)
+    nat = os.path.join(root, "natives", "x64")
+    rel = norm_rel(base_mdf2)
+    base_path = os.path.join(nat, rel + MDF2_EXT)
+    if not os.path.exists(base_path):
+        raise RuntimeError("base mdf2 不存在：%s" % base_path)
+
+    d, stem = posixpath.split(rel)
+    base_stem = stem[:-5] if stem.lower().endswith(".mdf2") else stem
+
+    tmp = os.path.join(nat, TEMP_DIR)
+    os.makedirs(tmp, exist_ok=True)
+
+    ts = _stamp()
+    out_file = os.path.join(tmp, "%s_edit_p%s.mdf2%s" % (base_stem, ts, MDF2_EXT))
+    with open(base_path, "rb") as f:
+        data = f.read()
+    with open(out_file, "wb") as f:
+        f.write(data)
+
+    mdf2_rel = "%s/%s_edit_p%s.mdf2" % (TEMP_DIR, base_stem, ts)
+    log("OK  mdf2 副本 : %s  (%d B)" % (mdf2_rel, len(data)))
+    return {"mdf2": mdf2_rel, "bytes": len(data)}
+
+
 def deploy(asset, game_root, base_mdf2, materials=None, keep=20, sync=False,
            log=print):
     """单资产便捷入口：把若干个槽都重指向**同一个**材质资产。
