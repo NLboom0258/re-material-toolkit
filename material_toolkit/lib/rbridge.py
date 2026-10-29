@@ -106,28 +106,41 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
     return p
 
 
-def set_param(go, mat, var, value, port=DEFAULT_PORT):
+def set_param(go, mat, var, value, idx=None, port=DEFAULT_PORT):
     """写一个参数。value 传字符串：float 用 "1.5"，float3 用 "x,y,z"。
 
     走 `/set3`（超集）：
       - float   -> REF 原生 setMaterialFloat
       - float3/4 -> 直写引擎内存 + 自动 flush（preFlush 激活 mgr + 版本号自增）
 
+    idx：mesh 组件索引。同名 GameObject 下可能有多个 mesh（如 pl0800 名下的分身/本体/头/发，
+    各自 mdf2 不同），不传则写全部同名 mesh。
+
     返回 {ok, touched, results:[{mesh, matIdx, matName, varIdx, type, before, after,
                                 via, preFlush, flush, err?}]}
     其中 via = "setMaterialFloat" / "mem+flush" / "mem-only"（mem-only 表示找不到
     可用来 flush 的 float 参数，画面不会刷新）。
     """
-    return _get("/set3", {"go": go, "mat": mat, "var": var, "value": value},
-                port=port, timeout=40.0)
+    return _get("/set3", {"go": go, "mat": mat, "var": var, "value": value,
+                          "i": idx}, port=port, timeout=40.0)
 
 
-def apply_slot(go, mat, var, value, port=DEFAULT_PORT):
+def apply_slot(go, mat, var, value, idx=None, port=DEFAULT_PORT):
     """set_param 的严格版：只要有一个 mesh 报错就抛异常。"""
-    r = set_param(go, mat, var, value, port=port)
+    r = set_param(go, mat, var, value, idx=idx, port=port)
     if not r.get("ok"):
         raise BridgeError(r.get("err") or "set 失败：%s" % (r,))
     bad = [x for x in (r.get("results") or []) if x.get("err")]
     if bad:
         raise BridgeError("; ".join("%s: %s" % (x.get("matName"), x["err"]) for x in bad))
     return r
+
+
+def material(go, action="info", mdf=None, idx=None, port=DEFAULT_PORT):
+    """独立 mdf2 预览：info / apply / restore。
+
+    apply  需要 mdf（相对 natives/x64、不带 .10 后缀的路径）
+    restore 换回首次 apply 时按 go#i 记录的原始 mdf2
+    """
+    return _get("/material", {"go": go, "action": action, "mdf": mdf, "i": idx},
+                port=port, timeout=60.0)

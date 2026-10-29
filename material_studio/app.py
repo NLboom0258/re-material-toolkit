@@ -3571,39 +3571,51 @@ class MaterialSystemPanel(QWidget):
             return
         go = self.ed_rb_filter.text().strip()
         try:
-            ms = rb.list_meshes(go=go, limit=60)
+            ms = rb.list_meshes(go=go, limit=120)
         except rb.BridgeError as e:
             self._rb_say("拉取失败: %s" % e)
             return
-        # 按 GameObject 名分组：一个模型可能拆成多个 mesh 组件（pl0800 就有两个）
-        groups = {}
-        for m in ms:
-            k = m.get("go") or "?"
-            g = groups.setdefault(k, {"n": 0, "mats": m.get("mats") or []})
-            g["n"] += 1
-        self._rb_meshes = sorted(groups.items())
+        # 不按 GameObject 名合并：同名下可能有多个 mesh，**各自 mdf2 不同**
+        # （pl0800 名下就有 分身/本体/头/发 四份不同 mdf2）
+        self._rb_meshes = ms
         self.lst_rb.blockSignals(True)
         self.lst_rb.clear()
-        for k, g in self._rb_meshes:
-            self.lst_rb.addItem("%s    (%d 槽 / %d 组件)" % (k, len(g["mats"]), g["n"]))
+        for m in ms:
+            self.lst_rb.addItem("%s   [%s]   %d 槽" % (
+                m.get("go") or "?", m.get("i"), m.get("matCount") or 0))
         self.lst_rb.blockSignals(False)
-        self._rb_say("列表: %d 个 GameObject，%d 个 mesh 组件" % (len(self._rb_meshes), len(ms)))
+        self._rb_say("列表: %d 个 mesh 组件" % len(ms))
 
-    def _rb_pick_mesh(self, row):
+    def _rb_pick_mesh(self, row, keep_iso=False):
         if row < 0 or row >= len(getattr(self, "_rb_meshes", [])):
             return
-        go = self._rb_meshes[row][0]
+        ent = self._rb_meshes[row]
+        go, idx = ent.get("go"), ent.get("i")
+        # 切目标时关掉预览开关（不自动 restore，避免误操作）。
+        # keep_iso=True 供 _rb_toggle_iso 换完 mdf2 后刷新参数表用。
+        chk = getattr(self, "chk_rb_iso", None)
+        if chk is not None and chk.isChecked() and not keep_iso:
+            chk.blockSignals(True)
+            chk.setChecked(False)
+            chk.blockSignals(False)
         self._rb_go = go
+        self._rb_mesh_i = idx
+        # 先更新 mdf 标签：即使下面读参数失败，也能看到当前挂的是哪份 mdf2
+        self._rb_update_mdf_label()
         try:
-            p = rb.list_params(go, limit=1)
+            p = rb.list_params(go, limit=32)
         except rb.BridgeError as e:
             self._rb_say("读参数失败: %s" % e)
             return
-        meshes = p.get("meshes") or []
-        if not meshes:
-            self._rb_say("该 GameObject 没有可读材质")
+        target = None
+        for mm in (p.get("meshes") or []):
+            if mm.get("i") == idx:
+                target = mm
+                break
+        if target is None:
+            self._rb_say("读不到 mesh [%s] 的参数" % idx)
             return
-        self._rb_mats = meshes[0].get("mats") or []
+        self._rb_mats = target.get("mats") or []
         self.cmb_rb_mat.blockSignals(True)
         self.cmb_rb_mat.clear()
         for i, m in enumerate(self._rb_mats):
@@ -3612,7 +3624,8 @@ class MaterialSystemPanel(QWidget):
         if self._rb_mats:
             self.cmb_rb_mat.setCurrentIndex(0)
             self._rb_pick_mat(0)
-        self._rb_say("mesh %s: %d 个材质" % (meshes[0].get("i"), len(self._rb_mats)))
+        self._rb_say("mesh [%s] %s: %d 个材质" % (idx, go, len(self._rb_mats)))
+        self._rb_update_mdf_label()
 
     def _rb_pick_mat(self, idx):
         mats = getattr(self, "_rb_mats", None) or []
@@ -3686,7 +3699,8 @@ class MaterialSystemPanel(QWidget):
         for name, val in pending.items():
             sval = val if isinstance(val, str) else ("%.6f" % float(val))
             try:
-                r = rb.apply_slot(self._rb_go, self._rb_matname, name, sval)
+                r = rb.apply_slot(self._rb_go, self._rb_matname, name, sval,
+                                  idx=getattr(self, "_rb_mesh_i", None))
                 res = r.get("results") or []
                 after = [x.get("after") for x in res]
                 via = next((x.get("via") for x in res if x.get("via")), "?")
@@ -3694,8 +3708,73 @@ class MaterialSystemPanel(QWidget):
             except rb.BridgeError as e:
                 self._rb_say("set %s 失败: %s" % (name, e))
 
+    # ---- 独立 mdf2 预览开关 --------------------------------------------
+    # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
+    #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
+    # 实测：同路径重载无效（引擎按路径缓存），必须换路径。
+    def _rb_update_mdf_label(self):
+        go, idx = getattr(self, "_rb_go", None), getattr(self, "_rb_mesh_i", None)
+        lbl = getattr(self, "lbl_rb_mdf", None)
+        if lbl is None:
+            return
+        if not go or idx is None:
+            lbl.setText("")
+            return
+        try:
+            d = rb.material(go, "info", idx=idx)
+            ms = d.get("meshes") or []
+            p = ms[0].get("path") if ms else None
+            lbl.setText("当前 mdf2: %s" % (p or "?"))
+        except rb.BridgeError:
+            lbl.setText("")
+
+    def _rb_toggle_iso(self, on):
+        go, idx = getattr(self, "_rb_go", None), getattr(self, "_rb_mesh_i", None)
+        if not go or idx is None:
+            self._rb_say("先选一个 mesh 再启用预览")
+            self.chk_rb_iso.blockSignals(True)
+            self.chk_rb_iso.setChecked(False)
+            self.chk_rb_iso.blockSignals(False)
+            return
+        try:
+            if on:
+                d = rb.material(go, "info", idx=idx)
+                ms = d.get("meshes") or []
+                if not ms:
+                    raise rb.BridgeError("读不到当前 mdf2（mesh 是否还在？）")
+                path = ms[0].get("path")
+                if not path:
+                    raise rb.BridgeError("mdf2 路径为空")
+                root = self.ed_pv_root.text().strip()
+                if not root:
+                    raise rb.BridgeError("先在「预览」页设置游戏根目录")
+                c = prev.clone_mdf2(root, path, log=self._rb_say)
+                d2 = rb.material(go, "apply", mdf=c["mdf2"], idx=idx)
+                if d2.get("err"):
+                    raise rb.BridgeError(d2["err"])
+                self._rb_iso_mdf = c["mdf2"]
+                self._rb_say("已切到独立 mdf2: %s" % c["mdf2"])
+            else:
+                d2 = rb.material(go, "restore", idx=idx)
+                if d2.get("err"):
+                    raise rb.BridgeError(d2["err"])
+                self._rb_iso_mdf = None
+                self._rb_say("已换回原 mdf2（参数已重置）")
+            # 换 mdf2 后材质参数块重建，刷新参数表
+            self._rb_pick_mesh(self.lst_rb.currentRow(), keep_iso=True)
+            self._rb_update_mdf_label()
+        except (rb.BridgeError, RuntimeError) as e:
+            self._rb_say("预览开关失败: %s" % e)
+            self.chk_rb_iso.blockSignals(True)
+            self.chk_rb_iso.setChecked(not on)
+            self.chk_rb_iso.blockSignals(False)
+
     def _wrap_rbridge(self):
-        """实时调参页：选 GameObject → 选材质 → 改参数（下一帧生效，重启恢复）。"""
+        """实时调参页：选 mesh → 选材质 → 改参数。
+
+        默认只改内存（下一帧生效，重启游戏恢复）。
+        勾选「启用预览」后换成独立 mdf2，取消勾选即重置。
+        """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
@@ -3711,6 +3790,21 @@ class MaterialSystemPanel(QWidget):
         b.clicked.connect(lambda: self._rb_check())
         top.addWidget(b)
         v.addLayout(top)
+
+        iso = QHBoxLayout()
+        self.chk_rb_iso = QCheckBox("启用预览（独立 mdf2）")
+        self.chk_rb_iso.setToolTip(
+            "勾选后：把当前 mesh 的 mdf2 换成一份内容相同、路径不同的副本；\n"
+            "调参只作用于新加载的参数块；取消勾选换回原 mdf2，\n"
+            "引擎重建参数块 = 一键恢复，不用重启游戏。\n\n"
+            "实测：同路径重载无效（引擎按路径缓存），必须换路径。")
+        self.chk_rb_iso.toggled.connect(self._rb_toggle_iso)
+        iso.addWidget(self.chk_rb_iso)
+        self.lbl_rb_mdf = QLabel("")
+        self.lbl_rb_mdf.setStyleSheet("color:#666")
+        self.lbl_rb_mdf.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        iso.addWidget(self.lbl_rb_mdf, 1)
+        v.addLayout(iso)
 
         f = QHBoxLayout()
         f.addWidget(QLabel("GameObject 过滤:"))
@@ -3761,6 +3855,8 @@ class MaterialSystemPanel(QWidget):
         self._rb_spins = {}
         self._rb_vec_spins = {}
         self._rb_go = None
+        self._rb_mesh_i = None
+        self._rb_iso_mdf = None
         self._rb_matname = None
         self._rb_pending = {}
         self._rb_timer = QTimer(self)
