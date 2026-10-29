@@ -256,14 +256,17 @@ def _referenced(idx):
     return used
 
 
-def prune(game_root, idx, keep_edit=2, keep_orig=1, log=None):
-    """删掉没被 index 引用、且超出「保留最近 N 个」的旧副本。
+def prune(game_root, idx, keep_edit=2, keep_orig=1, dry_run=True, log=None):
+    """找出可清理的旧副本（默认**只报告不删**）。
 
-    永远跳过 ``sessions.json`` 里登记的 edit / orig。
+    ⚠️ 实测教训：删掉一份「当前正挂在 mesh 上」的 mdf2，当时看起来没事
+    （引擎已加载进内存），但一旦触发重载（湿身变体切换 / 对象重建），
+    引擎读不到文件 → 默认方格材质 → 最终闪退。
+    所以默认 dry_run=True，且永远跳过 sessions.json 里登记的 edit / orig。
     """
     root = temp_root(game_root)
     used = _referenced(idx)
-    removed = []
+    candidates = []
 
     def _rel(abs_path):
         return rel_to_natives(game_root, abs_path)
@@ -288,9 +291,11 @@ def prune(game_root, idx, keep_edit=2, keep_orig=1, log=None):
                     rel = _rel(abs_p)
                     if rel and rel.lower() in used:
                         continue
+                    candidates.append(rel)
+                    if dry_run:
+                        continue
                     try:
                         os.remove(abs_p)
-                        removed.append(rel)
                     except OSError:
                         pass
 
@@ -310,15 +315,17 @@ def prune(game_root, idx, keep_edit=2, keep_orig=1, log=None):
             rel = _rel(abs_p)
             if rel and rel.lower() in used:
                 continue
+            candidates.append(rel)
+            if dry_run:
+                continue
             try:
                 os.remove(abs_p)
-                removed.append(rel)
             except OSError:
                 pass
 
-    if log and removed:
-        log("清理 %d 个旧副本" % len(removed))
-    return removed
+    if log:
+        log("%s %d 个旧副本" % ("可清理" if dry_run else "已删除", len(candidates)))
+    return candidates
 
 
 def exists_edit(game_root, rel):

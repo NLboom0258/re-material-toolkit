@@ -136,11 +136,14 @@ def apply_slot(go, mat, var, value, idx=None, port=DEFAULT_PORT):
     return r
 
 
-def material(go, action="info", mdf=None, idx=None, port=DEFAULT_PORT):
-    """独立 mdf2 预览：info / apply / restore。
+def material(go, action="info", mdf=None, idx=None, keep=None, port=DEFAULT_PORT):
+    """独立 mdf2 预览：info / apply / restore / keep。
 
     apply  需要 mdf（相对 natives/x64、不带 .10 后缀的路径）
-    restore 换回首次 apply 时按 go#i 记录的原始 mdf2
+    keep   仅 apply 用：是否每帧保持（None = 用服务端默认，即保持）。
+           游戏会主动换 mdf2（湿身/燃烧变体），保持后永远以我们指定的为准。
+    restore 换回首次 apply 时按 go#i 记录的原始 mdf2，并解除保持
     """
-    return _get("/material", {"go": go, "action": action, "mdf": mdf, "i": idx},
+    return _get("/material", {"go": go, "action": action, "mdf": mdf, "i": idx,
+                              "keep": None if keep is None else (1 if keep else 0)},
                 port=port, timeout=60.0)
