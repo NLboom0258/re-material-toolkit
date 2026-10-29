@@ -3856,7 +3856,11 @@ class MaterialSystemPanel(QWidget):
     #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
     # 实测：同路径重载无效（引擎按路径缓存），必须换路径。
     def _rb_update_mdf_label(self):
-        """顶部只显示**当前行**对象的 mdf2（按 addr 查，而不是按索引）。"""
+        """顶部只显示**当前行**对象的 mdf2。
+
+        预览中的行不调 get_Material（set_Material 后引擎要过一会儿才更新它的返回值，
+        刚挂上时读到的还是旧路径），直接按登记的 edit 路径显示。
+        """
         lbl = getattr(self, "lbl_rb_mdf", None)
         if lbl is None:
             return
@@ -3864,6 +3868,18 @@ class MaterialSystemPanel(QWidget):
         if ent is None:
             lbl.setText("")
             return
+        root = self._rb_root()
+        prev = ent.get("prev")
+        if prev and root:
+            doc = ps.load_index(root)
+            mh = ps.mesh_hash(ent.get("meshPath") or "")
+            ed = ps.norm_rel(((ps.get_mdf2(doc, mh, prev) or {}).get("edit")) or "")
+            if ed:
+                parts = ed[len(ps.TEMP_DIR) + 1:].split("/")
+                tag = ("mesh %s · mdf2 %s" % (parts[1], parts[2].split("_p")[0])
+                       if len(parts) >= 3 else "mdf2 %s" % prev)
+                lbl.setText("%s   [预览中 · %s]" % (ed, tag))
+                return
         p = None
         try:
             d = rb.material(ent.get("go"), "info", addr=ent.get("addr"))
