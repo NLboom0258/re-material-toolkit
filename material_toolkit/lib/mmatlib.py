@@ -66,6 +66,8 @@ MMTR_DIR = "mmtr"                     # 位于 materialTemp 下
 LIB_VERSION = 1
 
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# 产物 stem 的尾部：`_p<YYYYmmdd_HHMMSS>` 可选跟 `_<序号>`
+_RE_STEM = re.compile(r"_p(\d{8}_\d{6})(?:_(\d+))?$")
 
 
 def h8(text):
@@ -80,22 +82,86 @@ def safe_name(name, fallback="Material"):
     return s or fallback
 
 
-def stamp():
-    """文件名/登记用的时间戳（**带毫秒**）。
-
-    只到秒的话，同一秒内连续编译两次会得到相同前缀：排序分不出先后，
-    ``prune(keep_per_asset=1)`` 可能把新的当成旧的保留。
-    """
-    t = time.time()
-    return (time.strftime("%Y%m%d_%H%M%S", time.localtime(t))
-            + "_%03d" % int((t % 1) * 1000))
-
-
 def now_iso():
-    """登记项的 createdAt（同样带毫秒，保证可排序）。"""
+    """登记项的 createdAt（仅用于显示；排序看文件 stem，不看它）。"""
     t = time.time()
     return (time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
             + ".%03d" % int((t % 1) * 1000))
+
+
+def _stem_of(rel):
+    """``materialTemp/mmtr/X_p20261030_074342_1.mmtr`` → ``X_p20261030_074342_1``"""
+    s = ps.norm_rel(rel or "")
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    if s.lower().endswith(".mmtr"):
+        s = s[:-5]
+    return s
+
+
+def _seq_of(rel):
+    """stem → ``(时间戳, 序号)``，用于排序与判定“最后一版”。
+
+    序号按**整数**比，所以 ``_10 > _9``；没有序号时当 0。
+    """
+    m = _RE_STEM.search(_stem_of(rel))
+    if not m:
+        return ("", 0)
+    return (m.group(1), int(m.group(2) or 0))
+
+
+def _used_stems(game_root, doc):
+    """已占用的 stem（磁盘文件名 + 登记簿，小写）。"""
+    out = set()
+    d = mmtr_dir_abs(game_root)
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            low = fn.lower()
+            if ".mmtr" in low:
+                out.add(low.split(".mmtr")[0])
+    for it in (doc.get("items") or {}).values():
+        st = _stem_of(it.get("rel"))
+        if st:
+            out.add(st.lower())
+    return out
+
+
+def unique_stem(game_root, doc, asset_name):
+    """生成唯一且**单调递增**的产物 stem（文件名不带扩展名）。
+
+    为什么要索引而不是只有时间戳：引擎按路径缓存，每次编译必须换新路径；
+    但同一秒内连续编译两次会撞同一个时间戳，需要靠 ``_1`` / ``_2`` 区分。
+    序号用整数比较，所以 ``_10`` 大于 ``_9``（不是字符串比较）。
+
+    **时钟回拨**：若当前时间早于该资产最后一版（NTP 修正 / 手动改时间），
+    仍以“当前”为基准会产生一个排在旧版**之前**的名字 —— 那样“最新”就不再是最大值，
+    prune / active 会取错。所以此时退回用最后一版的时间戳作基准，再靠序号递增。
+    """
+    name = safe_name(asset_name)
+    used = _used_stems(game_root, doc)
+    now = time.strftime("%Y%m%d_%H%M%S")
+
+    last_ts, _last_seq = "", -1
+    for it in (doc.get("items") or {}).values():
+        if (it.get("assetName") or "") != name:
+            continue
+        ts, seq = _seq_of(it.get("rel"))
+        if (ts, seq) > (last_ts, _last_seq):
+            last_ts, _last_seq = ts, seq
+    for s in used:                       # 磁盘上的孤儿也要算进去
+        if s.startswith(name.lower() + "_p"):
+            ts, seq = _seq_of(s + ".mmtr")
+            if (ts, seq) > (last_ts, _last_seq):
+                last_ts, _last_seq = ts, seq
+
+    ts = max(now, last_ts or now)         # 时钟回拨 → 以最后一版为基准
+    base = "%s_p%s" % (name, ts)
+    if base.lower() not in used:
+        return base
+    n = 1
+    while ("%s_%d" % (base, n)).lower() in used:
+        n += 1
+    return "%s_%d" % (base, n)
 
 
 def lib_path(game_root):
@@ -172,7 +238,8 @@ def register(game_root, asset_name, data, asset_path=None, shading=None,
     name = safe_name(asset_name)
     d = mmtr_dir_abs(game_root)
     os.makedirs(d, exist_ok=True)
-    stem = "%s_p%s" % (name, stamp())
+    doc = load(game_root)
+    stem = unique_stem(game_root, doc, name)
     fn = stem + ".mmtr" + MMTR_VER
     p = os.path.join(d, fn)
     with open(p, "wb") as f:
@@ -210,7 +277,8 @@ def items_of(game_root, doc=None):
     for it in (doc.get("items") or {}).values():
         out.setdefault(it.get("assetName") or "?", []).append(it)
     for v in out.values():
-        v.sort(key=lambda x: x.get("createdAt") or "", reverse=True)
+        # 按 stem 的 (时间戳, 整数序号) 倒序：_10 要排到 _9 前面（不能字符串比）
+        v.sort(key=lambda x: _seq_of(x.get("rel")), reverse=True)
     return out
 
 
