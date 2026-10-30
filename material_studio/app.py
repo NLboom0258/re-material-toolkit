@@ -3416,7 +3416,11 @@ class MaterialSystemPanel(QWidget):
                 tbl.setEnabled(False)
 
     def _rb_ping_tick(self):
-        """每 1s 探活一次（后台线程，UI 永不阻塞）。"""
+        """每 1s 探活一次（后台线程，UI 永不阻塞）。
+
+        只做“确认还活着”；一旦失败就**退回未连接**（停轮询、按钮变回「连接」），
+        不做自动重连 —— 重连必须用户再点一次。
+        """
         if not self._rb_connected:
             return
         if self._rb_ping_fut is not None and not self._rb_ping_fut.done():
@@ -3425,17 +3429,13 @@ class MaterialSystemPanel(QWidget):
             fut, self._rb_ping_fut = self._rb_ping_fut, None
             try:
                 d = fut.result()
-            except Exception:  # noqa: BLE001 —— 连不上就是常态，不算错误
+            except Exception:  # noqa: BLE001 —— 连不上就是常态
                 d = None
-            ok = bool(d and d.get("ok"))
-            if ok != self._rb_link_ok:
-                self._rb_set_link(ok, self._rb_detail(d))
-                self._rb_say("连接已恢复" if ok else "连接已断开（游戏退出 / 服务已停止）")
-                if ok:
-                    # 游戏重启后对象地址全变了，必须重拉；延到下一轮事件，避免在探活回调里做长请求
-                    QTimer.singleShot(0, self._rb_refresh)
-                else:
-                    self._rb_clear_list()
+            if not (d and d.get("ok")):
+                self._rb_say("连接已断开（游戏退出 / 服务已停止）")
+                self._rb_drop_link()
+                return
+            self._rb_set_link(True, self._rb_detail(d))
         try:
             self._rb_ping_fut = self._rb_pool.submit(rb.ping, self._rb_port(), 1.2)
         except RuntimeError:          # 线程池已关闭（程序退出中）
@@ -3481,7 +3481,7 @@ class MaterialSystemPanel(QWidget):
             self._rb_disconnect(say=False)
             return
         self._rb_ping_timer.start()
-        # 游戏根没填时顺手补上（服务知道自己的根目录，用户不用手填）
+        # 游戏根没填时补上（/paths 只读进程信息，不碰引擎，安全）
         if not self._rb_root():
             try:
                 g = rb.paths().get("gameRoot")
@@ -3490,17 +3490,24 @@ class MaterialSystemPanel(QWidget):
             if g:
                 self.ed_rb_root.setText(os.path.normpath(g))
                 self._cfg_save()
-        self._rb_refresh()
+        # 不自动刷新列表：连接只做一次 ping。拉场景（/identity）是引擎调用，
+        # 由用户点「刷新列表」单独触发，出问题也好定位。
+        self._rb_say("已连接。点「刷新列表」拉取场景对象。")
+        return
 
     def _rb_disconnect(self, say=True):
         was = self._rb_connected
+        self._rb_drop_link()
+        if say and was:
+            self._rb_say("已断开连接（游戏内已挂载的预览仍会继续生效）")
+
+    def _rb_drop_link(self):
+        """退回未连接：停轮询、按钮变回「连接」、清空列表。"""
         self._rb_connected = False
         self._rb_ping_timer.stop()
         self.btn_rb_conn.setText("连接")
         self._rb_set_link(False, "未连接")
         self._rb_clear_list()
-        if say and was:
-            self._rb_say("已断开连接（游戏内已挂载的预览仍会继续生效）")
 
     def _rb_clear_list(self):
         self._rb_building = True
