@@ -20,8 +20,12 @@ except ImportError:  # 直接运行本文件时
 
 
 def sync_mdf2(mdf2: Mdf2, mmtr: Mmtr, cbuffer: str = "UserMaterial",
-              prune: bool = False):
-    """让 mdf2 每个材质的参数集合与 mmtr 的指定 cbuffer 成员一致(原地修改 mdf2)。
+              prune: bool = False, materials=None):
+    """让 mdf2 的指定材质与 mmtr 的指定 cbuffer 成员一致(原地修改 mdf2)。
+
+    materials：None = 全部材质（旧行为）；str = 单个材质名；list/tuple/set = 这几个。
+    为什么需要它：换母材质时通常只换**一个槽**，如果拿该 mmtr 去对齐全部材质，
+    其它槽的参数集会被错误重写（它们用的是另一个 mmtr）。
 
     返回 (added, pruned, report):
       added  = 新增参数条目总数;
@@ -34,9 +38,18 @@ def sync_mdf2(mdf2: Mdf2, mmtr: Mmtr, cbuffer: str = "UserMaterial",
     off_by_name = {p.name: p for p in members}
     names_in_mmtr = set(off_by_name)
 
+    targets = mdf2.materials
+    if materials is not None:
+        want = {materials} if isinstance(materials, str) else set(materials)
+        targets = [m for m in mdf2.materials if m.name in want]
+        missing = want - {m.name for m in mdf2.materials}
+        if missing:
+            # 早失败：静默什么都不做最容易让人误判“同步成功”
+            raise ValueError("material(s) not found in mdf2: %s" % ", ".join(sorted(missing)))
+
     added = pruned = 0
     report = []
-    for mat in mdf2.materials:
+    for mat in targets:
         # 1. 可选: 删除 mmtr 中不存在的参数
         if prune:
             keep = []

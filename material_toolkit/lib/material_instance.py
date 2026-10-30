@@ -63,7 +63,11 @@ def from_mmtr(mmtr_bytes, mmtr_path, material_name, shading_type="Standard",
 
 def repoint(mdf2, material_name, mmtr_path, mmtr_bytes=None, cbuffer="UserMaterial",
             sync=True):
-    """把 mdf2 里某材质的 master 改指到 mmtr_path; 可选按 mmtr 同步参数。返回 mdf2。"""
+    """把 mdf2 里某材质的 master 改指到 mmtr_path; 可选按 mmtr 同步参数。返回 mdf2。
+
+    注意 sync 只作用于**这个材质**：其它槽用的是别的 mmtr，不能被本次目标 mmtr 的
+    参数表重写（否则它们的参数集会被打乱）。
+    """
     mat = mdf2.get_material(material_name)
     if mat is None:
         raise ValueError("material %r not found" % material_name)
@@ -71,5 +75,5 @@ def repoint(mdf2, material_name, mmtr_path, mmtr_bytes=None, cbuffer="UserMateri
     if sync and mmtr_bytes is not None:
         from .mmtr import Mmtr
         from .sync import sync_mdf2
-        sync_mdf2(mdf2, Mmtr.from_bytes(mmtr_bytes), cbuffer)
+        sync_mdf2(mdf2, Mmtr.from_bytes(mmtr_bytes), cbuffer, materials=material_name)
     return mdf2
