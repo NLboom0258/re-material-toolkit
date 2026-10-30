@@ -264,12 +264,46 @@ def mdf2_abs(game_root, mdf_rel, extra_roots=None):
     return first
 
 
-def new_edit_rel(mh, dh, ts=None):
-    return posixpath.join(TEMP_DIR, "edit", mh, "%s_p%s.mdf2" % (dh, ts or _stamp()))
+# 带序号的形式（同秒多次产出时用）：X_p<YYYYmmdd_HHMMSS>_N.mdf2
+_REL_SEQ_RE = re.compile(r"_p(\d{8}_\d{6})(?:_(\d+))?\.mdf2$")
 
 
-def new_orig_rel(dh, ts=None):
-    return posixpath.join(TEMP_DIR, "orig", "%s_p%s.mdf2" % (dh, ts or _stamp()))
+def _unique_rel(game_root, rel):
+    """若 rel 在磁盘上已存在，追加 _1 / _2 …（序号按整数比，_10 > _9）。
+
+    为什么需要：时间戳只到秒，同一秒内连续产出（改属性 → 再改 → 再改）
+    会拿到同一个路径，后一次直接覆盖前一次 —— 而前一次可能正挂在 mesh 上
+    （引擎已加载进内存，磁盘被覆盖不会立即出问题，但下次重载就读到错内容）。
+    与 mmatlib.unique_stem 同一个思路。
+    """
+    if not game_root or not rel:
+        return rel
+    if not os.path.exists(rel_to_abs(game_root, rel)):
+        return rel
+    m = _REL_SEQ_RE.search(rel)
+    if not m:
+        # 不认识的形式（手写的 ts）：直接补一个时间后缀
+        return rel[:-len(".mdf2")] + "_" + _stamp() + ".mdf2" if rel.endswith(".mdf2") else rel + "_" + _stamp()
+    ts = m.group(1)
+    i = int(m.group(2) or 0) + 1
+    head = rel[:m.start()]
+    while True:
+        cand = "%s_p%s_%d.mdf2" % (head, ts, i)
+        if not os.path.exists(rel_to_abs(game_root, cand)):
+            return cand
+        i += 1
+
+
+def new_edit_rel(mh, dh, ts=None, game_root=None):
+    """新的工作副本路径（不带 `.10`）。给 game_root 时保证磁盘上不重名。"""
+    rel = posixpath.join(TEMP_DIR, "edit", mh, "%s_p%s.mdf2" % (dh, ts or _stamp()))
+    return _unique_rel(game_root, rel)
+
+
+def new_orig_rel(dh, ts=None, game_root=None):
+    """新的重置副本路径（不带 `.10`）。给 game_root 时保证磁盘上不重名。"""
+    rel = posixpath.join(TEMP_DIR, "orig", "%s_p%s.mdf2" % (dh, ts or _stamp()))
+    return _unique_rel(game_root, rel)
 
 
 def parse_temp_rel(rel):
@@ -364,7 +398,7 @@ def create_edit(game_root, mh, dh, base_mdf2, log=None):
     相对路径不带扩展名，引擎自己补。
     """
     src = ensure_mdf2(game_root, base_mdf2, log=log)
-    rel = new_edit_rel(mh, dh)
+    rel = new_edit_rel(mh, dh, game_root=game_root)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
     if log:
@@ -375,7 +409,7 @@ def create_edit(game_root, mh, dh, base_mdf2, log=None):
 def create_orig(game_root, dh, base_mdf2, log=None):
     """新建一份 orig 副本（重置用，路径必须全新）。"""
     src = ensure_mdf2(game_root, base_mdf2, log=log)
-    rel = new_orig_rel(dh)
+    rel = new_orig_rel(dh, game_root=game_root)
     dst = rel_to_abs(game_root, rel)
     n = _copy(src, dst)
     if log:
