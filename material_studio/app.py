@@ -71,6 +71,8 @@ from material_toolkit.lib import preview as prev  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
+from material_toolkit.lib import mdf2 as mdf2lib  # noqa: E402
+from material_toolkit.lib import mat_attrs as mattr  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -3932,6 +3934,76 @@ class MaterialSystemPanel(QWidget):
     # 流程：内存里的改动（_rb_edits） → 原地覆盖进工作副本 → 换全新路径让引擎重载
     #       → 所有共用该副本的对象一起切过去 → 更新 sessions.json → 删旧文件
     # 为什么必须换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重新加载（§13.4）。
+    # ---- 共用：关联对象查找 / 切换副本 -----------------------------------
+    def _rb_attach_points(self, ent, edit_rel):
+        """找出所有挂在 edit_rel 这份副本上的对象。
+
+        返回 ``{归一化地址: (原始地址, goName)}``。
+        为什么要找多个：同一模型的多个实例（或同一 mdf2 被多个 mesh 使用）
+        都可能挂着同一份文件，产出新副本后必须一起切过去，否则旧文件不能删。
+        """
+        addr_go = {}
+        try:
+            hd = rb.holds().get("holdDetail") or []
+        except rb.BridgeError as ex:
+            self._rb_say("读 holds 失败（%s），只处理当前对象" % ex)
+            hd = []
+        low = ps.norm_rel(edit_rel).lower()
+        for h in hd:
+            raw = h.get("addr")
+            k = _rb_addr_key(raw)
+            if not k:
+                continue
+            if ps.norm_rel(h.get("wantPath") or "").lower() == low:
+                addr_go[k] = (raw, h.get("go") or ent.get("go"))
+        if not addr_go:
+            addr_go[_rb_addr_key(ent.get("addr"))] = (ent.get("addr"), ent.get("go"))
+        return addr_go
+
+    def _rb_switch_all_to(self, root, mh, dh, edit_rel, new_rel, addr_go):
+        """把挂在旧副本上的对象全部切到新副本 + 更新登记 + 删旧文件。
+
+        返回 ``(moved_keys, failed_msgs)``。moved 为空时不改登记也不删旧文件
+        （否则会把还在用的文件删掉）。
+        """
+        doc = ps.load_index(root)
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        moved, failed = [], []
+        for k, (raw, g) in addr_go.items():
+            try:
+                d = rb.material(g, "apply", mdf=new_rel, addr=raw, keep=True)
+            except rb.BridgeError as ex:
+                failed.append("%s: %s" % (_rb_addr_short(k), ex))
+                continue
+            ms = d.get("meshes") or []
+            if d.get("err") or not ms or not ms[0].get("ok"):
+                why = d.get("err") or (ms[0].get("err") if ms else "无命中")
+                failed.append("%s: %s" % (_rb_addr_short(k), why))
+            else:
+                moved.append(k)
+
+        if not moved:
+            return moved, failed
+
+        ps.upsert_mdf2(doc, mh, dh,
+                       e.get("originalMdf2") or e.get("baseMdf2") or "",
+                       e.get("baseMdf2") or "",
+                       edit_rel=new_rel)
+        # 同一条链上可能有多条登记（湿身/正常各登过一次），全部改到新路径，
+        # 否则会留下指向旧文件的死引用。
+        fixed = ps.update_edit_paths(doc, edit_rel, new_rel)
+        fixed += ps.heal_missing_edits(root, doc, mh, new_rel)
+        if len(fixed) > 1:
+            self._rb_say("同步了 %d 条登记到新副本" % len(fixed))
+        ps.save_index(root, doc, log=self._rb_say)
+        # 旧文件此时已无 mesh 引用
+        try:
+            os.remove(ps.rel_to_abs(root, edit_rel))
+            self._rb_say("已删除旧副本: %s" % edit_rel)
+        except OSError as ex:
+            self._rb_say("旧副本删除失败（可忽略）: %s" % ex)
+        return moved, failed
+
     def _rb_save_to_mdf2(self):
         """把本会话改过的参数写进工作副本（新路径），并让游戏重载。"""
         ent = self._rb_cur_ent()
@@ -3954,25 +4026,8 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("保存：登记的工作副本不存在（%s）" % (edit_rel or "未登记"))
             return
 
-        # 谁在用这份副本：holds 里 wantPath 相同的对象（可能多个，共用同一模型的多个实例）
-        # key = 归一化地址（holds 不带 0x、identity 带），value = (原始地址, go)
-        addr_go = {}
-        try:
-            hd = rb.holds().get("holdDetail") or []
-        except rb.BridgeError as ex:
-            self._rb_say("保存：读 holds 失败（%s），只处理当前对象" % ex)
-            hd = []
-        for h in hd:
-            raw = h.get("addr")
-            k = _rb_addr_key(raw)
-            if not k:
-                continue
-            if ps.norm_rel(h.get("wantPath") or "").lower() == edit_rel.lower():
-                addr_go[k] = (raw, h.get("go") or ent.get("go"))
-        if not addr_go:
-            addr_go[_rb_addr_key(ent.get("addr"))] = (ent.get("addr"), ent.get("go"))
-
-        # 合并改动（同名参数后写覆盖先写）
+        # 谁在用这份副本 + 合并改动（同名参数后写覆盖先写）
+        addr_go = self._rb_attach_points(ent, edit_rel)
         merged = {}
         for k in addr_go:
             for mat, props in (self._rb_edits.get(k) or {}).items():
@@ -3995,39 +4050,8 @@ class MaterialSystemPanel(QWidget):
         new_rel = r["rel"]
 
         # 所有共用该副本的对象切到新文件（keep 保持）
-        moved, failed = [], []
-        for k, (raw, g) in addr_go.items():
-            try:
-                d = rb.material(g, "apply", mdf=new_rel, addr=raw, keep=True)
-            except rb.BridgeError as ex:
-                failed.append("%s: %s" % (_rb_addr_short(k), ex))
-                continue
-            ms = d.get("meshes") or []
-            if d.get("err") or not ms or not ms[0].get("ok"):
-                why = d.get("err") or (ms[0].get("err") if ms else "无命中")
-                failed.append("%s: %s" % (_rb_addr_short(k), why))
-            else:
-                moved.append(k)
-
+        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, new_rel, addr_go)
         if moved:
-            ps.upsert_mdf2(doc, mh, dh,
-                           e.get("originalMdf2") or e.get("baseMdf2") or "",
-                           e.get("baseMdf2") or "",
-                           edit_rel=new_rel)
-            # 同一条链上可能有多条登记（湿身/正常各登过一次），全部改到新路径，
-            # 否则会留下指向刚被删掉的旧文件的死引用。
-            fixed = ps.update_edit_paths(doc, edit_rel, new_rel)
-            # 同一模型下其它指向已删文件的登记也一并修好（湿身/正常各登一次的历史遗留）
-            fixed += ps.heal_missing_edits(root, doc, mh, new_rel)
-            if len(fixed) > 1:
-                self._rb_say("同步了 %d 条登记到新副本" % len(fixed))
-            ps.save_index(root, doc, log=self._rb_say)
-            # 旧文件此时已无 mesh 引用（都切到 new_rel 了）
-            try:
-                os.remove(ps.rel_to_abs(root, edit_rel))
-                self._rb_say("已删除旧副本: %s" % edit_rel)
-            except OSError as ex:
-                self._rb_say("旧副本删除失败（可忽略）: %s" % ex)
             for a in moved:
                 self._rb_edits.pop(a, None)
             self._rb_iso_mdf = new_rel
@@ -4043,6 +4067,99 @@ class MaterialSystemPanel(QWidget):
             msg += "\n\n未切换成功：\n" + "\n".join(failed)
         self._rb_say(msg.replace("\n", "  "))
         QMessageBox.information(self, "保存到 mdf2", msg)
+
+    # ---- 材质属性：换母材质 / 改 flags -----------------------------------
+    # 三者（mmtr 引用 / 参数集 / flags）必须**一次 save 一起做**：
+    #   - 换母材质会重排参数集（数量/offset），必须走 Mdf2.save()
+    #   - flags 在材质记录里，同样只能随 save 写
+    #   - 重载会丢内存里调好的值，所以把本会话改过的参数一并写进去
+    # 实测依据见 analysis/runtime_preview_plan.md §21.6 / §22。
+    def _rb_edit_attrs(self):
+        """打开材质属性对话框（母材质 + flags），应用后生成新副本并重载。"""
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            self._rb_say("材质属性：先勾选列表里的对象（改属性需要工作副本）")
+            return
+        matname = getattr(self, "_rb_matname", None)
+        if not matname:
+            self._rb_say("材质属性：先在右侧选一个材质")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("材质属性：未配置游戏根目录")
+            return
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent.get("prev")
+        e = ps.get_mdf2(ps.load_index(root), mh, dh) or {}
+        edit_rel = ps.norm_rel(e.get("edit") or "")
+        if not edit_rel or not ps.exists_edit(root, edit_rel):
+            self._rb_say("材质属性：工作副本不存在（%s）" % (edit_rel or "未登记"))
+            return
+
+        # 从**文件**读当前状态（不是内存：内存里的 flags 无法读取）
+        try:
+            d = mdf2lib.Mdf2.load(ps.rel_to_abs(root, edit_rel))
+            m = d.get_material(matname)
+            if m is None:
+                self._rb_say("材质属性：工作副本里没有材质 %s" % matname)
+                return
+            cur = {"mmtr": m.mmtr_path, "flags": m.flags_dict(),
+                   "flags_raw": m.flags & 0xFFFFFFFF}
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("材质属性：读工作副本失败（%s）" % ex)
+            return
+
+        opts = mattr.list_mmtr_options(root)
+        dlg = MaterialAttrsDialog(self, matname, cur, opts)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        ch = dlg.changes()
+        if not ch:
+            self._rb_say("材质属性：没有改动")
+            return
+
+        # 带上本会话改过的参数值（否则重载后回到文件里的旧值）
+        edits = {}
+        for k in self._rb_attach_points(ent, edit_rel):
+            edits.update((self._rb_edits.get(k) or {}).get(matname) or {})
+        if edits:
+            ch["params"] = edits
+            self._rb_say("一并写入 %d 个改过的参数值" % len(edits))
+
+        try:
+            r = mattr.apply_attrs(root, edit_rel, {matname: ch}, log=self._rb_say)
+        except mattr.AttrError as ex:
+            self._rb_say("材质属性失败: %s" % ex)
+            QMessageBox.warning(self, "材质属性失败", str(ex))
+            return
+        if not r.get("changed"):
+            self._rb_say("材质属性：值没有变化")
+            return
+
+        # 所有挂旧副本的对象切到新文件
+        addr_go = self._rb_attach_points(ent, edit_rel)
+        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, r["rel"], addr_go)
+        for a in moved:
+            self._rb_edits.pop(a, None)
+        if moved:
+            self._rb_iso_mdf = r["rel"]
+
+        self._rb_update_mdf_label()
+        if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
+            # 重载后参数集可能变了（换母材质），重新读
+            self._rb_pick_mat(self.cmb_rb_mat.currentIndex())
+
+        msg = "新副本：\n%s\n\n切到新副本的对象：%d 个" % (r["rel"], len(moved))
+        rep = r.get("report") or []
+        if rep:
+            msg += "\n\n" + "\n".join(rep)
+        if failed:
+            msg += "\n\n未切换成功：\n" + "\n".join(failed)
+        if ch.get("mmtr"):
+            msg += ("\n\n提示：换母材质后新增参数默认 0"
+                    "（比如 Alpha=0 会让材质变透明），请到参数表里调。")
+        self._rb_say(msg.replace("\n", "  "))
+        QMessageBox.information(self, "材质属性", msg)
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
@@ -4426,6 +4543,15 @@ class MaterialSystemPanel(QWidget):
             "只写「改过的参数」（同名参数后写覆盖先写），未改的保持文件原值。\n"
             "所有共用该副本的对象会一起切到新文件。")
         b.clicked.connect(self._rb_save_to_mdf2)
+        iso.addWidget(b)
+        b = QPushButton("材质属性…")
+        b.setToolTip(
+            "换母材质 / 改 flags（阴影、alpha test、双面、顶点着色器…）。\n\n"
+            "换母材质会按新 mmtr 的参数表重建该材质的参数集：\n"
+            "  同名参数保留值、新增参数默认 0、旧独有参数丢弃。\n"
+            "应用后生成新路径副本并让所有关联对象重载（会短暂闪一下）。\n\n"
+            "母材质只能选「编译到预览目录」产出的 mmtr（登记在 materials.json）。")
+        b.clicked.connect(self._rb_edit_attrs)
         iso.addWidget(b)
         v.addLayout(iso)
 
@@ -6089,6 +6215,155 @@ def main(argv):
         return 0
     win.show()
     return app.exec()
+
+
+# ---------------------------------------------------------------- 材质属性对话框
+
+# 常用 flags 的中文说明（悬停提示）。没列的只有英文名 + bit 号。
+_FLAG_TIPS = {
+    "BaseTwoSideEnable": "双面渲染（基础位）：背面也绘制",
+    "BaseAlphaTestEnable": "alpha 测试（基础位）：低于阈值的像素丢弃（镂空）",
+    "ShadowCastDisable": "关闭阴影投射（半透明材质常用）",
+    "VertexShaderUsed": "使用材质自定义顶点着色器（需 mmtr 有对应 VS 变体）",
+    "EmissiveUsed": "使用自发光",
+    "TessellationEnable": "启用细分（配合 TessFactor）",
+    "EnableIgnoreDepth": "忽略深度测试",
+    "AlphaMaskUsed": "使用 alpha 遮罩（DMC5 的 Toon 材质全部开着）",
+    "ForcedTwoSideEnable": "强制双面（不论其它条件）",
+    "TwoSideEnable": "双面渲染",
+    "TransparentZPostPassEnable": "透明材质参与 Z 后处理 pass",
+    "TessFactor": "细分因子（5 位）",
+    "PhongFactor": "Phong 高光强度（8 位）",
+    "RoughTransparentEnable": "粗糙半透明",
+    "ForcedAlphaTestEnable": "强制 alpha 测试",
+    "AlphaTestEnable": "alpha 测试（镂空）",
+    "SSSProfileUsed": "使用 SSS 预设（需额外参数）",
+    "EnableStencilPriority": "启用模板优先级",
+    "RequireDualQuaternion": "要求双四元数蒙皮",
+    "PixelDepthOffsetUsed": "使用像素深度偏移",
+    "NoRayTracing": "不参与光追",
+}
+
+
+class MaterialAttrsDialog(QDialog):
+    """材质属性：母材质 + flags。
+
+    只负责收集用户改动（``changes()``）；写盘、切副本、重载由
+    ``_rb_edit_attrs`` 负责。
+    """
+
+    def __init__(self, parent, mat_name, cur, options):
+        super().__init__(parent)
+        self.setWindowTitle("材质属性 - %s" % mat_name)
+        self.resize(660, 580)
+        self._cur = cur
+        self._w = {}
+
+        v = QVBoxLayout(self)
+
+        head = QLabel("材质：<b>%s</b>　　当前 flags = 0x%08X"
+                      % (mat_name, cur.get("flags_raw") or 0))
+        head.setTextFormat(Qt.RichText)
+        v.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("母材质:"))
+        self.cmb = NoWheelComboBox()
+        self.cmb.addItem("%s（当前，不改）" % (cur.get("mmtr") or "(空)"), "")
+        for o in options:
+            self.cmb.addItem("%s  ·  %s  ·  %d 参数"
+                             % (o["assetName"], os.path.basename(o["rel"]),
+                                o.get("nParams") or 0),
+                             o["rel"])
+        self.cmb.setToolTip(
+            "只有「编译到预览目录」产出的 mmtr 可选（登记在 materialTemp/materials.json）。\n"
+            "选新的一项 = 换母材质：按它的 UserMaterial 重建该材质的参数集。")
+        row.addWidget(self.cmb, 1)
+        v.addLayout(row)
+        if not options:
+            tip = QLabel("母材质库为空 —— 先到「材质系统」页点「编译到预览目录」。")
+            tip.setStyleSheet("color:#b00020")
+            tip.setWordWrap(True)
+            v.addWidget(tip)
+
+        box = QGroupBox("flags（渲染路径开关；不改 shader 变体，只改管线状态）")
+        g = QGridLayout(box)
+        g.setVerticalSpacing(4)
+        col = rowi = 0
+        for name, width, bit in mdf2lib.FLAG_BIT_OFFSETS:
+            cur_v = cur["flags"].get(name)
+            if width == 1:
+                w = QCheckBox("%s  (bit %d)" % (name, bit))
+                w.setChecked(bool(cur_v))
+                w.toggled.connect(self._refresh_flags_label)
+            else:
+                w = QSpinBox()
+                w.setRange(0, (1 << width) - 1)
+                w.setValue(int(cur_v or 0))
+                w.setPrefix("%s(%d位) " % (name, width))
+                w.valueChanged.connect(self._refresh_flags_label)
+            tip = _FLAG_TIPS.get(name)
+            if tip:
+                w.setToolTip(tip)
+            self._w[name] = w
+            g.addWidget(w, rowi, col)
+            col += 1
+            if col >= 2:
+                col = 0
+                rowi += 1
+        v.addWidget(box)
+
+        self.lbl_new = QLabel("")
+        self.lbl_new.setStyleSheet("color:#1a7f37")
+        v.addWidget(self.lbl_new)
+        self._refresh_flags_label()
+
+        hint = QLabel(
+            "• 换母材质会按新 mmtr 重建该材质的参数集：同名参数保留值、"
+            "新增参数默认 0、旧独有参数丢弃。\n"
+            "• 应用后生成**新路径**副本并让所有关联对象重载"
+            "（引擎按路径缓存，同路径改了不生效），画面会短暂闪一下。\n"
+            "• 新增参数默认 0 —— 例如 Alpha=0 会让材质变透明，应用后请到参数表里调。\n"
+            "• 若新母材质缺少某个 flags 所需的 shader 变体，可能显示异常；"
+            "取消勾选该项即可排查。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#666")
+        v.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("应用")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        v.addWidget(btns)
+
+    def _preview_flags(self):
+        d = {}
+        for name, w in self._w.items():
+            d[name] = w.isChecked() if isinstance(w, QCheckBox) else w.value()
+        return mdf2lib.encode_material_flags(d) & 0xFFFFFFFF
+
+    def _refresh_flags_label(self):
+        lbl = getattr(self, "lbl_new", None)
+        if lbl is None:
+            return
+        lbl.setText("应用后 flags = 0x%08X（当前 0x%08X）"
+                    % (self._preview_flags(), self._cur.get("flags_raw") or 0))
+
+    def changes(self):
+        """返回改动：``{"mmtr": 逻辑路径?, "flags": {名字: 值}?}``（没改的键不出现）。"""
+        out = {}
+        sel = self.cmb.currentData()
+        if sel:
+            out["mmtr"] = sel
+        fl = {}
+        for name, w in self._w.items():
+            v = w.isChecked() if isinstance(w, QCheckBox) else w.value()
+            if v != self._cur["flags"].get(name):
+                fl[name] = v
+        if fl:
+            out["flags"] = fl
+        return out
 
 
 if __name__ == "__main__":
