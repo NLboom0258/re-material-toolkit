@@ -25,6 +25,7 @@ import json
 import re
 import sys
 from collections import Counter, namedtuple
+from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # 仓库根(material_studio 的上级)
@@ -67,7 +68,6 @@ from material_toolkit.lib import material_asset as masset  # noqa: E402
 from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
-from material_toolkit.lib import preview as prev  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
@@ -2986,7 +2986,7 @@ class MaterialSystemPanel(QWidget):
             btns2.addWidget(b)
         left.addLayout(btns2)
 
-        # 编译到预览目录：产物进缓存并登记，供「实时调参」换母材质时选用。
+        # 编译到预览目录：产物进缓存并登记，供「实时预览」换母材质时选用。
         # 目录由游戏内 REF 桥（/paths）给出，用户不用填游戏路径。
         # 未连接时禁用 —— 没连接就不知道往哪写，也不能保证游戏能加载到。
         btns3 = QHBoxLayout()
@@ -2994,7 +2994,7 @@ class MaterialSystemPanel(QWidget):
         self.btn_compile_prev.setToolTip(
             "把当前材质资产编译成 mmtr，写进游戏缓存目录（materialTemp/mmtr）并登记。\n"
             "文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。\n\n"
-            "需要先连上游戏内的 REF 桥（实时调参页的端口 :8899）。")
+            "需要先在「实时预览」页连上游戏内 REF 服务。")
         self.btn_compile_prev.setEnabled(False)
         self.btn_compile_prev.clicked.connect(self.compile_to_preview)
         btns3.addWidget(self.btn_compile_prev)
@@ -3002,13 +3002,6 @@ class MaterialSystemPanel(QWidget):
         self.lbl_prev_state.setStyleSheet("color:#b00020")
         btns3.addWidget(self.lbl_prev_state, 1)
         left.addLayout(btns3)
-        self._prev_ok = None
-        self._prev_timer = QTimer(self)
-        self._prev_timer.setInterval(3000)
-        self._prev_timer.timeout.connect(self._refresh_prev_state)
-        # 不在启动时同步探活：桥不在线时 alive() 会阻塞到超时，界面会卡一下。
-        # 交给首次定时触发（3s），期间按钮保持禁用（初始就是未连接）。
-        self._prev_timer.start()
 
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setWordWrap(True)
@@ -3075,8 +3068,7 @@ class MaterialSystemPanel(QWidget):
         self._asm_btns[2].clicked.connect(self._refresh_vs_preview)
         self.tabs.addTab(self._asm_page, "组装")
         self.tabs.addTab(self._wrap_inputs(), "输入")
-        self.tabs.addTab(self._wrap_preview(), "预览")
-        self.tabs.addTab(self._wrap_rbridge(), "实时调参")
+        self.tabs.addTab(self._wrap_rbridge(), "实时预览")
         self.tree_info = QTreeWidget()
         self.tree_info.setHeaderLabels(["项", "类型", "落点/说明"])
         self.tabs.addTab(self.tree_info, "语义输出 / 校验")
@@ -3332,298 +3324,195 @@ class MaterialSystemPanel(QWidget):
             [("主 pass", _w1), ("深度 pass", _w2), ("顶点 (VS)", _w3)])
         return page
 
-    # ---- 预览（REF 运行时热重载） ------------------------------------------
-    # 同路径 create_resource 恒返回缓存 ⇒ 每次预览都生成**全新文件名**的 mmtr + mdf2，
-    # 由游戏内脚本轮询 natives/x64/materialTemp/index.txt 自动应用（~0.5s）。
-    # 详见 analysis/runtime_preview_plan.md。
-    def _pv_cfg_path(self):
+    # ---- 配置（游戏根 / 端口）----------------------------------------------
+    # 文件位置沿用旧的 preview.json（只保留这两个键，旧的 base_mdf2/keep 忽略）。
+    def _cfg_path(self):
         return os.path.join(os.path.expanduser("~"), ".re-material-toolkit", "preview.json")
 
-    def _pv_load_cfg(self):
+    def _cfg_load(self):
         try:
-            with open(self._pv_cfg_path(), encoding="utf-8") as f:
+            with open(self._cfg_path(), encoding="utf-8") as f:
                 return json.load(f) or {}
         except (OSError, ValueError):
             return {}
 
-    def _pv_save_cfg(self):
+    def _cfg_save(self):
         try:
-            p = self._pv_cfg_path()
+            p = self._cfg_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
-                json.dump({"game_root": self.ed_pv_root.text().strip(),
-                           "base_mdf2": self.ed_pv_mdf2.text().strip(),
-                           "keep": self.sp_pv_keep.value()}, f,
+                json.dump({"game_root": self.ed_rb_root.text().strip(),
+                           "port": self.sp_rb_port.value()}, f,
                           ensure_ascii=False, indent=2)
         except OSError:
             pass
 
-    def _pv_check_root(self, *_):
-        r = self.ed_pv_root.text().strip().strip('"')
+    def _rb_check_root(self, *_):
+        r = self.ed_rb_root.text().strip().strip('"')
         ok = bool(r) and os.path.isdir(os.path.join(r, "natives", "x64"))
-        self.lbl_pv_root.setText("OK" if ok else "找不到 natives/x64")
-        self.lbl_pv_root.setStyleSheet("color:%s" % ("#2e7d32" if ok else "#b00020"))
+        self.lbl_rb_root.setText("OK" if ok else "找不到 natives/x64")
+        self.lbl_rb_root.setStyleSheet("color:%s" % ("#2e7d32" if ok else "#b00020"))
         return ok
 
-    def _pv_rel_mdf2(self):
-        """输入框里的路径 -> 相对 natives/x64、不带 .10 的 posix 路径。"""
-        raw = self.ed_pv_mdf2.text().strip().strip('"')
-        if not raw:
-            return ""
-        p = raw.replace("\\", "/")
-        root = self.ed_pv_root.text().strip().strip('"')
-        if root:
-            nat = os.path.join(root, "natives", "x64").replace("\\", "/").rstrip("/")
-            if p.lower().startswith(nat.lower() + "/"):
-                p = p[len(nat) + 1:]
-        return prev.norm_rel(p)
-
-    def _pv_abs_mdf2(self):
-        rel = self._pv_rel_mdf2()
-        root = self.ed_pv_root.text().strip().strip('"')
-        if not rel or not root:
-            return ""
-        return os.path.join(root, "natives", "x64", rel.replace("/", os.sep) + prev.MDF2_EXT)
-
-    def _pv_browse_root(self):
-        d = QFileDialog.getExistingDirectory(self, "选择游戏根目录 (含 natives)")
-        if d:
-            self.ed_pv_root.setText(os.path.normpath(d))
-            self._pv_check_root()
-
-    def _pv_browse_mdf2(self):
-        root = self.ed_pv_root.text().strip().strip('"')
-        start = os.path.join(root, "natives", "x64") if root else ""
-        p, _ = QFileDialog.getOpenFileName(self, "选择参照 mdf2", start,
-                                           "mdf2 (*.mdf2.*);;所有文件 (*)")
-        if p:
-            self.ed_pv_mdf2.setText(os.path.normpath(p))
-            self._pv_load_slots()
-
-    def _pv_fill_combo(self, combo, cur=None):
-        """下拉: 不修改 / 当前材质 / 已选过的资产文件。"""
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("(不修改)", None)
-        combo.addItem("当前材质 (%s)" % (self.asset.name or "?"), "__current__")
-        for p in self._pv_assets:
-            combo.addItem(os.path.basename(p), p)
-        i = combo.findData(cur)
-        combo.setCurrentIndex(i if i >= 0 else 0)
-        combo.blockSignals(False)
-
-    def _pv_pick_asset(self, row):
-        p, _ = QFileDialog.getOpenFileName(self, "选择材质资产", "", "材质资产 (*.mmat.json)")
-        if not p:
-            return
-        p = os.path.normpath(p)
-        if p not in self._pv_assets:
-            self._pv_assets[p] = True
-        self._pv_fill_combo(self.tbl_pv.cellWidget(row, 2), p)
-
-    def _pv_load_slots(self):
-        path = self._pv_abs_mdf2()
-        if not path or not os.path.exists(path):
-            QMessageBox.warning(self, "读取失败", "找不到 mdf2：\n%s" % (path or "(路径为空)"))
-            return
-        try:
-            mf = Mdf2.load(path)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "读取失败", str(e))
-            return
-        auto = set(prev.pick_materials(mf))     # 占比最多的那组 -> 当前材质
-        self.tbl_pv.setRowCount(0)
-        for m in mf.materials:
-            r = self.tbl_pv.rowCount()
-            self.tbl_pv.insertRow(r)
-            self.tbl_pv.setItem(r, 0, QTableWidgetItem(m.name))
-            self.tbl_pv.setItem(r, 1, QTableWidgetItem(getattr(m, "mmtr_path", "") or ""))
-            combo = QComboBox()
-            self._pv_fill_combo(combo, "__current__" if m.name in auto else None)
-            self.tbl_pv.setCellWidget(r, 2, combo)
-            b = QPushButton("…")
-            b.setFixedWidth(28)
-            b.clicked.connect(lambda _c=False, _r=r: self._pv_pick_asset(_r))
-            self.tbl_pv.setCellWidget(r, 3, b)
-        self.tbl_pv.setColumnWidth(0, 130)
-        self.tbl_pv.setColumnWidth(2, 230)
-        self.tbl_pv.setColumnWidth(3, 32)
-        self._pv_say("读入 %s：%d 个材质槽（预选 %d 个）" % (
-            os.path.basename(path), len(mf.materials), len(auto)))
-
-    def _pv_say(self, text):
-        self.ed_pv_log.appendPlainText(text)
-
-    def _pv_open_dir(self):
-        root = self.ed_pv_root.text().strip().strip('"')
-        d = os.path.join(root, "natives", "x64", prev.TEMP_DIR) if root else ""
-        if d and os.path.isdir(d):
-            try:
-                os.startfile(d)      # noqa: S606 —— Windows 桌面工具, 打开资源管理器
-            except OSError as e:
-                self._pv_say("打开目录失败: %s" % e)
-        else:
-            self._pv_say("还没有生成过预览: %s" % (d or "(请先填游戏根目录)"))
-
-    def _pv_install_script(self):
-        root = self.ed_pv_root.text().strip().strip('"')
-        if not root:
-            QMessageBox.warning(self, "无法安装", "请先填游戏根目录。")
-            return
-        lines = []
-        try:
-            _dst, changed = prev.install_script(root, log=lines.append)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "安装失败", str(e))
-            return
-        for ln in lines:
-            self._pv_say(ln)
-        if changed:
-            self._pv_say("脚本已更新。游戏正在运行时：REF 菜单 → Reset Scripts（或重启游戏）。")
-
-    def _pv_refresh(self):
-        root = self.ed_pv_root.text().strip().strip('"')
-        rel = self._pv_rel_mdf2()
-        if not (root and rel):
-            QMessageBox.warning(self, "无法预览", "请先填游戏根目录与目标 mdf2。")
-            return
-        if self.tbl_pv.rowCount() == 0:
-            self._pv_load_slots()
-            if self.tbl_pv.rowCount() == 0:
-                return
-        self._sync_asset()          # 把界面上的编辑落进 asset（预览的是当前状态）
-        cache = {}
-        slots = {}
-        for r in range(self.tbl_pv.rowCount()):
-            name = self.tbl_pv.item(r, 0).text()
-            d = self.tbl_pv.cellWidget(r, 2).currentData()
-            if d is None:
-                slots[name] = None
-            elif d == "__current__":
-                slots[name] = self.asset
-            else:
-                if d not in cache:
-                    try:
-                        cache[d] = masset.MaterialAsset.load(d)
-                    except Exception as e:  # noqa: BLE001
-                        QMessageBox.warning(self, "载入资产失败", "%s\n\n%s" % (d, e))
-                        return
-                slots[name] = cache[d]
-        lines = []
-        try:
-            res = prev.deploy_slots(slots, root, rel,
-                                    keep=self.sp_pv_keep.value(), log=lines.append)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "预览失败", str(e))
-            return
-        self._pv_save_cfg()
-        self._pv_say("---")
-        for ln in lines:
-            self._pv_say(ln)
-        self._pv_say("已写盘。游戏内脚本需勾选 'enable preview'（面板日志应出现 auto:<ver>）")
-        return res
-
-    def _wrap_preview(self):
-        """预览页: 游戏根 + 目标 mdf2 + 逐槽指定材质资产 -> 写盘并通知游戏加载。"""
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("游戏根目录:"))
-        self.ed_pv_root = QLineEdit()
-        self.ed_pv_root.setPlaceholderText("含 natives 与 DMC5.exe 的那层")
-        row.addWidget(self.ed_pv_root, 1)
-        _b = QPushButton("浏览…")
-        _b.clicked.connect(self._pv_browse_root)
-        row.addWidget(_b)
-        self.lbl_pv_root = QLabel("未校验")
-        row.addWidget(self.lbl_pv_root)
-        self.ed_pv_root.textChanged.connect(self._pv_check_root)
-        v.addLayout(row)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("目标 mdf2:"))
-        self.ed_pv_mdf2 = QLineEdit()
-        self.ed_pv_mdf2.setPlaceholderText("相对 natives/x64（粘贴绝对路径会自动转换）")
-        row2.addWidget(self.ed_pv_mdf2, 1)
-        _b = QPushButton("浏览…")
-        _b.clicked.connect(self._pv_browse_mdf2)
-        row2.addWidget(_b)
-        _b = QPushButton("读取材质槽")
-        _b.clicked.connect(self._pv_load_slots)
-        row2.addWidget(_b)
-        v.addLayout(row2)
-
-        hint = QLabel("每个槽可选「不修改」/「当前材质」/ 其它 .mmat.json；"
-                      "选「当前材质」的多个槽共用同一个 mmtr。")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-
-        self.tbl_pv = QTableWidget(0, 4)
-        self.tbl_pv.setHorizontalHeaderLabels(["材质槽", "当前 mmtr", "预览用材质", ""])
-        self.tbl_pv.verticalHeader().setVisible(False)
-        self.tbl_pv.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        v.addWidget(self.tbl_pv, 3)
-
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("保留最近"))
-        self.sp_pv_keep = QSpinBox()
-        self.sp_pv_keep.setRange(1, 999)
-        self.sp_pv_keep.setValue(10)
-        bar.addWidget(self.sp_pv_keep)
-        bar.addWidget(QLabel("组预览文件"))
-        _b = QPushButton("刷新预览")
-        _b.clicked.connect(self._pv_refresh)
-        bar.addWidget(_b)
-        _b = QPushButton("打开预览目录")
-        _b.clicked.connect(self._pv_open_dir)
-        bar.addWidget(_b)
-        _b = QPushButton("安装/更新游戏内脚本")
-        _b.setToolTip("把随包发布的 mmtr_preview.lua 装到 <游戏根>/reframework/autorun/")
-        _b.clicked.connect(self._pv_install_script)
-        bar.addWidget(_b)
-        bar.addStretch(1)
-        v.addLayout(bar)
-
-        self.ed_pv_log = QPlainTextEdit()
-        self.ed_pv_log.setReadOnly(True)
-        self.ed_pv_log.setMaximumBlockCount(400)
-        v.addWidget(self.ed_pv_log, 2)
-
-        self._pv_assets = {}
-        cfg = self._pv_load_cfg()
-        if cfg.get("game_root"):
-            self.ed_pv_root.setText(cfg["game_root"])
-        if cfg.get("base_mdf2"):
-            self.ed_pv_mdf2.setText(cfg["base_mdf2"])
-        try:
-            self.sp_pv_keep.setValue(int(cfg.get("keep") or 10))
-        except (TypeError, ValueError):
-            pass
-        self._pv_check_root()
-        self._pv_say("游戏内脚本: <游戏根>/reframework/autorun/mmtr_preview.lua"
-                     "，面板里勾选 'enable preview'")
-        return w
-
-    # ---- 实时调参（游戏内 C# 桥） ---------------------------------------
+    # ---- 实时预览（游戏内 C# 桥） ---------------------------------------
     # 见 analysis/runtime_preview_plan.md §10：游戏内跑 mmtr_bridge.cs（REFramework.NET），
     # 暴露 /probe 与 /set；setMaterialFloat 改的是内存值，**下一帧就生效**，且重启即恢复。
     def _rb_say(self, s):
         self.ed_rb_log.appendPlainText(s)
 
-    def _rb_check(self, quiet=False):
+    def _rb_check(self, quiet=False, force=False):
+        """连接状态。
+
+        - ``force=True``：同步探测一次（手动点「连接」时用，最坏阻塞 ~1.5s）
+        - 默认只返回当前状态，**不发请求** —— 实时性由 `_rb_ping_tick` 的后台线程保证；
+          每次刷新列表都同步 ping 会卡 UI。
+        """
+        if force:
+            d = None
+            try:
+                d = rb.ping(port=self._rb_port(), timeout=3.0)
+            except rb.BridgeError as e:
+                if not quiet:
+                    self._rb_say(str(e))
+            ok = bool(d and d.get("ok"))
+            self._rb_set_link(ok, self._rb_detail(d))
+            return ok
+        return bool(getattr(self, "_rb_link_ok", False))
+
+    @staticmethod
+    def _rb_detail(d):
+        """连接状态后缀（stage 号，用于区分“旧插件/新插件”）。"""
+        if d and d.get("stage") is not None:
+            return "stage %s" % d.get("stage")
+        return ""
+
+    def _rb_port(self):
+        sp = getattr(self, "sp_rb_port", None)
+        return sp.value() if sp is not None else rb.get_default_port()
+
+    def _rb_set_link(self, ok, detail=""):
+        """更新连接状态显示，并同步「编译到预览目录」按钮的可用性。"""
+        self._rb_link_ok = bool(ok)
+        self.lbl_rb.setText(("已连接" + (" · " + detail if detail else ""))
+                            if ok else (detail or "未连接"))
+        self.lbl_rb.setStyleSheet("color:#2e7d32" if ok else "color:#b00020")
+        self.btn_compile_prev.setEnabled(self._rb_link_ok)
+        self.lbl_prev_state.setText("已连接 · 可编译" if ok else "未连接 REF 服务")
+        self.lbl_prev_state.setStyleSheet("color:#1a7f37" if ok else "color:#b00020")
+        self._rb_set_ops_enabled(self._rb_link_ok)
+
+    def _rb_set_ops_enabled(self, on):
+        """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
+        for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
+                     "btn_rb_save", "btn_rb_attrs"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(on)
+        if on:
+            self._rb_sync_enabled()      # 参数表仍要求「该行已勾选」
+        else:
+            tbl = getattr(self, "tbl_rb", None)
+            if tbl is not None:
+                tbl.setEnabled(False)
+
+    def _rb_ping_tick(self):
+        """每 1s 探活一次（后台线程，UI 永不阻塞）。"""
+        if not self._rb_connected:
+            return
+        if self._rb_ping_fut is not None and not self._rb_ping_fut.done():
+            return
+        if self._rb_ping_fut is not None:
+            fut, self._rb_ping_fut = self._rb_ping_fut, None
+            try:
+                d = fut.result()
+            except Exception:  # noqa: BLE001 —— 连不上就是常态，不算错误
+                d = None
+            ok = bool(d and d.get("ok"))
+            if ok != self._rb_link_ok:
+                self._rb_set_link(ok, self._rb_detail(d))
+                self._rb_say("连接已恢复" if ok else "连接已断开（游戏退出 / 服务已停止）")
+                if ok:
+                    # 游戏重启后对象地址全变了，必须重拉；延到下一轮事件，避免在探活回调里做长请求
+                    QTimer.singleShot(0, self._rb_refresh)
+                else:
+                    self._rb_clear_list()
         try:
-            d = rb.ping()
-        except rb.BridgeError as e:
-            self.lbl_rb.setText("未连接")
-            self.lbl_rb.setStyleSheet("color:#b00020")
-            if not quiet:
-                self._rb_say(str(e))
-            return False
-        self.lbl_rb.setText("已连接 · stage %s" % d.get("stage"))
-        self.lbl_rb.setStyleSheet("color:#2e7d32")
-        return True
+            self._rb_ping_fut = self._rb_pool.submit(rb.ping, self._rb_port(), 1.2)
+        except RuntimeError:          # 线程池已关闭（程序退出中）
+            self._rb_ping_fut = None
+
+    def _rb_read_port_file(self):
+        """游戏侧改端口后会写这个文件；连接时以它为准。"""
+        root = self._rb_root()
+        if not root:
+            return None
+        p = os.path.join(root, "reframework", "data", "mmtr_bridge_port.txt")
+        try:
+            with open(p, encoding="utf-8") as f:
+                v = int((f.read() or "").strip())
+        except (OSError, ValueError):
+            return None
+        return v if 1 <= v <= 65535 else None
+
+    def _rb_browse_root(self):
+        d = QFileDialog.getExistingDirectory(self, "选择游戏根目录 (含 natives)")
+        if d:
+            self.ed_rb_root.setText(os.path.normpath(d))
+            self._rb_check_root()
+
+    def _rb_toggle_conn(self):
+        if self._rb_connected:
+            self._rb_disconnect()
+        else:
+            self._rb_connect()
+
+    def _rb_connect(self):
+        p2 = self._rb_read_port_file()
+        if p2 and p2 != self.sp_rb_port.value():
+            self._rb_say("服务侧端口 = %d，已跟随（原 %d）" % (p2, self.sp_rb_port.value()))
+            self.sp_rb_port.setValue(p2)
+        rb.set_default_port(self.sp_rb_port.value())
+        self._cfg_save()
+        self._rb_connected = True
+        self.btn_rb_conn.setText("断开连接")
+        self._rb_say("连接 localhost:%d …" % self._rb_port())
+        if not self._rb_check(force=True):
+            self._rb_say("连接失败：确认游戏在运行、C# 插件已加载、端口一致")
+            self._rb_disconnect(say=False)
+            return
+        self._rb_ping_timer.start()
+        # 游戏根没填时顺手补上（服务知道自己的根目录，用户不用手填）
+        if not self._rb_root():
+            try:
+                g = rb.paths().get("gameRoot")
+            except rb.BridgeError:
+                g = None
+            if g:
+                self.ed_rb_root.setText(os.path.normpath(g))
+                self._cfg_save()
+        self._rb_refresh()
+
+    def _rb_disconnect(self, say=True):
+        was = self._rb_connected
+        self._rb_connected = False
+        self._rb_ping_timer.stop()
+        self.btn_rb_conn.setText("连接")
+        self._rb_set_link(False, "未连接")
+        self._rb_clear_list()
+        if say and was:
+            self._rb_say("已断开连接（游戏内已挂载的预览仍会继续生效）")
+
+    def _rb_clear_list(self):
+        self._rb_building = True
+        self.lst_rb.blockSignals(True)
+        self.lst_rb.clear()
+        self.lst_rb.blockSignals(False)
+        self._rb_building = False
+        self._rb_meshes = []
+        self._rb_cur_addr = None
+        self._rb_mats = []
+        self._rb_fill_mats()
+        self.lbl_rb_mdf.setText("")
 
     def _rb_refresh(self):
         """重建列表：每项带独立的预览勾选框，状态以游戏**实际挂载**的 mdf2 为准。
@@ -3799,7 +3688,7 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         if not root:
-            self._rb_say("先在「预览」页设置游戏根目录")
+            self._rb_say("先在「实时预览」页设置游戏根目录")
             self._rb_set_item_check(addr, not want)
             return
         try:
@@ -4223,7 +4112,7 @@ class MaterialSystemPanel(QWidget):
     #   取消 → create_orig 生成全新路径 → /material apply(keep=0) → 参数回到原始值
     #   轮询 /holds → dead 为真则清勾选 + 提示重选
     def _rb_root(self):
-        return (self.ed_pv_root.text() or "").strip()
+        return (self.ed_rb_root.text() or "").strip()
 
     # ---- 额外源目录（解包目录）------------------------------------------
     def _rb_sync_src_box(self):
@@ -4248,7 +4137,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_apply_src(self):
         root = self._rb_root()
         if not root:
-            self._rb_say("先配置游戏根目录（预览页）")
+            self._rb_say("先配置游戏根目录（实时预览页）")
             return
         p = self.ed_rb_src.text().strip().replace("\\", "/")
         if p and not os.path.isdir(p):
@@ -4374,7 +4263,7 @@ class MaterialSystemPanel(QWidget):
             if cur.lower().startswith(ps.TEMP_DIR.lower() + "/"):
                 # 挂在 materialTemp 下但 sessions.json 里没记录（手动清了登记 / 旧版流程）。
                 # 从路径反推身份，把当前副本「接管」为工作副本：它的文件内容仍等于原 mdf2
-                # （实时调参只改内存、不写盘），所以不重建、不丢当前状态。
+                # （实时预览只改内存、不写盘），所以不重建、不丢当前状态。
                 parsed = ps.parse_temp_rel(cur)
                 if not parsed:
                     raise rb.BridgeError(
@@ -4487,6 +4376,8 @@ class MaterialSystemPanel(QWidget):
 
     def _rb_poll_hold(self):
         """定时查保持项：发现 dead 就清掉那行勾选并提示重选。"""
+        if not self._rb_connected:
+            return
         ms = getattr(self, "_rb_meshes", None) or []
         if not any(m.get("prev") for m in ms):
             return
@@ -4509,26 +4400,51 @@ class MaterialSystemPanel(QWidget):
                 return          # 一次只提示一个，避免连环弹窗
 
     def _wrap_rbridge(self):
-        """实时调参页：列表里每个 mesh 前面一个勾选框（**每行独立**开启预览）→ 选材质 → 改参数。
+        """实时预览页：连接游戏内 REF 服务 → 列表里每个 mesh 一个勾选框（**每行独立**）
+        → 选材质 → 改参数。
 
-        未勾选的行完全只读（不向游戏发任何写请求）；勾选后为该对象建一份 mdf2 工作副本，
-        调参只作用于副本，取消勾选即重置。
-        所有操作按 **addr**（对象地址）定位：findComponents 的索引会随重启 / 变体切换位移。
+        未连接时整页禁用（不向游戏发任何请求）；连接后才拉列表。
+        未勾选的行完全只读；勾选后为该对象建一份 mdf2 工作副本，调参只作用于副本，
+        取消勾选即重置。所有操作按 **addr**（对象地址）定位：findComponents 的索引会
+        随重启 / 变体切换位移。
         """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
 
+        # 游戏根：写产物 / 从 pak 提取 mdf2 都要用；连上后服务会告诉我们是哪个目录。
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("游戏根目录:"))
+        self.ed_rb_root = QLineEdit()
+        self.ed_rb_root.setPlaceholderText("含 natives 与 DMC5.exe 的那层（连上后自动填）")
+        root_row.addWidget(self.ed_rb_root, 1)
+        b = QPushButton("浏览…")
+        b.clicked.connect(self._rb_browse_root)
+        root_row.addWidget(b)
+        self.lbl_rb_root = QLabel("未校验")
+        root_row.addWidget(self.lbl_rb_root)
+        self.ed_rb_root.textChanged.connect(self._rb_check_root)
+        v.addLayout(root_row)
+
         top = QHBoxLayout()
-        top.addWidget(QLabel("游戏内 C# 桥:"))
-        self.lbl_rb = QLabel("未检查")
+        top.addWidget(QLabel("REF 服务端口:"))
+        self.sp_rb_port = QSpinBox()
+        self.sp_rb_port.setRange(1, 65535)
+        self.sp_rb_port.setFixedWidth(90)
+        self.sp_rb_port.setToolTip(
+            "游戏内 REF 菜单 → MMTR Bridge 页可改端口（会写 reframework/data/mmtr_bridge_port.txt）。\n"
+            "连接时如果读到该文件，会自动采用它。")
+        top.addWidget(self.sp_rb_port)
+        self.btn_rb_conn = QPushButton("连接")
+        self.btn_rb_conn.setToolTip(
+            "连接后每 1s 探活一次（游戏退出会变回未连接）。\n"
+            "断开只是本工具停止通信，不影响游戏内已挂载的预览。")
+        self.btn_rb_conn.clicked.connect(self._rb_toggle_conn)
+        top.addWidget(self.btn_rb_conn)
+        self.lbl_rb = QLabel("未连接")
+        self.lbl_rb.setStyleSheet("color:#b00020")
         top.addWidget(self.lbl_rb)
-        top.addSpacing(12)
-        top.addWidget(QLabel("（共 %d）" % rb.DEFAULT_PORT))
         top.addStretch(1)
-        b = QPushButton("重新连接")
-        b.clicked.connect(lambda: self._rb_check())
-        top.addWidget(b)
         v.addLayout(top)
 
         iso = QHBoxLayout()
@@ -4536,23 +4452,23 @@ class MaterialSystemPanel(QWidget):
         self.lbl_rb_mdf.setStyleSheet("color:#666")
         self.lbl_rb_mdf.setTextInteractionFlags(Qt.TextSelectableByMouse)
         iso.addWidget(self.lbl_rb_mdf, 1)
-        b = QPushButton("保存到 mdf2")
-        b.setToolTip(
+        self.btn_rb_save = QPushButton("保存到 mdf2")
+        self.btn_rb_save.setToolTip(
             "把本会话改过的参数值写进工作副本，并生成一份**新路径**的副本让游戏重载。\n"
             "为什么换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重新加载。\n\n"
             "只写「改过的参数」（同名参数后写覆盖先写），未改的保持文件原值。\n"
             "所有共用该副本的对象会一起切到新文件。")
-        b.clicked.connect(self._rb_save_to_mdf2)
-        iso.addWidget(b)
-        b = QPushButton("材质属性…")
-        b.setToolTip(
+        self.btn_rb_save.clicked.connect(self._rb_save_to_mdf2)
+        iso.addWidget(self.btn_rb_save)
+        self.btn_rb_attrs = QPushButton("材质属性…")
+        self.btn_rb_attrs.setToolTip(
             "换母材质 / 改 flags（阴影、alpha test、双面、顶点着色器…）。\n\n"
             "换母材质会按新 mmtr 的参数表重建该材质的参数集：\n"
             "  同名参数保留值、新增参数默认 0、旧独有参数丢弃。\n"
             "应用后生成新路径副本并让所有关联对象重载（会短暂闪一下）。\n\n"
             "母材质只能选「编译到预览目录」产出的 mmtr（登记在 materials.json）。")
-        b.clicked.connect(self._rb_edit_attrs)
-        iso.addWidget(b)
+        self.btn_rb_attrs.clicked.connect(self._rb_edit_attrs)
+        iso.addWidget(self.btn_rb_attrs)
         v.addLayout(iso)
 
         # 额外源目录：只有部分模型被解包到游戏根，其余还在 pak 里。
@@ -4577,10 +4493,10 @@ class MaterialSystemPanel(QWidget):
         self.ed_rb_filter = QLineEdit()
         self.ed_rb_filter.setPlaceholderText("留空 = 列出全部（上限 120）；可填 GameObject 名子串")
         f.addWidget(self.ed_rb_filter, 1)
-        b = QPushButton("刷新列表")
-        b.setToolTip("重新拉取场景里的 mesh。刷新不会丢掉任何一行的勾选（按对象地址匹配）")
-        b.clicked.connect(self._rb_refresh)
-        f.addWidget(b)
+        self.btn_rb_refresh = QPushButton("刷新列表")
+        self.btn_rb_refresh.setToolTip("重新拉取场景里的 mesh。刷新不会丢掉任何一行的勾选（按对象地址匹配）")
+        self.btn_rb_refresh.clicked.connect(self._rb_refresh)
+        f.addWidget(self.btn_rb_refresh)
         v.addLayout(f)
 
         split = QSplitter(Qt.Horizontal)
@@ -4649,7 +4565,26 @@ class MaterialSystemPanel(QWidget):
         self._rb_poll.setInterval(2000)
         self._rb_poll.timeout.connect(self._rb_poll_hold)
         self._rb_poll.start()
-        self._rb_check(quiet=True)
+
+        # 连接开关（默认不连接）：按下「连接」才开始探测与轮询。
+        self._rb_connected = False     # 用户是否按下了「连接」
+        self._rb_link_ok = False       # 实际链路状态（后台轮询结果）
+        self._rb_ping_fut = None
+        self._rb_ping_timer = QTimer(self)
+        self._rb_ping_timer.setInterval(1000)
+        self._rb_ping_timer.timeout.connect(self._rb_ping_tick)
+        self._rb_pool = ThreadPoolExecutor(max_workers=1)
+
+        cfg = self._cfg_load()
+        if cfg.get("game_root"):
+            self.ed_rb_root.setText(cfg["game_root"])
+        try:
+            self.sp_rb_port.setValue(int(cfg.get("port") or rb.DEFAULT_PORT))
+        except (TypeError, ValueError):
+            self.sp_rb_port.setValue(rb.DEFAULT_PORT)
+        rb.set_default_port(self.sp_rb_port.value())
+        self._rb_check_root()
+        self._rb_set_link(False, "未连接")
         return w
 
     def _sync_force_full(self):
@@ -5488,26 +5423,13 @@ class MaterialSystemPanel(QWidget):
 
     # ---- 编译到预览目录 -------------------------------------------------
     # 产物进游戏缓存目录（目录由服务 /paths 给出，用户不用填游戏路径），并登记到
-    # mmatlib 的「母材质库」；「实时调参」页换母材质时**只能用登记过的**。
+    # mmatlib 的「母材质库」；「实时预览」页换母材质时**只能用登记过的**。
     # 文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。
-    def _refresh_prev_state(self):
-        """定时探活：连上桥才允许「编译到预览目录」。"""
-        try:
-            ok = bool(rb.alive(timeout=1.5))
-        except Exception:  # noqa: BLE001
-            ok = False
-        if ok == self._prev_ok:
-            return
-        self._prev_ok = ok
-        self.btn_compile_prev.setEnabled(ok)
-        self.lbl_prev_state.setText("已连接 · 可编译" if ok else "未连接 REF 服务")
-        self.lbl_prev_state.setStyleSheet("color:#1a7f37" if ok else "color:#b00020")
-
     def compile_to_preview(self):
         """编译当前资产 → 写进服务给出的缓存目录 → 登记 → 清理旧产物。"""
         if not rb.alive(timeout=2.0):
             QMessageBox.warning(self, "未连接",
-                                "需要先连上游戏内的 REF 桥（:8899）。\n\n"
+                                "需要先在「实时预览」页连上 REF 服务。\n\n"
                                 "请确认游戏在运行、C# 插件已加载。")
             return
         try:
@@ -5552,7 +5474,7 @@ class MaterialSystemPanel(QWidget):
         QMessageBox.information(
             self, "编译成功",
             "产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n\n"
-            "接下来在「实时调参」页把某个材质槽的母材质换成它。\n\n%s"
+            "接下来在「实时预览」页把某个材质槽的母材质换成它。\n\n%s"
             % (item["rel"], item["bytes"], len(prof),
                len(item.get("textureSlots") or []), "\n".join(logs)))
 
@@ -6120,6 +6042,14 @@ class MainWindow(QMainWindow):
         self.tabs = tabs
         self.setCentralWidget(tabs)
         self.setAcceptDrops(True)
+
+    def closeEvent(self, e):
+        # 后台探活线程不给它拖住退出（ping 最长 1.2s）
+        try:
+            self.msys._rb_pool.shutdown(wait=False)
+        except Exception:  # noqa: BLE001
+            pass
+        super().closeEvent(e)
 
     def open_file(self, path):
         if ".mdf2." in path.lower():

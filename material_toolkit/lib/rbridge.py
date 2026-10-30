@@ -12,6 +12,9 @@ REFramework.NET 起了个 HttpListener（默认 :8899），暴露：
 
 本模块只负责“发请求 + 解析 JSON”，不碰 REF 本身。
 所有函数在连不上时抛 BridgeError，GUI 侧统一提示。
+
+端口：服务默认 8899，但允许在游戏内「MMTR Bridge」页改。GUI 连上后把端口
+记到 `set_default_port()`，之后所有不显式传 port 的调用都用它。
 """
 from __future__ import annotations
 
@@ -23,16 +26,34 @@ import urllib.request
 DEFAULT_PORT = 8899
 DEFAULT_TIMEOUT = 20.0
 
+_port = DEFAULT_PORT
+
+
+def set_default_port(p):
+    """记住当前连接的端口（GUI 切换端口后调用一次即可）。"""
+    global _port
+    try:
+        v = int(p)
+    except (TypeError, ValueError):
+        return _port
+    if 1 <= v <= 65535:
+        _port = v
+    return _port
+
+
+def get_default_port():
+    return _port
+
 
 class BridgeError(RuntimeError):
     """REF 桥不可用 / 返回错误。"""
 
 
-def _base(port=DEFAULT_PORT):
-    return "http://localhost:%d" % port
+def _base(port=None):
+    return "http://localhost:%d" % (port or _port)
 
 
-def _get(path, params=None, port=DEFAULT_PORT, timeout=DEFAULT_TIMEOUT):
+def _get(path, params=None, port=None, timeout=DEFAULT_TIMEOUT):
     url = _base(port) + path
     if params:
         q = {k: v for k, v in params.items() if v is not None and v != ""}
@@ -55,7 +76,7 @@ def _get(path, params=None, port=DEFAULT_PORT, timeout=DEFAULT_TIMEOUT):
         raise BridgeError("返回不是 JSON：%s" % body[:200]) from e
 
 
-def alive(port=DEFAULT_PORT, timeout=3.0):
+def alive(port=None, timeout=3.0):
     """桥是否在线。"""
     try:
         d = _get("/ping", port=port, timeout=timeout)
@@ -64,22 +85,22 @@ def alive(port=DEFAULT_PORT, timeout=3.0):
         return False
 
 
-def ping(port=DEFAULT_PORT):
-    return _get("/ping", port=port, timeout=5.0)
+def ping(port=None, timeout=5.0):
+    return _get("/ping", port=port, timeout=timeout)
 
 
-def api_dump(port=DEFAULT_PORT):
+def api_dump(port=None):
     """反射出 REFramework.NET 的公开 API（调试用）。"""
     return _get("/api", port=port)
 
 
-def probe(what, go="", limit=0, port=DEFAULT_PORT, timeout=DEFAULT_TIMEOUT):
+def probe(what, go="", limit=0, port=None, timeout=DEFAULT_TIMEOUT):
     """通用探测入口：what = materials / params / methods / obj ..."""
     return _get("/probe", {"what": what, "go": go, "limit": limit or None},
                 port=port, timeout=timeout)
 
 
-def list_meshes(go="", limit=60, port=DEFAULT_PORT):
+def list_meshes(go="", limit=60, port=None):
     """列出带材质的 mesh。
 
     返回 [{i, go, matCount, mats[]}] —— i 是组件索引，go 是 GameObject 名。
@@ -92,7 +113,7 @@ def list_meshes(go="", limit=60, port=DEFAULT_PORT):
     return lst.get("meshes") or []
 
 
-def identity(go="", limit=40, names=False, port=DEFAULT_PORT):
+def identity(go="", limit=40, names=False, port=None):
     """mesh 身份：meshPath / mdf2Path / materialNames / mgrBases。
 
     工具侧用前两者算 meshHash / mdf2Hash（见 lib/psession.py）；
@@ -106,7 +127,7 @@ def identity(go="", limit=40, names=False, port=DEFAULT_PORT):
     return d
 
 
-def list_params(go, limit=1, port=DEFAULT_PORT):
+def list_params(go, limit=1, port=None):
     """读某个 GameObject 下 mesh 的材质参数。
 
     返回 {meshes: [{i, go, mats: [{name, varCount, vars: [{j,name,type,value}]}]}]}
@@ -120,7 +141,7 @@ def list_params(go, limit=1, port=DEFAULT_PORT):
     return p
 
 
-def paths(port=DEFAULT_PORT):
+def paths(port=None):
     """游戏目录与资源版本后缀（工具侧写产物用，不需要用户手填路径）。
 
     返回 {ok, gameRoot, natives, temp, tempRel, mmtrRelDir, mdf2Ver, mmtrVer, ...}
@@ -131,7 +152,7 @@ def paths(port=DEFAULT_PORT):
     return d
 
 
-def holds(port=DEFAULT_PORT):
+def holds(port=None):
     """当前每帧保持项的快照（不需 go）。
 
     返回 {holds, holdDetail:[{go,i,addr,ok,err,dead,deadReason,refCount,dying,
@@ -141,7 +162,7 @@ def holds(port=DEFAULT_PORT):
     return _get("/holds", None, port=port, timeout=20.0)
 
 
-def set_param(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
+def set_param(go, mat, var, value, idx=None, addr=None, port=None):
     """写一个参数。value 传字符串：float 用 "1.5"，float3 用 "x,y,z"。
 
     走 `/set3`（超集）：
@@ -161,7 +182,7 @@ def set_param(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
                           "i": idx, "addr": addr}, port=port, timeout=40.0)
 
 
-def apply_slot(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
+def apply_slot(go, mat, var, value, idx=None, addr=None, port=None):
     """set_param 的严格版：只要有一个 mesh 报错就抛异常。"""
     r = set_param(go, mat, var, value, idx=idx, addr=addr, port=port)
     if not r.get("ok"):
@@ -172,8 +193,7 @@ def apply_slot(go, mat, var, value, idx=None, addr=None, port=DEFAULT_PORT):
     return r
 
 
-def material(go, action="info", mdf=None, idx=None, keep=None, addr=None,
-             port=DEFAULT_PORT):
+def material(go, action="info", mdf=None, idx=None, keep=None, addr=None, port=None):
     """独立 mdf2 预览：info / apply / restore / keep。
 
     apply  需要 mdf（相对 natives/x64、不带 .10 后缀的路径）
