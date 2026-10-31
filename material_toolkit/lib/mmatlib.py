@@ -274,9 +274,9 @@ def mmtr_from_item(game_root, item):
 
 # ---------------------------------------------------------------- 在用检测 / 清理
 
-def referenced_mmtrs(game_root):
-    """扫 sessions.json 里所有副本（含 orig）的 mdf2，收集它们引用的 mmtr 路径。"""
-    out = set()
+def mmtr_ref_counts(game_root):
+    """每个 mmtr 逻辑路径（小写）被多少个材质引用（副本 + orig）。"""
+    counts = {}
     doc = ps.load_index(game_root)
     for mh, o in (doc.get("objects") or {}).items():
         for dh, e in (o.get("mdfs") or {}).items():
@@ -289,12 +289,74 @@ def referenced_mmtrs(game_root):
                     continue
                 try:
                     m = mdf2lib.Mdf2.load(p)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     continue
                 for mat in m.materials:
                     if mat.mmtr_path:
-                        out.add(ps.norm_rel(mat.mmtr_path).lower())
+                        k = ps.norm_rel(mat.mmtr_path).lower()
+                        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def referenced_mmtrs(game_root):
+    """扫 sessions.json 里所有副本（含 orig）的 mdf2，收集它们引用的 mmtr 路径。"""
+    return set(mmtr_ref_counts(game_root))
+
+
+def list_artifacts(game_root):
+    """mmtr 目录里的**所有**产物（含旧 rev）→ ``[{name, rev, rel, path, size}]``。"""
+    d = mmtr_dir_abs(game_root)
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for fn in os.listdir(d):
+        low = fn.lower()
+        i = low.find(".mmtr")
+        if i < 0:
+            continue
+        stem = fn[:i]
+        m = re.match(r"^(?P<name>.+)_r(?P<rev>\d+)$", stem)
+        if not m:
+            continue
+        p = os.path.join(d, fn)
+        out.append({
+            "name": m.group("name"),
+            "rev": int(m.group("rev")),
+            "rel": ps.norm_rel("%s/%s/%s.mmtr" % (ps.TEMP_DIR, MMTR_DIR, stem)),
+            "path": p,
+            "size": os.path.getsize(p) if os.path.isfile(p) else 0,
+        })
+    out.sort(key=lambda x: (x["name"].lower(), -x["rev"]))
     return out
+
+
+def delete_artifact(game_root, rel, log=None):
+    """删除一份产物；若它是登记项则一并从 materials.json 移除。
+
+    返回 ``(deleted, dropped)``；调用方须先确认无引用。
+    """
+    logic = ps.norm_rel(rel)
+    doc = load(game_root)
+    dropped = False
+    for key, it in list((doc.get("materials") or {}).items()):
+        if ps.norm_rel(it.get("rel") or "").lower() == logic.lower():
+            del doc["materials"][key]
+            dropped = True
+    if dropped:
+        save(game_root, doc, log=log)
+    deleted = False
+    p = mmtr_abs(game_root, logic)
+    if os.path.isfile(p):
+        try:
+            os.remove(p)
+            deleted = True
+        except OSError as e:
+            if log:
+                log("删除失败 %s: %s" % (os.path.basename(p), e))
+    if deleted and log:
+        log("已删除母材质产物 %s%s" % (os.path.basename(p),
+                                        "（同时移除登记）" if dropped else ""))
+    return deleted, dropped
 
 
 def prune(game_root, doc=None, dry_run=True, log=None):

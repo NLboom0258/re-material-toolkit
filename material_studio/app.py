@@ -3398,7 +3398,8 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs", "btn_rb_tex", "btn_rb_copy", "btn_rb_manage"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_tex", "btn_rb_texm",
+                     "btn_rb_copy", "btn_rb_manage", "btn_rb_mmat"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -3607,7 +3608,6 @@ class MaterialSystemPanel(QWidget):
             self._rb_game_root = os.path.normpath(g)
             self._cfg_save()
             self._rb_say("游戏根目录（服务）: %s" % self._rb_game_root)
-            self._rb_prune_orig(self._rb_game_root)
         else:
             self._rb_say("⚠ 服务未返回游戏根目录，写盘 / 副本功能暂不可用")
         # 不自动刷新列表：连接只做一次 ping。拉场景（/identity）是引擎调用，
@@ -4719,6 +4719,116 @@ class MaterialSystemPanel(QWidget):
         self._rb_say("已切换到副本「%s」v%d：%s" % (p2["name"], p2["rev"], rel))
         return True
 
+    # ---- 缓存管理（单项）：母材质 / 导入贴图 ----
+    def _rb_manage_materials(self):
+        """全局管理工具编译的母材质产物（只删；被引用的禁用）。"""
+        root = self._rb_root()
+        if not root:
+            self._rb_say("管理母材质：游戏根目录未就绪（连接服务后自动获取）")
+            return
+        doc = mlab.load(root)
+        reg = {ps.norm_rel(it.get("rel") or "").lower()
+               for it in (doc.get("materials") or {}).values() if it.get("rel")}
+        counts = mlab.mmtr_ref_counts(root)
+        rows = []
+        for a in mlab.list_artifacts(root):
+            low = a["rel"].lower()
+            rows.append(dict(a, current=(low in reg), refs=counts.get(low, 0)))
+        if not rows:
+            self._rb_say("管理母材质：缓存目录里没有工具编译的 mmtr")
+            return
+        dlg = MaterialManageDialog(self, rows)
+        if not dlg.exec():
+            return
+        # 删除前再查一次引用（防止面板打开后又新建了副本）
+        counts = mlab.mmtr_ref_counts(root)
+        done = skipped = 0
+        for rel, name, rev in dlg.to_delete:
+            if counts.get(rel.lower(), 0) > 0:
+                skipped += 1
+                self._rb_say("跳过 %s v%d（仍被引用）" % (name, rev))
+                continue
+            deleted, dropped = mlab.delete_artifact(root, rel, log=self._rb_say)
+            if deleted or dropped:
+                done += 1
+        tail = "，跳过 %d 个（仍被引用）" % skipped if skipped else ""
+        self._rb_say("管理母材质：删除 %d 个%s" % (done, tail))
+
+    def _rb_manage_textures(self):
+        """当前 (mesh, 原 mdf2) 管理区的导入贴图：删除 / 重命名。"""
+        ent = self._rb_cur_ent()
+        if ent is None:
+            self._rb_say("管理贴图：先在列表里选一个对象")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("管理贴图：游戏根目录未就绪（连接服务后自动获取）")
+            return
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent.get("prev")
+        if not dh:
+            p = ps.norm_rel(ent.get("mdf2Path") or "")
+            dh = ps.mdf2_hash(p) if p else ""
+        if not (mh and dh):
+            self._rb_say("管理贴图：该对象缺少 meshPath / mdf2（刷新列表后再试）")
+            return
+        rows = ps.scan_managed_textures(root, mh, dh)
+        if not rows:
+            self._rb_say("管理贴图：该管理区还没有导入贴图")
+            return
+        counts = ps.texture_ref_counts(root, mh, dh)
+        for r in rows:
+            r["refs"] = counts.get(r["name"].lower(), 0)
+        head = "%s\n%s" % (ent.get("meshPath") or mh,
+                           ps.norm_rel(ent.get("mdf2Path") or "") or dh)
+        dlg = TextureManageDialog(self, rows, head=head)
+        if not dlg.exec() or not dlg.action:
+            return
+        act = dlg.action
+        if act[0] == "delete":
+            name = act[1]
+            counts = ps.texture_ref_counts(root, mh, dh)
+            if counts.get(name.lower(), 0) > 0:
+                self._rb_say("删除贴图：%s 仍被引用，已跳过" % name)
+                return
+            ps.delete_texture_name(root, mh, dh, name, log=self._rb_say)
+            return
+        _kind, old, new = act
+        if not self._rb_connected:
+            self._rb_say("重命名贴图：需要连接游戏（要切换已挂载的副本）")
+            return
+        try:
+            ps.copy_texture_name(root, mh, dh, old, new, log=self._rb_say)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("重命名贴图失败：%s" % ex)
+            QMessageBox.warning(self, "重命名贴图", str(ex))
+            return
+        rows2 = ps.scan_managed_textures(root, mh, dh)
+        max_rev = max((r["rev"] for r in rows2
+                       if r["name"].lower() == new.lower()), default=0)
+        if not max_rev:
+            self._rb_say("重命名贴图：没找到新名字的文件")
+            return
+        new_rel = "%s/%s/%s/%s/%s_v%d.tex" % (ps.TEMP_DIR, ps.TEX_DIR,
+                                              mh, dh, new, max_rev)
+        recs = self._rb_repoint_texture_copies(
+            root, mh, dh, {old.lower(): (old, new_rel, max_rev)}, "")
+        moved, failed = self._rb_apply_repointed_textures(root, mh, dh, recs)
+        # pending 里的旧名字也归一到新路径（否则之后保存会写回旧名字）
+        for mats in self._rb_tex_edits.values():
+            for slots in mats.values():
+                for slot, path in list(slots.items()):
+                    pt = ps.parse_tex_rel(path)
+                    if pt and pt["mh"].lower() == mh.lower() \
+                            and pt["dh"].lower() == dh.lower() \
+                            and pt["name"].lower() == old.lower():
+                        slots[slot] = new_rel
+        ps.delete_unused_texture_revs(root, mh, dh, old, log=self._rb_say)
+        self._rb_say("重命名贴图：%s → %s（重指 %d 个副本%s）"
+                     % (old, new, moved, "，%d 个失败" % len(failed) if failed else ""))
+        QTimer.singleShot(600, self._rb_update_mdf_label)
+        QTimer.singleShot(600, self._rb_reread_current)
+
     def _rb_manage_copy(self):
         """管理当前 mesh 的副本：重命名 / 删除（都只对未使用副本）。
 
@@ -5257,14 +5367,22 @@ class MaterialSystemPanel(QWidget):
             raise rb.BridgeError("登记项里没有原始 mdf2 路径，无法重置")
 
         orig = ps.create_orig(root, dh_hit, orig_target, log=self._rb_say)
-        d = rb.material(ent.get("go"), "apply", mdf=orig, addr=ent.get("addr"), keep=False)
-        if d.get("err"):
-            raise rb.BridgeError(d["err"])
-        ms = d.get("meshes") or []
-        if not ms or not ms[0].get("ok"):
-            # addr 没命中 = 对象被重载了；这里不静默通过，否则会出现
-            # “看着取消了勾选、参数却没重置”。
-            raise rb.BridgeError("重置失败：apply 没有命中对象（addr=%s）" % ent.get("addr"))
+        try:
+            d = rb.material(ent.get("go"), "apply", mdf=orig, addr=ent.get("addr"), keep=False)
+            if d.get("err"):
+                raise rb.BridgeError(d["err"])
+            ms = d.get("meshes") or []
+            if not ms or not ms[0].get("ok"):
+                # addr 没命中 = 对象被重载了；这里不静默通过，否则会出现
+                # “看着取消了勾选、参数却没重置”。
+                raise rb.BridgeError("重置失败：apply 没有命中对象（addr=%s）" % ent.get("addr"))
+        except Exception:
+            # 没挂上：刚生成的快照成了孤儿，直接删（登记仍是旧的那份）
+            try:
+                os.remove(ps.rel_to_abs(root, orig))
+            except OSError:
+                pass
+            raise
         ps.upsert_mdf2(idx_doc, mh_hit, dh_hit, orig_target, orig_target,
                        orig_rel=orig)
         ps.save_index(root, idx_doc, log=self._rb_say)
@@ -5277,8 +5395,10 @@ class MaterialSystemPanel(QWidget):
     def _rb_prune_orig(self, root, dh=None):
         """删掉 orig 下不再使用的旧快照（登记里的 + 游戏仍 hold 的除外）。
 
-        重置必须换新路径，所以每次取消勾选都会生成一份新 orig；旧的不清会一直堆积。
-        离线时无法确认 hold 状态，保守跳过（下次连上再清）。
+        每次重置（取消勾选）都要生成一个新的 orig 路径（引擎按路径缓存，同路径
+        不会重载）；生成新快照后顺手把**同原 mdf2** 的旧快照清掉，只留最新登记项
+        和游戏仍在 hold 的（多对象共用时旧的可能还挂着）。
+        离线时无法确认 hold 状态，保守跳过。
         """
         if not root:
             return
@@ -5390,6 +5510,13 @@ class MaterialSystemPanel(QWidget):
             "新贴图首次加载在游戏暂停时同样会延迟（恢复后生效）。")
         self.btn_rb_tex.clicked.connect(self._rb_edit_textures)
         iso.addWidget(self.btn_rb_tex)
+        self.btn_rb_texm = QPushButton("管理贴图…")
+        self.btn_rb_texm.setToolTip(
+            "当前 mesh + 原 mdf2 管理区的导入贴图：删除 / 重命名。\n"
+            "重命名会联动同管理区的所有副本（改名 + 重指 + 生成新副本）。\n"
+            "删除只允许对未被任何副本引用的名字。")
+        self.btn_rb_texm.clicked.connect(self._rb_manage_textures)
+        iso.addWidget(self.btn_rb_texm)
         self.btn_rb_copy = QPushButton("选择副本…")
         self.btn_rb_copy.setToolTip(
             "选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。\n"
@@ -5402,6 +5529,12 @@ class MaterialSystemPanel(QWidget):
             "标「使用中」的副本（本工具挂着 / 游戏仍保持）不能操作。")
         self.btn_rb_manage.clicked.connect(self._rb_manage_copy)
         iso.addWidget(self.btn_rb_manage)
+        self.btn_rb_mmat = QPushButton("管理母材质…")
+        self.btn_rb_mmat.setToolTip(
+            "列出工具编译的全部母材质产物（含旧版本），删除未被副本引用的。\n"
+            "删除「当前登记」的版本会同时从材质库移除（之后可重新编译登记）。")
+        self.btn_rb_mmat.clicked.connect(self._rb_manage_materials)
+        iso.addWidget(self.btn_rb_mmat)
         v.addLayout(iso)
 
         f = QHBoxLayout()
@@ -7396,6 +7529,240 @@ class CopyPickerDialog(QDialog):
         if d is None:
             return
         self.choice = d
+        super().accept()
+
+
+def _fmt_bytes(n):
+    """文件大小 → 简短文案。"""
+    n = int(n or 0)
+    if n >= 1048576:
+        return "%.2f MB" % (n / 1048576.0)
+    return "%.1f KB" % (n / 1024.0)
+
+
+class MaterialManageDialog(QDialog):
+    """母材质管理：列出 mmtr 目录里的所有产物，勾选删除未引用的。
+
+    rows: ``[{name, rev, rel, size, current, refs}]``；结果在 ``to_delete``：
+    ``[(rel, name, rev)]``。被引用的（refs>0）不可勾选。
+    """
+
+    def __init__(self, parent, rows):
+        super().__init__(parent)
+        self.setWindowTitle("管理母材质")
+        self.resize(900, 600)
+        self._rows = list(rows or [])
+        self.to_delete = []
+
+        v = QVBoxLayout(self)
+        tip = QLabel(
+            "列出 materialTemp/mmtr 下工具编译的全部母材质产物（含旧版本）。\n"
+            "只允许删除**未被任何副本/原始 mdf2 引用**的产物；被引用的需先把相关副本切走。\n"
+            "删除「当前」那一版会同时从材质库移除，之后需要用时重新编译。")
+        tip.setWordWrap(True)
+        v.addWidget(tip)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["材质 / 版本", "大小", "状态"])
+        self.tree.setColumnWidth(0, 380)
+        self.tree.setColumnWidth(1, 100)
+        self.tree.setColumnWidth(2, 340)
+        self.tree.setAlternatingRowColors(True)
+        v.addWidget(self.tree, 1)
+
+        groups = {}
+        for r in self._rows:
+            groups.setdefault(r["name"], []).append(r)
+        for name in sorted(groups, key=str.lower):
+            items = sorted(groups[name], key=lambda x: -x["rev"])
+            g = QTreeWidgetItem(["%s（%d 个版本）" % (name, len(items)), "", ""])
+            g.setFlags(g.flags() & ~Qt.ItemIsSelectable)
+            for r in items:
+                marks = []
+                if r.get("current"):
+                    marks.append("当前登记")
+                if r.get("refs"):
+                    marks.append("被引用 %d" % r["refs"])
+                if not marks:
+                    marks.append("未使用")
+                it = QTreeWidgetItem(["v%d" % r["rev"],
+                                      _fmt_bytes(r.get("size")),
+                                      " · ".join(marks)])
+                it.setToolTip(0, r.get("rel") or "")
+                it.setData(0, Qt.UserRole, r)
+                if r.get("refs"):
+                    it.setFlags(it.flags() & ~Qt.ItemIsUserCheckable)
+                else:
+                    it.setCheckState(0, Qt.Unchecked)
+                g.addChild(it)
+            self.tree.addTopLevelItem(g)
+            g.setExpanded(True)
+
+        bb = QDialogButtonBox()
+        b_all = bb.addButton("全选未使用", QDialogButtonBox.ActionRole)
+        b_none = bb.addButton("全不选", QDialogButtonBox.ActionRole)
+        self.btn_del = bb.addButton("删除选中…", QDialogButtonBox.ActionRole)
+        b_close = bb.addButton("关闭", QDialogButtonBox.RejectRole)
+        b_all.clicked.connect(lambda: self._check_all(True))
+        b_none.clicked.connect(lambda: self._check_all(False))
+        self.btn_del.clicked.connect(self._delete)
+        b_close.clicked.connect(self.reject)
+        self.tree.itemChanged.connect(lambda *_: self._sync())
+        v.addWidget(bb)
+        self._sync()
+
+    def _check_all(self, on):
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            for j in range(g.childCount()):
+                it = g.child(j)
+                if it.flags() & Qt.ItemIsUserCheckable:
+                    it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self._sync()
+
+    def _checked(self):
+        out = []
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            for j in range(g.childCount()):
+                it = g.child(j)
+                if it.checkState(0) == Qt.Checked:
+                    out.append(it.data(0, Qt.UserRole))
+        return out
+
+    def _sync(self):
+        n = len(self._checked())
+        self.btn_del.setEnabled(n > 0)
+        self.btn_del.setText("删除选中…（%d）" % n if n else "删除选中…")
+
+    def _delete(self):
+        rows = self._checked()
+        if not rows:
+            return
+        total = sum(int(r.get("size") or 0) for r in rows)
+        n_reg = sum(1 for r in rows if r.get("current"))
+        msg = "将删除 %d 个文件（%s），不可恢复。" % (len(rows), _fmt_bytes(total))
+        if n_reg:
+            msg += "\n其中 %d 个是当前登记项，会同时从材质库移除。" % n_reg
+        if QMessageBox.question(self, "管理母材质", msg) != QMessageBox.Yes:
+            return
+        self.to_delete = [(r["rel"], r["name"], r["rev"]) for r in rows]
+        super().accept()
+
+
+class TextureManageDialog(QDialog):
+    """导入贴图管理：当前 (mesh, 原 mdf2) 管理区的全部名字/版本。
+
+    rows: ``[{name, rev, rel, size, refs}]``（refs = 该名字的引用槽数）；
+    结果在 ``action``：``("delete", name)`` / ``("rename", old, new)``。
+    """
+
+    def __init__(self, parent, rows, head=""):
+        super().__init__(parent)
+        self.setWindowTitle("管理贴图")
+        self.resize(900, 600)
+        self._rows = list(rows or [])
+        self.action = None
+
+        v = QVBoxLayout(self)
+        tip = QLabel(
+            (("管理区：%s\n" % head) if head else "") +
+            "列出该 mesh + 原 mdf2 管理区里工具导入的全部贴图（含各版本）。\n"
+            "重命名会联动同管理区的所有副本（改名 + 重指 + 生成新副本）；\n"
+            "删除只允许对未被任何副本引用的名字。")
+        tip.setWordWrap(True)
+        v.addWidget(tip)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["贴图 / 版本", "大小", "状态"])
+        self.tree.setColumnWidth(0, 380)
+        self.tree.setColumnWidth(1, 100)
+        self.tree.setColumnWidth(2, 340)
+        self.tree.setAlternatingRowColors(True)
+        v.addWidget(self.tree, 1)
+
+        refs = {}
+        groups = {}
+        for r in self._rows:
+            groups.setdefault(r["name"], []).append(r)
+            refs.setdefault(r["name"].lower(), r.get("refs") or 0)
+        for name in sorted(groups, key=str.lower):
+            items = sorted(groups[name], key=lambda x: -x["rev"])
+            n = refs.get(name.lower()) or 0
+            g = QTreeWidgetItem(["%s（%d 个版本）" % (name, len(items)), "",
+                                "被引用 %d" % n if n else "未使用"])
+            g.setData(0, Qt.UserRole, name)
+            for r in items:
+                it = QTreeWidgetItem(["v%d" % r["rev"],
+                                      _fmt_bytes(r.get("size")), ""])
+                it.setToolTip(0, r.get("rel") or "")
+                it.setData(0, Qt.UserRole, name)
+                g.addChild(it)
+            self.tree.addTopLevelItem(g)
+            g.setExpanded(True)
+
+        bb = QDialogButtonBox()
+        self.btn_rename = bb.addButton("重命名…", QDialogButtonBox.ActionRole)
+        self.btn_del = bb.addButton("删除…", QDialogButtonBox.ActionRole)
+        b_close = bb.addButton("关闭", QDialogButtonBox.RejectRole)
+        self.btn_rename.clicked.connect(self._rename)
+        self.btn_del.clicked.connect(self._delete)
+        b_close.clicked.connect(self.reject)
+        self.tree.currentItemChanged.connect(lambda *_: self._sync())
+        v.addWidget(bb)
+        self._sync()
+
+    def _selected_name(self):
+        it = self.tree.currentItem()
+        return it.data(0, Qt.UserRole) if it is not None else None
+
+    def _refs_of(self, name):
+        return sum(int(r.get("refs") or 0) for r in self._rows
+                   if r["name"].lower() == (name or "").lower())
+
+    def _sync(self):
+        name = self._selected_name()
+        self.btn_rename.setEnabled(bool(name))
+        self.btn_del.setEnabled(bool(name) and self._refs_of(name) == 0)
+
+    def _delete(self):
+        name = self._selected_name()
+        if not name:
+            return
+        n = self._refs_of(name)
+        if n:
+            QMessageBox.warning(self, "删除贴图",
+                                "「%s」仍被 %d 个贴图槽引用，不能删除。\n"
+                                "先把相关副本的槽改掉再删。" % (name, n))
+            return
+        if QMessageBox.question(
+                self, "删除贴图",
+                "将删除「%s」的全部版本，不可恢复。" % name) != QMessageBox.Yes:
+            return
+        self.action = ("delete", name)
+        super().accept()
+
+    def _rename(self):
+        name = self._selected_name()
+        if not name:
+            return
+        new, ok = QInputDialog.getText(
+            self, "重命名贴图", "新名称（ASCII；会联动同管理区所有副本）：",
+            text=name)
+        if not ok:
+            return
+        new = (new or "").strip()
+        err = ps.texture_name_error(new)
+        if err:
+            QMessageBox.warning(self, "重命名贴图", err)
+            return
+        if new.lower() == name.lower():
+            return
+        if any(r["name"].lower() == new.lower() for r in self._rows):
+            QMessageBox.warning(self, "重命名贴图",
+                                "该管理区已有同名贴图：%s" % new)
+            return
+        self.action = ("rename", name, new)
         super().accept()
 
 

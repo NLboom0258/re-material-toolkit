@@ -307,6 +307,109 @@ def delete_unused_texture_revs(game_root, mh, dh, name, log=None):
     return removed
 
 
+def scan_managed_textures(game_root, mh, dh):
+    """该管理区里的导入贴图（含每个 rev）→ ``[{name, rev, rel, path, size}]``。
+
+    ``rel`` 是逻辑路径（不带版本后缀），按名字升序、rev 降序。
+    """
+    d = tex_area_dir(game_root, mh, dh)
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for fn in os.listdir(d):
+        m = _TEX_REV_RE.match(fn)
+        if not m:
+            continue
+        p = os.path.join(d, fn)
+        out.append({
+            "name": m.group("name"),
+            "rev": int(m.group("rev")),
+            "rel": "%s/%s/%s/%s/%s_v%s.tex" % (
+                TEMP_DIR, TEX_DIR, mh, dh, m.group("name"), m.group("rev")),
+            "path": p,
+            "size": os.path.getsize(p) if os.path.isfile(p) else 0,
+        })
+    out.sort(key=lambda x: (x["name"].lower(), -x["rev"]))
+    return out
+
+
+def texture_ref_counts(game_root, mh, dh):
+    """该管理区里每个贴图名字被引用的槽数（所有副本 + 该原 mdf2 的 orig）。"""
+    doc = load_index(game_root)
+    rels = [c["rel"] for c in list_copies(doc, mh, dh)]
+    e = get_mdf2(doc, mh, dh) or {}
+    if e.get("orig"):
+        rels.append(norm_rel(e["orig"]))
+    counts = {}
+    for rel in rels:
+        p = rel_to_abs(game_root, rel)
+        if not os.path.exists(p):
+            continue
+        try:
+            d = mdf2lib.Mdf2.load(p)
+        except Exception:  # noqa: BLE001
+            continue
+        for mat in d.materials:
+            for tb in mat.textures:
+                pt = parse_tex_rel(tb.texture_path or "")
+                if pt and pt["mh"].lower() == mh.lower() \
+                        and pt["dh"].lower() == dh.lower():
+                    k = pt["name"].lower()
+                    counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def delete_texture_name(game_root, mh, dh, name, log=None):
+    """删掉该管理区里该名字的**所有** rev 文件（调用方须先确认无引用）。"""
+    d = tex_area_dir(game_root, mh, dh)
+    removed = []
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            m = _TEX_REV_RE.match(fn)
+            if not m or m.group("name").lower() != (name or "").lower():
+                continue
+            try:
+                os.remove(os.path.join(d, fn))
+                removed.append(fn)
+            except OSError:
+                pass
+    if removed and log:
+        log("已删除贴图 %s（%d 个文件）" % (name, len(removed)))
+    return removed
+
+
+def copy_texture_name(game_root, mh, dh, old, new, log=None):
+    """把 ``old`` 的所有 rev 文件复制为 ``new``（保留 rev 与版本后缀）。
+
+    重命名用：先复制，等所有副本重指完再走 ``delete_unused_texture_revs(old)``；
+    这样即使有副本重指失败，旧名字文件还留着（不会让引用缺失）。
+    """
+    err = texture_name_error(new)
+    if err:
+        raise ValueError(err)
+    if old.lower() == new.lower():
+        return []
+    d = tex_area_dir(game_root, mh, dh)
+    if not os.path.isdir(d):
+        return []
+    existing = {f.lower() for f in os.listdir(d)}
+    out = []
+    for fn in os.listdir(d):
+        m = _TEX_REV_RE.match(fn)
+        if not m or m.group("name").lower() != (old or "").lower():
+            continue
+        i = fn.lower().find(".tex")
+        suffix = fn[i:]               # ".tex" / ".tex.11"
+        new_fn = "%s_v%s%s" % (new, m.group("rev"), suffix)
+        if new_fn.lower() in existing:
+            raise ValueError("目标名字已存在同版本文件：%s" % new_fn)
+        shutil.copyfile(os.path.join(d, fn), os.path.join(d, new_fn))
+        out.append(new_fn)
+    if out and log:
+        log("已复制贴图 %s → %s（%d 个文件）" % (old, new, len(out)))
+    return out
+
+
 def prune_orig(game_root, keep_rels, dh=None, log=None):
     """删掉 orig 下**未被引用**的旧快照。
 
