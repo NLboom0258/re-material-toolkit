@@ -114,6 +114,32 @@ def original_mmtr(game_root, mh, dh, mat_name):
     return ps.norm_rel(mat.mmtr_path or "") if mat is not None else ""
 
 
+def original_textures(game_root, mh, dh):
+    """原始 mdf2 **所有材质**用到的贴图路径（去重、排序）。
+
+    mdf2 自带贴图路径，所以不需要 pak 文件表就能列出“原本可用的贴图”；
+    读不到原 mdf2（磁盘/pak 都没有）时返回空列表。
+    """
+    p = _original_mdf2_path(game_root, mh, dh)
+    if not p:
+        return []
+    try:
+        doc = mdf2lib.Mdf2.load(p)
+    except Exception:  # noqa: BLE001
+        return []
+    out, seen = [], set()
+    for mat in doc.materials:
+        for tb in mat.textures:
+            s = ps.norm_rel(tb.texture_path or "")
+            if not s:
+                continue
+            k = s.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(s)
+    return sorted(out, key=str.lower)
+
+
 def _clone_props(props):
     """深拷贝参数表（只带名字/值；偏移与 hash 由 save 重算）。"""
     out = []

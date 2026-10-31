@@ -4241,7 +4241,18 @@ class MaterialSystemPanel(QWidget):
         for s in slots:
             s["exists"] = ps.texture_exists(root, s["path"])
 
-        dlg = TextureEditDialog(self, matname, slots, root, mh, dh)
+        # 只列两类贴图：原 mdf2 自带（所有材质）/ 工具导入管理。
+        # 不扫磁盘、不读 pak 全量列表：那些路径可能属于别的 mod，卸载后就缺失了。
+        try:
+            orig_tex = mattr.original_textures(root, mh, dh)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("贴图编辑：读原 mdf2 贴图失败（%s）" % ex)
+            orig_tex = []
+        managed = ps.list_managed_textures(root)
+        sources = [("原 mdf2 自带", orig_tex),
+                   ("工具导入管理", managed)]
+
+        dlg = TextureEditDialog(self, matname, slots, root, mh, dh, sources)
         if dlg.exec() != QDialog.Accepted:
             return
         ch = dlg.changes()
@@ -7018,20 +7029,19 @@ class CopyPickerDialog(QDialog):
 
 
 class TexturePickerDialog(QDialog):
-    """贴图选择器：贴图 list（原版全量）/ 磁盘 natives/<subdir>（mod/解包）。
+    """贴图选择器：只列「原 mdf2 自带」和「工具导入管理」的贴图。
 
-    list 优先读 `~/.re-material-toolkit/tex_list.txt`（REE Tools →
-    Generate list file 的产物），其次预览缓存目录、REE 资源仓库缓存。
-    解析时去掉 `natives/x64/` 前缀和 `.tex.<ver>` 版本后缀，只留 `.tex`。
+    sources = [(标签, [逻辑路径…]), …]，第一个为默认来源。
+    不扫磁盘、不读 pak 文件表：那些路径可能属于别的 mod，卸载后就缺失了，
+    也不好确认状态。
     """
 
-    SOURCES = ("贴图列表（list）", "磁盘（natives/%s）" % ps.NATIVES_SUBDIR)
-
-    def __init__(self, parent, root, current=""):
+    def __init__(self, parent, sources, current=""):
         super().__init__(parent)
         self.setWindowTitle("选择贴图")
         self.resize(900, 600)
-        self._root = root
+        self._sources = [(label, list(items or []))
+                         for label, items in (sources or [])]
         self._all = []
         self._info = ""
         self._limit = 2000
@@ -7040,7 +7050,7 @@ class TexturePickerDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("来源:"))
         self.cmb_src = NoWheelComboBox()
-        self.cmb_src.addItems(self.SOURCES)
+        self.cmb_src.addItems([label for label, _ in self._sources] or ["（无）"])
         row.addWidget(self.cmb_src)
         self.ed_filter = QLineEdit()
         self.ed_filter.setPlaceholderText("过滤：路径/文件名子串（输入即筛选）")
@@ -7068,16 +7078,10 @@ class TexturePickerDialog(QDialog):
                 self.lst.scrollToItem(items[0])
 
     def _load_source(self):
-        if self.cmb_src.currentIndex() == 0:
-            p = ps.find_tex_list(self._root)
-            self._all = ps.load_tex_list(p) if p else []
-            self._info = (("贴图列表：%s（%d 条）" % (p, len(self._all))) if p else
-                          "未找到贴图 list（把 REE 生成的 list 放到 %s 或 %%APPDATA%%/REE-Lib/resources/dmc5/dmc5_files.list）"
-                          % os.path.join(ps.tool_data_dir(), "tex_list.txt"))
-        else:
-            self._all = ps.scan_textures(self._root)
-            self._info = "磁盘 natives/%s：%d 个 .tex" % (
-                ps.NATIVES_SUBDIR, len(self._all))
+        i = self.cmb_src.currentIndex()
+        label, items = (self._sources[i] if 0 <= i < len(self._sources) else ("", []))
+        self._all = list(items)
+        self._info = "%s：%d 条" % (label, len(self._all))
         self._fill()
 
     def _fill(self):
@@ -7098,23 +7102,25 @@ class TexturePickerDialog(QDialog):
 class TextureEditDialog(QDialog):
     """当前材质的贴图槽编辑（只改 path，不改槽名）。
 
-    "选择…" 只能选 natives/<subdir> 下已有的 .tex；外部文件用 "导入…"
+    "选择…" = 原 mdf2 自带的贴图 / 工具导入管理的贴图；外部文件用 "导入…"
     （复制到 materialTemp/tex，按内容 hash 命名）。应用结果由调用方
     用 /texture set 热替换；本对话框只收集路径改动。
     """
 
-    def __init__(self, parent, matname, slots, root, mh, dh):
+    def __init__(self, parent, matname, slots, root, mh, dh, sources=None):
         super().__init__(parent)
         self.setWindowTitle("贴图编辑 - %s" % matname)
         self.resize(880, 480)
         self._root = root
         self._mh, self._dh = mh, dh
+        self._sources = sources or []
         self._rows = []
 
         v = QVBoxLayout(self)
         tip = QLabel("材质：%s\n只改路径；槽名（= mmtr SRV 名）不可改。"
                      "应用后先改内存，点「保存到 mdf2」才持久化；"
-                     "pak 内的贴图用「选择…」从贴图 list 选，外部文件用「导入…」。" % matname)
+                     "「选择…」= 原 mdf2 自带的贴图 / 工具导入管理的贴图，"
+                     "外部文件用「导入…」复制进缓存。" % matname)
         tip.setWordWrap(True)
         v.addWidget(tip)
 
@@ -7182,7 +7188,7 @@ class TextureEditDialog(QDialog):
 
     def _pick(self, r):
         s, le, st = self._rows[r]
-        dlg = TexturePickerDialog(self, self._root, le.text())
+        dlg = TexturePickerDialog(self, self._sources, le.text())
         if dlg.exec() == QDialog.Accepted:
             p = dlg.chosen()
             if p:

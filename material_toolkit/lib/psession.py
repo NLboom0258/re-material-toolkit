@@ -116,67 +116,25 @@ def tex_path_logical(rel):
     return s[:i + 4] if i >= 0 else s
 
 
-def tool_data_dir():
-    """工具自己的用户级数据目录（与游戏根无关，跟随用户配置文件）。"""
-    return os.path.join(os.path.expanduser("~"), ".re-material-toolkit")
+def list_managed_textures(game_root):
+    """工具导入管理的贴图（``materialTemp/tex/<mh>/<dh>/...``）→ 逻辑路径列表。
 
-
-def find_tex_list(game_root=None):
-    """贴图 list 的查找顺序：工具数据目录 → 预览缓存 → REE 资源仓库缓存。
-
-    第一项 ``~/.re-material-toolkit/tex_list.txt`` 是用户显式放进来的完整
-    list（REE Tools → Generate list file 的产物），优先级最高：REE 仓库里
-    的 ``dmc5_files.list`` 可能落后于游戏更新。
+    只是工具自己的缓存，不扫磁盘 natives（那里可能是别的 mod 的贴图，
+    随时会被卸载，不适合作为可选项）。
     """
-    cands = [os.path.join(tool_data_dir(), "tex_list.txt")]
-    if game_root:
-        cands.append(os.path.join(temp_root(game_root), "tex_list.txt"))
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        base = os.path.join(appdata, "REE-Lib", "resources")
-        for g in ("dmc5", "DMC5"):
-            cands.append(os.path.join(base, g, g + "_files.list"))
-    for p in cands:
-        if os.path.isfile(p):
-            return p
-    return None
-
-
-def load_tex_list(path):
-    """读 REE list（每行一个路径）→ 去重、去前缀/版本、排序的 `.tex` 列表。"""
-    out, seen = [], set()
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                s = tex_path_logical(line)
-                if not s.lower().endswith(".tex"):
-                    continue
-                k = s.lower()
-                if k not in seen:
-                    seen.add(k)
-                    out.append(s)
-    except OSError:
-        return []
-    out.sort(key=str.lower)
-    return out
-
-
-def scan_textures(game_root, limit=20000):
-    """扫磁盘 natives/<subdir> 下所有 .tex* → 去重、去版本后缀的逻辑路径。"""
-    base = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR)
+    troot = temp_root(game_root)
+    base = os.path.join(troot, "tex")
     out, seen = [], set()
     for d, _dirs, fs in os.walk(base):
         for f in fs:
             if ".tex" not in f.lower():
                 continue
-            rel = os.path.relpath(os.path.join(d, f), base).replace("\\", "/")
+            rel = os.path.relpath(os.path.join(d, f), troot).replace("\\", "/")
             rel = tex_path_logical(rel)
             k = rel.lower()
             if k not in seen:
                 seen.add(k)
-                out.append(rel)
-                if len(out) >= limit:
-                    return sorted(out, key=str.lower)
+                out.append("%s/%s" % (TEMP_DIR, rel))
     return sorted(out, key=str.lower)
 
 
