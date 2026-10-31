@@ -4686,7 +4686,13 @@ class MaterialSystemPanel(QWidget):
         """把当前对象挂到副本 c（并把它设为该原 mdf2 的最近使用）。"""
         addr, go = ent.get("addr"), ent.get("go")
         try:
-            d = rb.material(go, "apply", mdf=c["rel"], addr=addr, keep=True)
+            rel = self._rb_fix_missing_mmtr(root, mh, dh, c["rel"])
+        except RuntimeError as ex:
+            self._rb_say("切换副本：%s" % ex)
+            return False
+        orig_rel = c["rel"]
+        try:
+            d = rb.material(go, "apply", mdf=rel, addr=addr, keep=True)
         except rb.BridgeError as ex:
             self._rb_say("切换副本失败: %s" % ex)
             return False
@@ -4695,18 +4701,21 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("切换副本失败: %s" % (d.get("err") or "无命中"))
             return False
 
+        p2 = ps.parse_temp_rel(rel) or {"name": c["name"], "rev": c["rev"]}
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
         self._rb_tex_edits.pop(_rb_addr_key(addr), None)
         ent["prev"] = dh
-        ent["copy"] = c["name"]
-        ps.upsert_copy(doc, mh, dh, c["name"], c["rel"], c["rev"])
+        ent["copy"] = p2["name"]
+        ps.upsert_copy(doc, mh, dh, p2["name"], rel, p2["rev"])
         ps.save_index(root, doc, log=self._rb_say)
+        if rel != orig_rel:
+            self._rb_drop_copy_file(root, orig_rel)
         self._rb_set_item_check(addr, True)
         self._rb_sync_enabled()
         # apply 后引擎重建参数块要一点时间；跨原 mdf2 切换时材质集可能不同，整表重读
         QTimer.singleShot(600, self._rb_update_mdf_label)
         QTimer.singleShot(600, lambda e=ent: self._rb_load_params(e))
-        self._rb_say("已切换到副本「%s」v%d：%s" % (c["name"], c["rev"], c["rel"]))
+        self._rb_say("已切换到副本「%s」v%d：%s" % (p2["name"], p2["rev"], rel))
         return True
 
     def _rb_manage_copy(self):
@@ -4969,8 +4978,79 @@ class MaterialSystemPanel(QWidget):
             c = ps.get_copy(idx_doc, mh, dh, rel=e.get("edit") or "")
         return c
 
-    def _rb_apply_iso(self, ent, rel):
-        """把 mesh 挂到指定副本并开启每帧保持（被游戏抢走时自动抢回 + 重写参数）。"""
+    def _rb_missing_mmtr_mats(self, root, rel):
+        """副本里引用了**不存在**的工具母材质产物：``[(材质, 路径)]``。"""
+        try:
+            d = mdf2lib.Mdf2.load(ps.rel_to_abs(root, rel))
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for m in d.materials:
+            mp = ps.norm_rel(m.mmtr_path or "")
+            if not mp or not mlab.is_artifact_path(mp):
+                continue
+            if not os.path.exists(mlab.mmtr_abs(root, mp)):
+                out.append((m.name, mp))
+        return out
+
+    def _rb_fix_missing_mmtr(self, root, mh, dh, rel):
+        """应用前检查副本引用的工具母材质；缺失时弹窗：恢复原始 / 取消。
+
+        返回要应用的 rel（可能已重写为新 rev）；取消时抛 ``RuntimeError``。
+        """
+        missing = self._rb_missing_mmtr_mats(root, rel)
+        if not missing:
+            return rel
+        desc = "\n".join("  %s → %s" % (m, p) for m, p in missing)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("母材质缺失")
+        box.setText(
+            "副本里引用的工具母材质文件不存在（可能已被清理或改名）：\n\n%s\n\n"
+            "恢复为原始 mdf2 的母材质，还是取消加载？" % desc)
+        b_restore = box.addButton("恢复原始母材质", QMessageBox.AcceptRole)
+        box.addButton("取消加载", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not b_restore:
+            raise RuntimeError("已取消（母材质缺失）")
+        changes = {m: {"mmtr": "__orig__"} for m, _p in missing}
+        try:
+            r = mattr.apply_attrs(root, rel, changes, log=self._rb_say)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("恢复原始母材质失败: %s" % ex)
+            QMessageBox.warning(self, "恢复失败", str(ex))
+            raise RuntimeError("已取消（恢复原始母材质失败）")
+        if not r.get("changed"):
+            return rel
+        doc = ps.load_index(root)
+        c = ps.get_copy(doc, mh, dh, rel=rel)
+        if c:
+            e = ps.get_mdf2(doc, mh, dh) or {}
+            was = ps.norm_rel(e.get("edit") or "").lower() == rel.lower()
+            ps.upsert_copy(doc, mh, dh, c["name"], r["rel"], r["rev"], current=was)
+            ps.save_index(root, doc, log=self._rb_say)
+        self._rb_say("母材质缺失：已恢复为原始母材质（%s → %s）"
+                     % (rel, r["rel"]))
+        return r["rel"]
+
+    def _rb_drop_copy_file(self, root, old_rel):
+        """新副本挂上后，旧副本已无 hold 引用才删。"""
+        try:
+            if not self._rb_addrs_on(old_rel):
+                os.remove(ps.rel_to_abs(root, old_rel))
+        except OSError:
+            pass
+
+    def _rb_apply_iso(self, ent, rel, root=None):
+        """把 mesh 挂到指定副本并开启每帧保持（被游戏抢走时自动抢回 + 重写参数）。
+
+        返回实际挂载的 rel（母材质缺失而恢复原始时会重写为新 rev）。
+        """
+        orig_rel = rel
+        if root:
+            parsed = ps.parse_temp_rel(rel)
+            if parsed and parsed.get("kind") == "edit":
+                rel = self._rb_fix_missing_mmtr(root, parsed["mh"], parsed["dh"], rel)
         d = rb.material(ent.get("go"), "apply", mdf=rel, addr=ent.get("addr"), keep=True)
         if d.get("err"):
             raise rb.BridgeError(d["err"])
@@ -4981,7 +5061,10 @@ class MaterialSystemPanel(QWidget):
         for m in ms:
             if not m.get("ok"):
                 raise rb.BridgeError("apply 失败: %s" % (m.get("err") or "?"))
+        if root and rel != orig_rel:
+            self._rb_drop_copy_file(root, orig_rel)
         self._rb_say("已挂载工作副本（keep=%s）: %s" % (d.get("keep"), ms[0].get("now") or rel))
+        return rel
 
     def _rb_ask_copy(self, idx_doc, mh, dh, copies):
         """该原 mdf2 已有多个副本时让用户挑。返回副本登记项 | "__new__" | None。"""
@@ -5059,7 +5142,7 @@ class MaterialSystemPanel(QWidget):
         # ① 当前路径已是登记副本 → 继续用它（换新路径会让引擎重载，调好的参数全丢）
         hit = self._rb_lookup_by_path(idx_doc, cur)
         if hit and hit["kind"] == "edit":
-            self._rb_apply_iso(ent, cur)
+            self._rb_apply_iso(ent, cur, root)
             ent["copy"] = hit.get("copy")
             return hit["dh"]
 
@@ -5083,17 +5166,18 @@ class MaterialSystemPanel(QWidget):
                 if known and ps.exists_edit(root, known["rel"]):
                     self._rb_say("当前挂的是副本「%s」旧版本（v%d），切到登记的 v%d"
                                  % (known["name"], parsed["rev"], known["rev"]))
-                    self._rb_apply_iso(ent, known["rel"])
+                    self._rb_apply_iso(ent, known["rel"], root)
                     ent["copy"] = known["name"]
                     return dh
                 self._rb_say("接管未登记的副本（身份从路径反推）: mh=%s dh=%s" % (mh, dh))
-                self._rb_apply_iso(ent, cur)
+                used = self._rb_apply_iso(ent, cur, root)
+                p2 = ps.parse_temp_rel(used) or parsed
                 ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
-                ps.upsert_mdf2(idx_doc, mh, dh, cur, cur)
-                ps.upsert_copy(idx_doc, mh, dh,
-                               parsed["name"], cur, parsed["rev"])
+                base_used = used if used != cur else cur
+                ps.upsert_mdf2(idx_doc, mh, dh, base_used, base_used)
+                ps.upsert_copy(idx_doc, mh, dh, p2["name"], used, p2["rev"])
                 ps.save_index(root, idx_doc, log=self._rb_say)
-                ent["copy"] = parsed["name"]
+                ent["copy"] = p2["name"]
                 return dh
             mh, dh = ps.mesh_hash(mesh_path), ps.mdf2_hash(cur)
             base = cur
@@ -5133,12 +5217,13 @@ class MaterialSystemPanel(QWidget):
                 raise RuntimeError("已取消")
             ps.save_index(root, idx_doc, log=self._rb_say)
 
-        self._rb_apply_iso(ent, c["rel"])
+        used = self._rb_apply_iso(ent, c["rel"], root)
+        p2 = ps.parse_temp_rel(used) or {"name": c["name"], "rev": c["rev"]}
         ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
         ps.upsert_mdf2(idx_doc, mh, dh, base, base)
-        ps.upsert_copy(idx_doc, mh, dh, c["name"], c["rel"], c["rev"])
+        ps.upsert_copy(idx_doc, mh, dh, p2["name"], used, p2["rev"])
         ps.save_index(root, idx_doc, log=self._rb_say)
-        ent["copy"] = c["name"]
+        ent["copy"] = p2["name"]
         return dh
 
     def _rb_iso_end(self, root, ent):
@@ -6328,6 +6413,33 @@ class MaterialSystemPanel(QWidget):
                     out.append((addr, h.get("go")))
         return out
 
+    def _rb_pending_by_rel(self):
+        """``{副本 rel(lower): {材质: {params, textures}}}``：各副本上对象的未保存改动。"""
+        try:
+            hd = rb.holds().get("holdDetail") or []
+        except rb.BridgeError:
+            return {}
+        by_path = {}
+        for h in hd:
+            if "ticks" in h:
+                continue
+            p = ps.norm_rel(h.get("wantPath") or "").lower()
+            raw = h.get("addr")
+            if p and raw:
+                by_path.setdefault(p, []).append(raw)
+        out = {}
+        for rel, addrs in by_path.items():
+            merged = {}
+            for raw in addrs:
+                k = _rb_addr_key(raw)
+                for mat, props in (self._rb_edits.get(k) or {}).items():
+                    merged.setdefault(mat, {}).setdefault("params", {}).update(props)
+                for mat, slots in (self._rb_tex_edits.get(k) or {}).items():
+                    merged.setdefault(mat, {}).setdefault("textures", {}).update(slots)
+            if merged:
+                out[rel] = merged
+        return out
+
     def _rb_reread_current(self):
         """apply 后延迟**整表重读**（参数集可能变了：换母材质 / 编译新版本）。
 
@@ -6353,7 +6465,8 @@ class MaterialSystemPanel(QWidget):
         try:
             changed = mattr.repoint_edits(root, old_rel, new_rel, data,
                                           log=logs.append,
-                                          material_name=item.get("name") or "")
+                                          material_name=item.get("name") or "",
+                                          extra_by_rel=self._rb_pending_by_rel())
         except Exception as e:  # noqa: BLE001
             logs.append("自动更新预览副本失败：%s" % e)
             return []
@@ -6389,6 +6502,10 @@ class MaterialSystemPanel(QWidget):
                         failed_old.add(rec["old"])
                     else:
                         moved += 1
+                        k = _rb_addr_key(addr)
+                        # 未保存值已经合并进新副本，清掉避免之后重复写回
+                        self._rb_edits.pop(k, None)
+                        self._rb_tex_edits.pop(k, None)
                 except rb.BridgeError as e:
                     logs.append("切换失败 %s: %s" % (go, e))
                     failed_old.add(rec["old"])

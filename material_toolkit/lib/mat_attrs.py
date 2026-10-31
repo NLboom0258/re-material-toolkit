@@ -326,7 +326,7 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
 
 
 def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
-                  material_name=""):
+                  material_name="", extra_by_rel=None):
     """把所有副本里引用旧母材质的材质改到 new_mmtr（编译后自动更新）。
 
     匹配旧引用的两种方式：
@@ -340,6 +340,9 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
       2. 按新 mmtr 的 UserMaterial 重建参数集（同名保留值、新增 0、旧删）
       3. 存成**同一副本的 rev+1 路径**（引擎按路径缓存）
 
+    ``extra_by_rel`` = ``{副本 rel(lower): {材质: {params, textures}}}``：
+    副本上正在预览的**未保存**参数/贴图改动，按名字合并到新文件（同贴图联动）。
+
     返回 ``[{mh, dh, name, old, new, rev, materials}]``。
     只改文件；apply 到游戏、更新 sessions.json、删旧文件由调用方负责。
     """
@@ -351,6 +354,7 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
     prefix = (ps.TEMP_DIR + "/" + mmatlib.MMTR_DIR + "/").lower()
     if not old_low and not name_low:
         return []
+    extra_by_rel = extra_by_rel or {}
     doc = ps.load_index(game_root)
     out = []
     seen = set()
@@ -382,6 +386,24 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
                 for name in names:
                     d.get_material(name).mmtr_path = new_mmtr
                     sync_mdf2(d, mm, prune=True, materials=name)
+                # 合并该副本上未保存的参数/贴图改动（同名同类型才保留；
+                # 新母材质裁掉的参数/改类型的参数直接丢弃）。
+                for ename, ech in (extra_by_rel.get(rel.lower()) or {}).items():
+                    em = d.get_material(ename)
+                    if em is None:
+                        continue
+                    for pname, vals in (ech.get("params") or {}).items():
+                        pr = em.get_parameter(pname)
+                        if pr is None:
+                            continue
+                        vals = [float(x) for x in (vals or [])]
+                        if len(vals) != len(pr.values):
+                            continue
+                        pr.values = vals
+                    for ttype, tpath in (ech.get("textures") or {}).items():
+                        tb = em.get_texture(ttype)
+                        if tb is not None and tpath:
+                            tb.texture_path = tpath
                 new = ps.bump_copy_rel(game_root, rel)
                 dst = ps.rel_to_abs(game_root, new["rel"])
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
