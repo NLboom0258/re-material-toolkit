@@ -274,7 +274,7 @@ def _unique_rel(game_root, rel):
     为什么需要：时间戳只到秒，同一秒内连续产出（改属性 → 再改 → 再改）
     会拿到同一个路径，后一次直接覆盖前一次 —— 而前一次可能正挂在 mesh 上
     （引擎已加载进内存，磁盘被覆盖不会立即出问题，但下次重载就读到错内容）。
-    与 mmatlib.unique_stem 同一个思路。
+    与母材质库的 rev 递增同一个思路（每次产出换新路径，避开引擎缓存）。
     """
     if not game_root or not rel:
         return rel
