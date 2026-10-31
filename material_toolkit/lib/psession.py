@@ -546,9 +546,13 @@ def read_params(game_root, rel_edit, material=None):
 
 def save_params(game_root, rel_edit, changes, log=None):
     """把 changes **原地**写进同一副本的**新版本路径**，返回
-    ``{rel, rev, name, mh, dh, bytes, touched}``。
+    ``{rel, rev, name, mh, dh, bytes, touched, skipped, changed}``。
 
-    ``changes`` = ``{材质名: {参数名: [float...]}}``（值个数必须与 mdf2 一致）。
+    ``changes`` = ``{材质名: {参数名: [float...]}}``。
+
+    **参数已不存在 / 类型变了**（比如刚在材质系统里删了参数、又编译了新版本）
+    会跳过并记入 ``skipped``，而不是整个保存失败；全部失效时 ``changed=False``
+    且不产出新文件。
 
     为什么必须换新路径：引擎按路径缓存 mdf2，同路径改了文件不会重载
     （见 analysis/runtime_preview_plan.md §13.4）。新路径 = 同一个副本的
@@ -568,13 +572,34 @@ def save_params(game_root, rel_edit, changes, log=None):
         data = bytearray(f.read())
     doc = mdf2lib.Mdf2.load(src)
     touched = []
+    skipped = []
+    effective = {}
     for mat_name, props in changes.items():
         mat = doc.get_material(mat_name)
         if mat is None:
             raise mdf2lib.ParamWriteError(
                 "mdf2 里没有材质 %r（现有: %s）"
                 % (mat_name, ", ".join(m.name for m in doc.materials)))
-        touched += mdf2lib.patch_param_floats(data, mat, props)
+        keep = {}
+        for pname, vals in (props or {}).items():
+            pr = mat.get_parameter(pname)
+            if pr is None:
+                skipped.append((mat_name, pname, "参数已不存在"))
+                continue
+            if len(vals or []) != len(pr.values):
+                skipped.append((mat_name, pname, "类型已变化"))
+                continue
+            keep[pname] = vals
+        if keep:
+            effective[mat_name] = keep
+            touched += mdf2lib.patch_param_floats(data, mat, keep)
+
+    if skipped and log:
+        log("跳过 %d 个已失效的参数：%s"
+            % (len(skipped), "; ".join("%s.%s（%s）" % x for x in skipped)))
+    if not touched:
+        return {"rel": rel_edit, "old": rel_edit, "changed": False,
+                "skipped": skipped, "bytes": 0, "touched": []}
 
     # 新路径：同一副本 rev+1（引擎按路径缓存，必须换路径）
     new = bump_copy_rel(game_root, rel_edit)
@@ -585,10 +610,10 @@ def save_params(game_root, rel_edit, changes, log=None):
     with open(dst, "wb") as f:
         f.write(bytes(data))
 
-    # 校验：重新 load 逐值比对
+    # 校验：重新 load 逐值比对（只比对真正写进去的参数）
     try:
         chk = mdf2lib.Mdf2.load(dst)
-        for mat_name, props in changes.items():
+        for mat_name, props in effective.items():
             mat = chk.get_material(mat_name)
             for pname, vals in props.items():
                 pr = mat.get_parameter(pname)
@@ -609,8 +634,8 @@ def save_params(game_root, rel_edit, changes, log=None):
         log("写盘 %s（%s v%d，%d B，%d 个参数）"
             % (new_rel, new["name"], new["rev"], len(data), len(touched)))
     return {"rel": new_rel, "rev": new["rev"], "name": new["name"],
-            "mh": new["mh"], "dh": new["dh"],
-            "bytes": len(data), "touched": touched}
+            "mh": new["mh"], "dh": new["dh"], "changed": True,
+            "skipped": skipped, "bytes": len(data), "touched": touched}
 
 
 def exists_edit(game_root, rel):

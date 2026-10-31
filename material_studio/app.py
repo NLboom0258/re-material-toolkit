@@ -302,6 +302,59 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class PairResizeHeader(QHeaderView):
+    """拖动列边界时同时调整右侧相邻列（两列总宽不变）。
+
+    Qt 默认只改被拖的那一列，右侧列只是平移；这里在按下时记住边界，
+    左列尺寸变化后把增量反向作用到右列。Stretch 列不参与（由布局分配）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._pair = None
+        self._guard = False
+        self.sectionResized.connect(self._on_resized)
+
+    def _edge_at(self, x):
+        for i in range(self.count() - 1):
+            if self.sectionResizeMode(i) == QHeaderView.Stretch:
+                continue
+            edge = self.sectionViewportPosition(i) + self.sectionSize(i)
+            if abs(x - edge) <= 4:
+                return (i, i + 1)
+        return None
+
+    def mousePressEvent(self, e):
+        self._pair = None
+        if e.button() == Qt.LeftButton:
+            x = e.position().toPoint().x() if hasattr(e, "position") else e.pos().x()
+            self._pair = self._edge_at(x)
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._pair = None
+        super().mouseReleaseEvent(e)
+
+    def _on_resized(self, idx, old, new):
+        if self._guard or not self._pair:
+            return
+        left, right = self._pair
+        if idx != left:
+            return
+        delta = new - old
+        if not delta:
+            return
+        cur = self.sectionSize(right)
+        target = max(self.minimumSectionSize(), cur - delta)
+        if target == cur:
+            return
+        self._guard = True
+        try:
+            super().resizeSection(right, target)
+        finally:
+            self._guard = False
+
+
 class ReorderTree(QTreeWidget):
     """支持内部拖拽重排的树: **仅第 0 列(≡ 手柄)可发起拖拽**(防误拖); 放下后发 reordered。
 
@@ -3817,6 +3870,7 @@ class MaterialSystemPanel(QWidget):
                 sp.setDecimals(4)
                 sp.setRange(-100000.0, 100000.0)
                 sp.setSingleStep(0.05)
+                sp.setButtonSymbols(QAbstractSpinBox.NoButtons)
                 try:
                     sp.setValue(float(vv.get("value")))
                 except (TypeError, ValueError):
@@ -3837,6 +3891,7 @@ class MaterialSystemPanel(QWidget):
                     sp.setDecimals(4)
                     sp.setRange(-100000.0, 100000.0)
                     sp.setSingleStep(0.05)
+                    sp.setButtonSymbols(QAbstractSpinBox.NoButtons)
                     sp.setValue(vals[c])
                     sp.valueChanged.connect(lambda _v, n=name: self._rb_vec_changed(n))
                     h.addWidget(sp)
@@ -3845,7 +3900,16 @@ class MaterialSystemPanel(QWidget):
                 self._rb_vec_spins[name] = sps
             else:
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
-        self.tbl_rb.setColumnWidth(1, 72)
+        self._rb_fit_value_width(m)
+
+    def _rb_fit_value_width(self, m):
+        """按参数类型给「值」列一个能完整显示的初始宽度（之后仍可拖动）。"""
+        need = 110
+        for vv in (m.get("vars") or []):
+            vt = vv.get("type") or 1
+            if vt >= 2:
+                need = max(need, vt * 72 + (vt - 1) * 2 + 12)
+        self.tbl_rb.setColumnWidth(2, min(int(need), 420))
 
     def _rb_schedule(self, name, spin):
         """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
@@ -4019,6 +4083,19 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("保存失败: %s" % ex)
             QMessageBox.warning(self, "保存失败", str(ex))
             return
+        # 删掉已失效的参数名（材质删参 / 改类型后旧值不再适用）
+        skipped = r.get("skipped") or []
+        for a in addr_go:
+            per = self._rb_edits.get(a) or {}
+            for mat_name, pname, _why in skipped:
+                (per.get(mat_name) or {}).pop(pname, None)
+        if not r.get("changed", True):
+            self._rb_say("保存：没有可写入的参数（已失效的被跳过）")
+            QMessageBox.information(
+                self, "没有可写入的参数",
+                "要写入的参数在新材质里已不存在（可能刚删除了参数或改了类型）。\n"
+                "已忽略这些项，本次没有产生新副本。")
+            return
         new_rel = r["rel"]
 
         # 所有共用该副本的对象切到新文件（keep 保持）
@@ -4037,6 +4114,9 @@ class MaterialSystemPanel(QWidget):
         msg = ("已写入 %d 个参数到副本「%s」v%d：\n%s\n\n切到新副本的对象：%d 个"
                % (len(r.get("touched") or []), r["name"], r["rev"],
                   new_rel, len(moved)))
+        if skipped:
+            msg += "\n\n已忽略 %d 个失效参数：%s" % (
+                len(skipped), "; ".join("%s.%s（%s）" % x for x in skipped))
         if failed:
             msg += "\n\n未切换成功：\n" + "\n".join(failed)
         self._rb_say(msg.replace("\n", "  "))
@@ -4845,9 +4925,17 @@ class MaterialSystemPanel(QWidget):
         mr.addWidget(self.cmb_rb_mat, 1)
         rv.addLayout(mr)
         self.tbl_rb = QTableWidget(0, 3)
+        self.tbl_rb.setHorizontalHeader(PairResizeHeader(self.tbl_rb))
         self.tbl_rb.setHorizontalHeaderLabels(["参数", "类型", "值"])
         self.tbl_rb.verticalHeader().setVisible(False)
-        self.tbl_rb.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tbl_rb.setEditTriggers(QAbstractItemView.NoEditTriggers)   # 名字/类型纯显示
+        hh = self.tbl_rb.horizontalHeader()
+        hh.setMinimumSectionSize(40)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.Interactive)
+        hh.setSectionResizeMode(2, QHeaderView.Interactive)
+        self.tbl_rb.setColumnWidth(1, 80)
+        self.tbl_rb.setColumnWidth(2, 160)
         self.tbl_rb.setEnabled(False)      # 只有该行勾选了预览才可编辑
         rv.addWidget(self.tbl_rb, 1)
         split.addWidget(right)
