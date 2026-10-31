@@ -4015,12 +4015,7 @@ class MaterialSystemPanel(QWidget):
             for mat, props in (self._rb_edits.get(k) or {}).items():
                 merged.setdefault(mat, {}).update(props)
         if not merged:
-            self._rb_say("保存：本会话没有改过参数")
-            QMessageBox.information(
-                self, "没有可保存的改动",
-                "「保存到 mdf2」只写你在工具里**改过**的参数。\n\n"
-                "当前没有记录到任何改动。若刚删除/修改了参数槽位，"
-                "旧值会被自动忽略，不需要再保存。")
+            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
             return
 
         # 写盘（生成新路径）
@@ -4037,11 +4032,7 @@ class MaterialSystemPanel(QWidget):
             for mat_name, pname, _why in skipped:
                 (per.get(mat_name) or {}).pop(pname, None)
         if not r.get("changed", True):
-            self._rb_say("保存：没有可写入的参数（已失效的被跳过）")
-            QMessageBox.information(
-                self, "没有可写入的参数",
-                "要写入的参数在新材质里已不存在（可能刚删除了参数或改了类型）。\n"
-                "已忽略这些项，本次没有产生新副本。")
+            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
             return
         new_rel = r["rel"]
 
