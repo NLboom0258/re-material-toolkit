@@ -124,8 +124,12 @@ _DIMNAME = {0: "?", 1: "buffer", 2: "tex1d", 3: "tex2d", 4: "tex2dms", 5: "tex3d
 
 
 def _rb_typename(t):
-    """材质参数类型：1=float, 2/3/4=floatN（getMaterialVariableType 返回分量数）。"""
-    return {1: "float", 2: "float2", 3: "float3", 4: "float4"}.get(t, "type=%s" % (t,))
+    """材质参数类型：1=float, 2/3/4=floatN, 12=float4x3, 16=float4x4。
+
+    getMaterialVariableType 返回的是**分量数**（矩阵按列主序展开后的 float 个数）。
+    """
+    return {1: "float", 2: "float2", 3: "float3", 4: "float4",
+            12: "float4x3 (12)", 16: "float4x4 (16)"}.get(t, "type=%s" % (t,))
 
 
 def _rb_addr_short(a, n=8):
@@ -447,7 +451,7 @@ _HLSL_KEYWORDS = {
 }
 _HLSL_TYPES = {
     "float", "float2", "float3", "float4", "float2x2", "float3x3",
-    "float4x4", "half", "half2", "half3", "half4", "double", "int",
+    "float4x3", "float3x4", "float4x4", "half", "half2", "half3", "half4", "double", "int",
     "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4", "bool",
     "bool2", "bool3", "bool4", "min16float", "min10float", "min16int",
     "min16uint", "Texture2D", "Texture2DArray", "TextureCube",
@@ -3845,6 +3849,12 @@ class MaterialSystemPanel(QWidget):
                     sps.append(sp)
                 self.tbl_rb.setCellWidget(r, 2, cont)
                 self._rb_vec_spins[name] = sps
+            elif vt > 4:
+                # 矩阵参数（float4x3=12 / float4x4=16）：引擎按分量数暴露，但 REF 的
+                # getMaterialFloat4 / setMaterialFloat4 只覆盖 1~4。这里只读展示，
+                # 不建输入框、不进 _rb_edits —— 保存时原样不动。
+                self.tbl_rb.setItem(
+                    r, 2, QTableWidgetItem("矩阵（%d 分量，只读）" % vt))
             else:
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
         self._rb_fit_name_width(m)

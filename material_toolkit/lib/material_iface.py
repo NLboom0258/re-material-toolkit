@@ -18,7 +18,7 @@ _HEADER_SKIP = ("Name", "----")
 # 材质参数类型 -> 字节大小
 TYPE_SIZE = {"float": 4, "int": 4, "uint": 4, "bool": 4,
              "float2": 8, "float3": 12, "float4": 16,
-             "float2x2": 16, "float3x3": 48, "float4x4": 64,
+             "float2x2": 16, "float3x3": 48, "float4x3": 48, "float4x4": 64,
              "row_major float4x4": 64, "row_major float3x4": 48}
 
 
