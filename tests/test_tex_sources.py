@@ -96,6 +96,41 @@ def main():
     except ValueError:
         pass
 
+    # parse_tex_rel / tex_refs_in_mdf2 / managed_texture_exists
+    p2 = "materialTemp/tex/%s/%s/MyTex_v2.tex" % (mh, dh)
+    pt = ps.parse_tex_rel(p2)
+    assert pt and pt["name"] == "MyTex" and pt["rev"] == 2, pt
+    assert ps.parse_tex_rel("texture/a.tex") is None
+    assert ps.managed_texture_exists(root, p2), p2
+
+    # 两个副本：A 指 v1，B 指 v2；v1 仍被引用时不删，改指 v2 后删
+    d1 = mdf2lib.Mdf2.new(10)
+    m1 = d1.add_material("A", "x.mmtr")
+    m1.add_texture("BaseColorMap", "materialTemp/tex/%s/%s/MyTex_v1.tex" % (mh, dh))
+    relA = "materialTemp/edit/%s/%s/A_v1.mdf2" % (mh, dh)
+    os.makedirs(os.path.dirname(ps.rel_to_abs(root, relA)), exist_ok=True)
+    d1.save(ps.rel_to_abs(root, relA))
+    d2 = mdf2lib.Mdf2.new(10)
+    m2 = d2.add_material("B", "x.mmtr")
+    m2.add_texture("BaseColorMap", p2)
+    relB = "materialTemp/edit/%s/%s/B_v1.mdf2" % (mh, dh)
+    os.makedirs(os.path.dirname(ps.rel_to_abs(root, relB)), exist_ok=True)
+    d2.save(ps.rel_to_abs(root, relB))
+    idx = ps.load_index(root)
+    ps.upsert_copy(idx, mh, dh, "A", relA, 1)
+    ps.upsert_copy(idx, mh, dh, "B", relB, 1)
+    ps.save_index(root, idx)
+
+    refs = ps.tex_refs_in_mdf2(d1, "MyTex", mh, dh)
+    assert refs == {"A": {"BaseColorMap":
+                           "materialTemp/tex/%s/%s/MyTex_v1.tex" % (mh, dh)}}, refs
+    assert ps.delete_unused_texture_revs(root, mh, dh, "MyTex") == []
+    d1.get_material("A").get_texture("BaseColorMap").texture_path = p2
+    d1.save(ps.rel_to_abs(root, relA))
+    removed = ps.delete_unused_texture_revs(root, mh, dh, "MyTex")
+    assert any("MyTex_v1" in f for f in removed), removed
+    assert not any("MyTex_v2" in f for f in removed), removed
+
     shutil.rmtree(root)
     print("test_tex_sources: OK")
 

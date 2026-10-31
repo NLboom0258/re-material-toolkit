@@ -41,6 +41,7 @@ import urllib.parse
 from . import mdf2 as mdf2lib
 
 TEMP_DIR = "materialTemp"
+TEX_DIR = "tex"          # materialTemp/tex/<meshHash>/<mdf2Hash>/ 导入贴图
 # natives 下的游戏子目录：DMC5 = x64，RE2/3/7/8 = stm。
 # 预览产物必须放在引擎实际读取的那一层，不能放到 natives 根。
 # 适配其它游戏时改这里（或在加载时按游戏覆盖）。
@@ -132,14 +133,14 @@ def list_managed_textures(game_root, mh, dh):
                     best[key] = (rev, base)
             else:
                 best.setdefault(low, (0, base))   # 旧 hash 命名 / 手放的文件
-    out = ["%s/tex/%s/%s/%s.tex" % (TEMP_DIR, mh, dh, base)
+    out = ["%s/%s/%s/%s/%s.tex" % (TEMP_DIR, TEX_DIR, mh, dh, base)
            for _k, (_r, base) in best.items()]
     return sorted(out, key=str.lower)
 
 
 def tex_area_dir(game_root, mh, dh):
     """一个「mesh + 原 mdf2」的导入贴图独立目录。"""
-    return os.path.join(temp_root(game_root), "tex", mh, dh)
+    return os.path.join(temp_root(game_root), TEX_DIR, mh, dh)
 
 
 _TEX_REV_RE = re.compile(r"^(?P<name>.+)_v(?P<rev>\d+)\.tex(?:\..*)?$", re.I)
@@ -208,7 +209,102 @@ def import_texture(game_root, src_abs, mh, dh, name):
     dst_dir = tex_area_dir(game_root, mh, dh)
     os.makedirs(dst_dir, exist_ok=True)
     shutil.copyfile(src, os.path.join(dst_dir, stem + ".tex" + ver))
-    return "%s/tex/%s/%s/%s.tex" % (TEMP_DIR, mh, dh, stem)
+    return "%s/%s/%s/%s/%s.tex" % (TEMP_DIR, TEX_DIR, mh, dh, stem)
+
+
+def parse_tex_rel(rel):
+    """``materialTemp/tex/<mh>/<dh>/<name>_v<rev>.tex`` → dict；不匹配返回 None。"""
+    s = norm_rel(rel)
+    parts = s.split("/")
+    if len(parts) != 5:
+        return None
+    if parts[0].lower() != TEMP_DIR.lower() or parts[1].lower() != TEX_DIR.lower():
+        return None
+    fn = parts[4]
+    if not fn.lower().endswith(".tex"):
+        return None
+    m = re.match(r"^(?P<name>.+)_v(?P<rev>\d+)$", fn[:-4])
+    if not m:
+        return None
+    return {"mh": parts[2], "dh": parts[3], "name": m.group("name"),
+            "rev": int(m.group("rev")), "rel": s}
+
+
+def tex_refs_in_mdf2(doc, name, mh, dh):
+    """该 mdf2 里引用导入贴图 ``name``（任意 rev）的槽 → ``{材质: {槽type: 旧路径}}``。"""
+    low_name = (name or "").lower()
+    low_mh, low_dh = (mh or "").lower(), (dh or "").lower()
+    out = {}
+    for mat in doc.materials:
+        hits = {}
+        for tb in mat.textures:
+            p = parse_tex_rel(tb.texture_path or "")
+            if p and p["mh"].lower() == low_mh and p["dh"].lower() == low_dh \
+                    and p["name"].lower() == low_name:
+                hits[tb.texture_type] = norm_rel(tb.texture_path)
+        if hits:
+            out[mat.name] = hits
+    return out
+
+
+def managed_texture_exists(game_root, tex_rel):
+    """工具管理区里的贴图文件是否存在（逻辑路径，兼容 ``.tex`` / ``.tex.<ver>``）。"""
+    rel = norm_rel(tex_rel)
+    low = rel.lower()
+    if not low.startswith(TEMP_DIR.lower() + "/"):
+        return False
+    p = os.path.join(temp_root(game_root), rel[len(TEMP_DIR) + 1:].replace("/", os.sep))
+    if os.path.isfile(p):
+        return True
+    d, fn = os.path.split(p)
+    if not os.path.isdir(d):
+        return False
+    stem = fn[:-4] if fn.lower().endswith(".tex") else fn
+    for n in os.listdir(d):
+        nl = n.lower()
+        if nl == fn.lower():
+            return True
+        if nl.startswith(stem.lower() + ".") and nl.rsplit(".", 1)[-1].isdigit():
+            return True
+    return False
+
+
+def delete_unused_texture_revs(game_root, mh, dh, name, log=None):
+    """删除该管理区里该名字的旧 rev 文件（只删已无副本引用的）。"""
+    doc = load_index(game_root)
+    used = set()
+    for c in list_copies(doc, mh, dh):
+        src = rel_to_abs(game_root, c["rel"])
+        if not os.path.exists(src):
+            continue
+        try:
+            d = mdf2lib.Mdf2.load(src)
+        except Exception:  # noqa: BLE001
+            continue
+        for mat in d.materials:
+            for tb in mat.textures:
+                p = parse_tex_rel(tb.texture_path or "")
+                if p and p["name"].lower() == (name or "").lower():
+                    used.add(p["rel"].lower())
+    area = tex_area_dir(game_root, mh, dh)
+    removed = []
+    if os.path.isdir(area):
+        for f in os.listdir(area):
+            m = _TEX_REV_RE.match(f)
+            if not m or m.group("name").lower() != (name or "").lower():
+                continue
+            logical = "%s/%s/%s/%s/%s_v%s.tex" % (
+                TEMP_DIR, TEX_DIR, mh, dh, m.group("name"), m.group("rev"))
+            if logical.lower() in used:
+                continue
+            try:
+                os.remove(os.path.join(area, f))
+                removed.append(f)
+            except OSError:
+                pass
+    if removed and log:
+        log("已清理旧贴图文件：%s" % ", ".join(sorted(removed)))
+    return removed
 
 
 # ---------------------------------------------------------------- sessions.json

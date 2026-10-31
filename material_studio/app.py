@@ -4066,6 +4066,92 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("旧副本删除失败（可忽略）: %s" % ex)
         return moved, failed
 
+    def _rb_repoint_texture_copies(self, root, mh, dh, name, new_rel, skip_rel):
+        """同 (mesh, 原 mdf2) 下引用该导入贴图的**其他副本**改到 new_rel。
+
+        返回 ``[{name, old, new, rev, addr_go}]``；只改文件，登记/切换由调用方。
+        会把副本上对象的未保存参数/贴图改动一并写进新文件（和材质属性应用一致）。
+        """
+        doc = ps.load_index(root)
+        out = []
+        skip = ps.norm_rel(skip_rel or "").lower()
+        for c in ps.list_copies(doc, mh, dh):
+            rel = c["rel"]
+            if rel.lower() == skip:
+                continue
+            src = ps.rel_to_abs(root, rel)
+            if not os.path.exists(src):
+                continue
+            try:
+                d = mdf2lib.Mdf2.load(src)
+            except Exception:  # noqa: BLE001
+                continue
+            refs = ps.tex_refs_in_mdf2(d, name, mh, dh)
+            if not refs:
+                continue
+            mat_names = {m.name for m in d.materials}
+            changes = {}
+            addr_go = self._rb_addrs_on(rel)
+            for raw, _go in addr_go:
+                k = _rb_addr_key(raw)
+                for mat, props in (self._rb_edits.get(k) or {}).items():
+                    if mat in mat_names:
+                        changes.setdefault(mat, {}).setdefault("params", {}).update(props)
+                for mat, slots in (self._rb_tex_edits.get(k) or {}).items():
+                    if mat in mat_names:
+                        changes.setdefault(mat, {}).setdefault("textures", {}).update(slots)
+            for mat, slots in refs.items():
+                ch = changes.setdefault(mat, {})
+                ch.setdefault("textures", {}).update({s: new_rel for s in slots})
+            try:
+                r = mattr.apply_attrs(root, rel, changes, log=self._rb_say)
+            except Exception as ex:  # noqa: BLE001
+                self._rb_say("贴图更新：副本 %s 重写失败（%s）" % (c["name"], ex))
+                continue
+            if not r.get("changed"):
+                continue
+            out.append({"name": c["name"], "old": rel, "new": r["rel"],
+                        "rev": r["rev"], "addr_go": addr_go})
+        return out
+
+    def _rb_apply_repointed_textures(self, root, mh, dh, recs):
+        """登记 + 切换持有对象 + 删旧副本（recs 来自 _rb_repoint_texture_copies）。"""
+        if not recs:
+            return 0, []
+        doc = ps.load_index(root)
+        for rec in recs:
+            e = ps.get_mdf2(doc, mh, dh) or {}
+            was_cur = ps.norm_rel(e.get("edit") or "").lower() == rec["old"].lower()
+            ps.upsert_copy(doc, mh, dh, rec["name"], rec["new"], rec["rev"],
+                           current=was_cur)
+        ps.save_index(root, doc, log=self._rb_say)
+        moved, failed, bad_old = 0, [], set()
+        for rec in recs:
+            for raw, go in rec["addr_go"]:
+                k = _rb_addr_key(raw)
+                try:
+                    d = rb.material(go, "apply", mdf=rec["new"], addr=raw, keep=True)
+                    ms = d.get("meshes") or []
+                    if d.get("err") or not ms or not ms[0].get("ok"):
+                        failed.append("%s: %s" % (
+                            _rb_addr_short(k), d.get("err") or "无命中"))
+                        bad_old.add(rec["old"])
+                    else:
+                        moved += 1
+                        self._rb_edits.pop(k, None)
+                        self._rb_tex_edits.pop(k, None)
+                except rb.BridgeError as ex:
+                    failed.append("%s: %s" % (_rb_addr_short(k), ex))
+                    bad_old.add(rec["old"])
+        for rec in recs:
+            if rec["old"] in bad_old:
+                continue
+            try:
+                os.remove(ps.rel_to_abs(root, rec["old"]))
+            except OSError:
+                pass
+        return moved, failed
+
     def _rb_save_to_mdf2(self):
         """把本会话改过的参数写进工作副本（新路径），并让游戏重载。"""
         ent = self._rb_cur_ent()
@@ -4112,6 +4198,28 @@ class MaterialSystemPanel(QWidget):
                 if tex.get(mat):
                     ch["textures"] = tex[mat]
                 changes[mat] = ch
+
+            # 本次保存里用到的导入贴图 rev（name → 新逻辑路径）。
+            # 同一副本里其他材质引用同名贴图的槽也要一起改，否则它们还指旧 rev。
+            new_paths = {}
+            for slots in tex.values():
+                for path in slots.values():
+                    pt = ps.parse_tex_rel(path)
+                    if pt and pt["mh"].lower() == mh.lower() \
+                            and pt["dh"].lower() == dh.lower():
+                        new_paths.setdefault(pt["name"].lower(),
+                                             (pt["name"], ps.norm_rel(path)))
+            if new_paths:
+                try:
+                    cur_doc = mdf2lib.Mdf2.load(ps.rel_to_abs(root, edit_rel))
+                    for _low, (nm, newp) in new_paths.items():
+                        for mat, slots in ps.tex_refs_in_mdf2(cur_doc, nm, mh, dh).items():
+                            ch = changes.setdefault(mat, {})
+                            ch.setdefault("textures", {}).update(
+                                {slot: newp for slot in slots})
+                except Exception as ex:  # noqa: BLE001
+                    self._rb_say("贴图更新：读当前副本失败（%s）" % ex)
+
             try:
                 r2 = mattr.apply_attrs(root, edit_rel, changes, log=self._rb_say)
             except Exception as ex:  # noqa: BLE001
@@ -4129,6 +4237,18 @@ class MaterialSystemPanel(QWidget):
                 for a in moved:
                     self._rb_edits.pop(a, None)
                     self._rb_tex_edits.pop(a, None)
+
+            # 同 (mesh, 原 mdf2) 的其他副本：引用同名贴图的槽全部切到新 rev。
+            # 只改文件/登记/切换；旧贴图文件等全部重指完后再删。
+            repointed = []
+            for _low, (nm, newp) in new_paths.items():
+                repointed += self._rb_repoint_texture_copies(
+                    root, mh, dh, nm, newp, new_rel)
+            moved2, failed2 = self._rb_apply_repointed_textures(
+                root, mh, dh, repointed)
+            for _low, (nm, _newp) in new_paths.items():
+                ps.delete_unused_texture_revs(root, mh, dh, nm, log=self._rb_say)
+
             self._rb_update_mdf_label()
             if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
                 QTimer.singleShot(600, self._rb_reread_current)
@@ -4137,6 +4257,11 @@ class MaterialSystemPanel(QWidget):
                    "切到新副本的对象：%d 个"
                    % (sum(len(v) for v in merged.values()), ntex,
                       r2["name"], r2["rev"], new_rel, len(moved)))
+            if repointed:
+                msg += "\n\n联动更新同 mdf2 的其他副本：%d 个（切换对象：%d 个）" % (
+                    len(repointed), moved2)
+                if failed2:
+                    msg += "\n未切换成功：\n" + "\n".join(failed2)
             rep = r2.get("report") or []
             if rep:
                 msg += "\n\n" + "\n".join(rep)
@@ -4255,6 +4380,34 @@ class MaterialSystemPanel(QWidget):
         ch = dlg.changes()
         if not ch:
             self._rb_say("贴图编辑：没有改动")
+            return
+
+        # 只允许：本 mdf2 自带 / 本副本管理区（同 mesh 同原 mdf2）的导入贴图。
+        # 防止手动引用别的 mesh / 别的原 mdf2 的贴图（那边更新/清理后会缺失）。
+        orig_low = {ps.norm_rel(x).lower() for x in orig_tex}
+        area_prefix = "%s/%s/%s/%s/" % (ps.TEMP_DIR.lower(), ps.TEX_DIR.lower(),
+                                         mh.lower(), dh.lower())
+        bad = []
+        for name, path in ch.items():
+            p = ps.norm_rel(path)
+            low = p.lower()
+            if low in orig_low:
+                continue
+            if low.startswith(area_prefix):
+                if ps.managed_texture_exists(root, p):
+                    continue
+                bad.append((name, path, "工具缓存里找不到该文件"))
+                continue
+            if low.startswith(ps.TEMP_DIR.lower() + "/" + ps.TEX_DIR.lower() + "/"):
+                bad.append((name, path, "属于其他 mesh / 原 mdf2 的管理区"))
+                continue
+            if orig_low:
+                bad.append((name, path, "不是本 mdf2 自带的贴图"))
+        if bad:
+            msg = "以下路径不能用于当前副本：\n" + "\n".join(
+                "%s：%s（%s）" % x for x in bad)
+            self._rb_say(msg.replace("\n", "  "))
+            QMessageBox.warning(self, "贴图编辑", msg)
             return
 
         key = _rb_addr_key(ent.get("addr"))
