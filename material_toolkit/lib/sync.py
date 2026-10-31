@@ -35,8 +35,7 @@ def sync_mdf2(mdf2: Mdf2, mmtr: Mmtr, cbuffer: str = "UserMaterial",
     members = mmtr.cbuffer_members(cbuffer)
     if not members:
         raise ValueError(f"cbuffer {cbuffer!r} not found in mmtr")
-    off_by_name = {p.name: p for p in members}
-    names_in_mmtr = set(off_by_name)
+    names_in_mmtr = {m.name for m in members}
 
     targets = mdf2.materials
     if materials is not None:
@@ -50,34 +49,41 @@ def sync_mdf2(mdf2: Mdf2, mmtr: Mmtr, cbuffer: str = "UserMaterial",
     added = pruned = 0
     report = []
     for mat in targets:
+        old = {pr.name: pr for pr in mat.properties}
         # 1. 可选: 删除 mmtr 中不存在的参数
         if prune:
-            keep = []
-            for pr in mat.properties:
-                if pr.name in names_in_mmtr:
-                    keep.append(pr)
-                else:
+            for name in list(old):
+                if name not in names_in_mmtr:
+                    del old[name]
                     pruned += 1
-            mat.properties = keep
-        # 2. 对齐已有参数的 cb_offset(值区按 mmtr offset 定位)
-        for pr in mat.properties:
-            m = off_by_name.get(pr.name)
-            if m is not None:
-                pr.cb_offset = m.offset
-        # 3. 新增 mmtr 有、mdf2 无的参数(默认值 0)
-        existing = {pr.name for pr in mat.properties}
+        # 2/3. 按 **mmtr 成员顺序** 重建参数表：
+        #   - 已有同名参数保留对象（值不变），但 cb_offset 对齐 mmtr；
+        #   - 同名但 float 个数变了（类型变了）→ 按 mmtr 重设，默认 0；
+        #   - 新参数插入到 mmtr 对应位置（不能一律 append，否则顺序会错）。
+        props = []
         added_here = []
         for m in members:
-            if m.name in existing:
-                continue
-            n = max(1, m.size // 4)   # 元素数(按 float 计)
-            pr = Property()
-            pr.name = m.name
-            pr.values = [0.0] * n
-            pr.param_count = n
+            n = max(1, m.size // 4)
+            pr = old.get(m.name)
+            if pr is None:
+                pr = Property()
+                pr.name = m.name
+                pr.values = [0.0] * n
+                pr.param_count = n
+                added += 1
+                added_here.append(m.name)
+            elif len(pr.values) != n:
+                # 类型变化：旧值对新类型没有意义，按新类型重置
+                pr.values = [0.0] * n
+                pr.param_count = n
+            pr.param_count = len(pr.values)
             pr.cb_offset = m.offset
-            mat.properties.append(pr)
-            added += 1
-            added_here.append(m.name)
+            props.append(pr)
+        if not prune:
+            # 保留 mdf2 里多出来、mmtr 没有的参数（接在末尾，内部相对顺序不变）
+            for pr in mat.properties:
+                if pr.name not in names_in_mmtr:
+                    props.append(pr)
+        mat.properties = props
         report.append((mat.name, added_here))
     return added, pruned, report

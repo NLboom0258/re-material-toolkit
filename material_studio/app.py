@@ -4015,7 +4015,7 @@ class MaterialSystemPanel(QWidget):
             for mat, props in (self._rb_edits.get(k) or {}).items():
                 merged.setdefault(mat, {}).update(props)
         if not merged:
-            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
+            self._rb_say("保存：没有改动")
             return
 
         # 写盘（生成新路径）
@@ -4032,7 +4032,7 @@ class MaterialSystemPanel(QWidget):
             for mat_name, pname, _why in skipped:
                 (per.get(mat_name) or {}).pop(pname, None)
         if not r.get("changed", True):
-            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
+            self._rb_say("保存：没有改动")
             return
         new_rel = r["rel"]
 
@@ -5896,6 +5896,7 @@ class MaterialSystemPanel(QWidget):
         if not changed:
             logs.append("没有预览中的材质引用旧母材质（下次勾选时生效）")
             return []
+        logs.append("已更新 %d 个预览副本（参数槽位/母材质）" % len(changed))
 
         # 先更新登记（无论是否在线，下次勾选都要拿到新路径）
         doc = ps.load_index(root)
