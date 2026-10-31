@@ -109,6 +109,67 @@ def rel_to_natives(game_root, abs_path):
     return rel.replace("\\", "/")
 
 
+def tex_path_logical(rel):
+    """natives/x64/.../X.tex.11 -> .../X.tex（去平台前缀与版本后缀）。"""
+    s = norm_rel(rel)
+    i = s.lower().find(".tex")
+    return s[:i + 4] if i >= 0 else s
+
+
+def find_tex_list(game_root=None):
+    """自动找 REE 资源仓库 / 工具缓存的贴图 list。返回路径或 None。"""
+    cands = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        base = os.path.join(appdata, "REE-Lib", "resources")
+        for g in ("dmc5", "DMC5"):
+            cands.append(os.path.join(base, g, g + "_files.list"))
+    if game_root:
+        cands.append(os.path.join(temp_root(game_root), "tex_list.txt"))
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def load_tex_list(path):
+    """读 REE list（每行一个路径）→ 去重、去前缀/版本、排序的 `.tex` 列表。"""
+    out, seen = [], set()
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                s = tex_path_logical(line)
+                if not s.lower().endswith(".tex"):
+                    continue
+                k = s.lower()
+                if k not in seen:
+                    seen.add(k)
+                    out.append(s)
+    except OSError:
+        return []
+    out.sort(key=str.lower)
+    return out
+
+
+def scan_textures(game_root, limit=20000):
+    """扫磁盘 natives/<subdir> 下所有 .tex* → 去重、去版本后缀的逻辑路径。"""
+    base = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR)
+    out, seen = [], set()
+    for d, _dirs, fs in os.walk(base):
+        for f in fs:
+            if ".tex" not in f.lower():
+                continue
+            rel = os.path.relpath(os.path.join(d, f), base).replace("\\", "/")
+            rel = tex_path_logical(rel)
+            k = rel.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(rel)
+                if len(out) >= limit:
+                    return sorted(out, key=str.lower)
+    return sorted(out, key=str.lower)
+
+
 def texture_abs(game_root, tex_rel):
     """贴图相对路径 → 磁盘绝对路径（兼容 ``.tex`` / ``.tex.10``）。找不到返回 None。"""
     rel = norm_rel(tex_rel)

@@ -7017,6 +7017,82 @@ class CopyPickerDialog(QDialog):
         super().accept()
 
 
+class TexturePickerDialog(QDialog):
+    """贴图选择器：REE list（原版全量）/ 磁盘 natives/<subdir>（mod/解包）。
+
+    list 来自 `%APPDATA%/REE-Lib/resources/dmc5/dmc5_files.list`（REE 资源仓库），
+    解析时去掉 `natives/x64/` 前缀和 `.tex.<ver>` 版本后缀，只留 `.tex`。
+    """
+
+    SOURCES = ("贴图列表（REE）", "磁盘（natives/%s）" % ps.NATIVES_SUBDIR)
+
+    def __init__(self, parent, root, current=""):
+        super().__init__(parent)
+        self.setWindowTitle("选择贴图")
+        self.resize(900, 600)
+        self._root = root
+        self._all = []
+        self._info = ""
+        self._limit = 2000
+
+        v = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("来源:"))
+        self.cmb_src = NoWheelComboBox()
+        self.cmb_src.addItems(self.SOURCES)
+        row.addWidget(self.cmb_src)
+        self.ed_filter = QLineEdit()
+        self.ed_filter.setPlaceholderText("过滤：路径/文件名子串（输入即筛选）")
+        row.addWidget(self.ed_filter, 1)
+        v.addLayout(row)
+        self.lbl = QLabel("")
+        v.addWidget(self.lbl)
+        self.lst = QListWidget()
+        self.lst.setAlternatingRowColors(True)
+        v.addWidget(self.lst, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        self.cmb_src.currentIndexChanged.connect(lambda *_: self._load_source())
+        self.ed_filter.textChanged.connect(self._fill)
+        self.lst.itemDoubleClicked.connect(lambda *_: self.accept())
+        self._load_source()
+        if current:
+            self.ed_filter.setText(os.path.basename(current))
+            items = self.lst.findItems(current, Qt.MatchExactly)
+            if items:
+                self.lst.setCurrentItem(items[0])
+                self.lst.scrollToItem(items[0])
+
+    def _load_source(self):
+        if self.cmb_src.currentIndex() == 0:
+            p = ps.find_tex_list(self._root)
+            self._all = ps.load_tex_list(p) if p else []
+            self._info = (("REE list：%s（%d 条）" % (p, len(self._all))) if p else
+                          "未找到 REE list（%APPDATA%/REE-Lib/resources/dmc5/dmc5_files.list）")
+        else:
+            self._all = ps.scan_textures(self._root)
+            self._info = "磁盘 natives/%s：%d 个 .tex" % (
+                ps.NATIVES_SUBDIR, len(self._all))
+        self._fill()
+
+    def _fill(self):
+        q = self.ed_filter.text().strip().lower()
+        items = [p for p in self._all if q in p.lower()] if q else self._all
+        self.lst.clear()
+        for p in items[:self._limit]:
+            self.lst.addItem(p)
+        extra = (" · 显示前 %d / 共 %d（继续输入过滤）" % (self._limit, len(items))
+                 if len(items) > self._limit else "")
+        self.lbl.setText(self._info + (" · 匹配 %d" % len(items) if q else "") + extra)
+
+    def chosen(self):
+        it = self.lst.currentItem()
+        return it.text() if it else ""
+
+
 class TextureEditDialog(QDialog):
     """当前材质的贴图槽编辑（只改 path，不改槽名）。
 
@@ -7103,22 +7179,13 @@ class TextureEditDialog(QDialog):
             st.setStyleSheet("color:#b00020")
 
     def _pick(self, r):
-        _s, le, st = self._rows[r]
-        start = os.path.join(self._root, "natives", ps.NATIVES_SUBDIR)
-        p, _ = QFileDialog.getOpenFileName(
-            self, "选择 .tex（只列磁盘文件；pak 内请手输或导入）", start,
-            "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
-        if not p:
-            return
-        rel = ps.rel_to_natives(self._root, p)
-        if rel is None:
-            QMessageBox.warning(
-                self, "不在 natives 下",
-                "只能直接选择 natives/%s 下的文件；\n"
-                "其它位置的 .tex 请用「导入…」复制到缓存目录。" % ps.NATIVES_SUBDIR)
-            return
-        le.setText(rel)
-        self._refresh_status(r)
+        s, le, st = self._rows[r]
+        dlg = TexturePickerDialog(self, self._root, le.text())
+        if dlg.exec() == QDialog.Accepted:
+            p = dlg.chosen()
+            if p:
+                le.setText(p)
+                self._refresh_status(r)
 
     def _import(self, r):
         _s, le, st = self._rows[r]
