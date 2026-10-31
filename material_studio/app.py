@@ -302,59 +302,6 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
-class PairResizeHeader(QHeaderView):
-    """拖动列边界时同时调整右侧相邻列（两列总宽不变）。
-
-    Qt 默认只改被拖的那一列，右侧列只是平移；这里在按下时记住边界，
-    左列尺寸变化后把增量反向作用到右列。Stretch 列不参与（由布局分配）。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(Qt.Horizontal, parent)
-        self._pair = None
-        self._guard = False
-        self.sectionResized.connect(self._on_resized)
-
-    def _edge_at(self, x):
-        for i in range(self.count() - 1):
-            if self.sectionResizeMode(i) == QHeaderView.Stretch:
-                continue
-            edge = self.sectionViewportPosition(i) + self.sectionSize(i)
-            if abs(x - edge) <= 4:
-                return (i, i + 1)
-        return None
-
-    def mousePressEvent(self, e):
-        self._pair = None
-        if e.button() == Qt.LeftButton:
-            x = e.position().toPoint().x() if hasattr(e, "position") else e.pos().x()
-            self._pair = self._edge_at(x)
-        super().mousePressEvent(e)
-
-    def mouseReleaseEvent(self, e):
-        self._pair = None
-        super().mouseReleaseEvent(e)
-
-    def _on_resized(self, idx, old, new):
-        if self._guard or not self._pair:
-            return
-        left, right = self._pair
-        if idx != left:
-            return
-        delta = new - old
-        if not delta:
-            return
-        cur = self.sectionSize(right)
-        target = max(self.minimumSectionSize(), cur - delta)
-        if target == cur:
-            return
-        self._guard = True
-        try:
-            super().resizeSection(right, target)
-        finally:
-            self._guard = False
-
-
 class ReorderTree(QTreeWidget):
     """支持内部拖拽重排的树: **仅第 0 列(≡ 手柄)可发起拖拽**(防误拖); 放下后发 reordered。
 
@@ -3900,16 +3847,15 @@ class MaterialSystemPanel(QWidget):
                 self._rb_vec_spins[name] = sps
             else:
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
-        self._rb_fit_value_width(m)
+        self._rb_fit_name_width(m)
 
-    def _rb_fit_value_width(self, m):
-        """按参数类型给「值」列一个能完整显示的初始宽度（之后仍可拖动）。"""
-        need = 110
+    def _rb_fit_name_width(self, m):
+        """按参数名长度给「参数」列一个合适的初始宽度（值列是 stretch，会自动填满）。"""
+        fm = self.tbl_rb.fontMetrics()
+        need = fm.horizontalAdvance("参数") + 40
         for vv in (m.get("vars") or []):
-            vt = vv.get("type") or 1
-            if vt >= 2:
-                need = max(need, vt * 72 + (vt - 1) * 2 + 12)
-        self.tbl_rb.setColumnWidth(2, min(int(need), 420))
+            need = max(need, fm.horizontalAdvance(str(vv.get("name") or "")) + 32)
+        self.tbl_rb.setColumnWidth(0, min(max(160, int(need)), 320))
 
     def _rb_schedule(self, name, spin):
         """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
@@ -4069,11 +4015,12 @@ class MaterialSystemPanel(QWidget):
             for mat, props in (self._rb_edits.get(k) or {}).items():
                 merged.setdefault(mat, {}).update(props)
         if not merged:
-            self._rb_say("保存：没有记录到改动（只有改过参数才会有）")
+            self._rb_say("保存：本会话没有改过参数")
             QMessageBox.information(
                 self, "没有可保存的改动",
-                "本会话还没有改过这个对象的参数。\n\n"
-                "「保存到 mdf2」只写你在工具里改过的参数；未改的保持文件原值。")
+                "「保存到 mdf2」只写你在工具里**改过**的参数。\n\n"
+                "当前没有记录到任何改动。若刚删除/修改了参数槽位，"
+                "旧值会被自动忽略，不需要再保存。")
             return
 
         # 写盘（生成新路径）
@@ -4925,17 +4872,18 @@ class MaterialSystemPanel(QWidget):
         mr.addWidget(self.cmb_rb_mat, 1)
         rv.addLayout(mr)
         self.tbl_rb = QTableWidget(0, 3)
-        self.tbl_rb.setHorizontalHeader(PairResizeHeader(self.tbl_rb))
         self.tbl_rb.setHorizontalHeaderLabels(["参数", "类型", "值"])
         self.tbl_rb.verticalHeader().setVisible(False)
         self.tbl_rb.setEditTriggers(QAbstractItemView.NoEditTriggers)   # 名字/类型纯显示
         hh = self.tbl_rb.horizontalHeader()
+        # 和本工具其它页（QTreeWidget 默认）一致：末列 stretch 吸收宽度变化，
+        # 总宽始终 = 视口宽；拖动前面的边界时，变化量都由末列承担。
         hh.setMinimumSectionSize(40)
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setStretchLastSection(True)
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.Interactive)
-        hh.setSectionResizeMode(2, QHeaderView.Interactive)
+        self.tbl_rb.setColumnWidth(0, 200)
         self.tbl_rb.setColumnWidth(1, 80)
-        self.tbl_rb.setColumnWidth(2, 160)
         self.tbl_rb.setEnabled(False)      # 只有该行勾选了预览才可编辑
         rv.addWidget(self.tbl_rb, 1)
         split.addWidget(right)
