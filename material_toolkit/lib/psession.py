@@ -109,13 +109,6 @@ def rel_to_natives(game_root, abs_path):
     return rel.replace("\\", "/")
 
 
-def tex_path_logical(rel):
-    """natives/x64/.../X.tex.11 -> .../X.tex（去平台前缀与版本后缀）。"""
-    s = norm_rel(rel)
-    i = s.lower().find(".tex")
-    return s[:i + 4] if i >= 0 else s
-
-
 def list_managed_textures(game_root, mh, dh):
     """该 (mesh, 原 mdf2) 独立管理区里的导入贴图 → 逻辑路径（同名只保留最高 rev）。
 
