@@ -4245,7 +4245,7 @@ class MaterialSystemPanel(QWidget):
         except Exception as ex:  # noqa: BLE001
             self._rb_say("贴图编辑：读原 mdf2 贴图失败（%s）" % ex)
             orig_tex = []
-        managed = ps.list_managed_textures(root)
+        managed = ps.list_managed_textures(root, mh, dh)
         sources = [("原 mdf2 自带", orig_tex),
                    ("工具导入管理", managed)]
 
@@ -7178,8 +7178,18 @@ class TextureEditDialog(QDialog):
             "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
         if not p:
             return
+        base = os.path.basename(p)
+        i = base.lower().find(".tex")
+        prefill = (base[:i] if i >= 0 else base)
+        prefill = "".join(c for c in prefill if 32 <= ord(c) <= 126).strip()[:48]
+        name, ok = QInputDialog.getText(
+            self, "导入贴图",
+            "名称（同一名称 = 同一张贴图；重名会生成新版本）：", text=prefill)
+        if not ok:
+            return
         try:
-            rel = ps.import_texture(self._root, p, self._mh, self._dh)
+            rel = ps.import_texture(self._root, p, self._mh, self._dh,
+                                    name.strip())
         except Exception as ex:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(ex))
             return

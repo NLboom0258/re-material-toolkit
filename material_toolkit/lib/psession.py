@@ -116,34 +116,85 @@ def tex_path_logical(rel):
     return s[:i + 4] if i >= 0 else s
 
 
-def list_managed_textures(game_root):
-    """工具导入管理的贴图（``materialTemp/tex/<mh>/<dh>/...``）→ 逻辑路径列表。
+def list_managed_textures(game_root, mh, dh):
+    """该 (mesh, 原 mdf2) 独立管理区里的导入贴图 → 逻辑路径（同名只保留最高 rev）。
 
     只是工具自己的缓存，不扫磁盘 natives（那里可能是别的 mod 的贴图，
     随时会被卸载，不适合作为可选项）。
     """
-    troot = temp_root(game_root)
-    base = os.path.join(troot, "tex")
-    out, seen = [], set()
-    for d, _dirs, fs in os.walk(base):
-        for f in fs:
-            if ".tex" not in f.lower():
+    d = tex_area_dir(game_root, mh, dh)
+    best = {}
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            low = f.lower()
+            i = low.find(".tex")
+            if i < 0:
                 continue
-            rel = os.path.relpath(os.path.join(d, f), troot).replace("\\", "/")
-            rel = tex_path_logical(rel)
-            k = rel.lower()
-            if k not in seen:
-                seen.add(k)
-                out.append("%s/%s" % (TEMP_DIR, rel))
+            base = f[:i]
+            m = re.match(r"^(?P<name>.+)_v(?P<rev>\d+)$", base)
+            if m:
+                key = m.group("name").lower()
+                rev = int(m.group("rev"))
+                if key not in best or rev > best[key][0]:
+                    best[key] = (rev, base)
+            else:
+                best.setdefault(low, (0, base))   # 旧 hash 命名 / 手放的文件
+    out = ["%s/tex/%s/%s/%s.tex" % (TEMP_DIR, mh, dh, base)
+           for _k, (_r, base) in best.items()]
     return sorted(out, key=str.lower)
 
 
-def import_texture(game_root, src_abs, mh, dh):
-    """把外部 ``.tex`` / ``.tex.<ver>`` 复制到缓存目录，返回写进 mdf2 的逻辑路径。
+def tex_area_dir(game_root, mh, dh):
+    """一个「mesh + 原 mdf2」的导入贴图独立目录。"""
+    return os.path.join(temp_root(game_root), "tex", mh, dh)
 
-    文件名 = ``<原名>_<内容hash>.tex[.<ver>]``；mdf2 里只写 ``.tex``
-    （引擎按版本后缀匹配）。只接受 .tex，不转码 DDS。
-    版本后缀只允许 ``.tex`` 或 ``.tex.<数字>``（``.bak`` 之类直接拒绝）。
+
+_TEX_REV_RE = re.compile(r"^(?P<name>.+)_v(?P<rev>\d+)\.tex(?:\..*)?$", re.I)
+
+
+def texture_name_error(name):
+    """导入贴图名是否可用；可用返回 ``""``。
+
+    与副本名不同，贴图名就是 mdf2 里写的路径的一部分，所以只允许 ASCII：
+    非 ASCII 会被 percent-encoding 成难读的长串。
+    """
+    s = (name or "").strip()
+    if not s:
+        return "名称不能为空"
+    if s != name:
+        return "名称首尾不能有空格"
+    if len(s) > 48:
+        return "名称太长（最多 48 个字符）"
+    if _BAD_NAME_CHARS.search(s):
+        return '名称不能包含 \\ / : * ? " < > | 等字符'
+    if s.endswith("."):
+        return "名称不能以句点结尾"
+    if s.split(".")[0].lower() in _RESERVED_NAMES:
+        return "不能使用 Windows 保留名（CON / NUL / COM1…）"
+    if any(ord(c) < 32 or ord(c) > 126 for c in s):
+        return "只能用 ASCII 字符（名称会直接写进 mdf2 路径）"
+    return ""
+
+
+def next_tex_rev(game_root, mh, dh, name):
+    """同名贴图的下一个版本号（扫描目录里现有的 ``<name>_v<N>.tex*``）。"""
+    d = tex_area_dir(game_root, mh, dh)
+    rev = 0
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            m = _TEX_REV_RE.match(f)
+            if m and m.group("name").lower() == name.lower():
+                rev = max(rev, int(m.group("rev")))
+    return rev + 1
+
+
+def import_texture(game_root, src_abs, mh, dh, name):
+    """把外部 ``.tex`` / ``.tex.<ver>`` 复制到**该 mesh+mdf2 的独立目录**。
+
+    命名 = ``<name>_v<rev>.tex[.<ver>]``；每次导入同名贴图都生成新 rev
+    （引擎按逻辑路径缓存，路径不变就不会重载）。mdf2 里写不带版本后缀的
+    逻辑路径 ``materialTemp/tex/<mh>/<dh>/<name>_v<rev>.tex``。
+    只接受 ``.tex`` 或 ``.tex.<数字>``，不转码 DDS。
     """
     src = os.path.abspath(src_abs)
     if not os.path.isfile(src):
@@ -153,15 +204,15 @@ def import_texture(game_root, src_abs, mh, dh):
     i = low.find(".tex")
     if i < 0:
         raise ValueError("只支持 .tex（DDS 请先转成 .tex）: %s" % base)
-    stem, ver = base[:i].strip(), base[i + 4:]
+    ver = base[i + 4:]
     if ver and not (ver.startswith(".") and ver[1:].isdigit()):
         raise ValueError("版本后缀只能是 .tex 或 .tex.<数字>：%s" % base)
-    if not stem:
-        raise ValueError("文件名为空：%s" % base)
-    data = open(src, "rb").read()
-    h = hashlib.sha1(data).hexdigest()[:8]
-    stem = "%s_%s" % (stem[:64], h)      # 控制路径长度
-    dst_dir = os.path.join(temp_root(game_root), "tex", mh, dh)
+    err = texture_name_error(name)
+    if err:
+        raise ValueError(err)
+    rev = next_tex_rev(game_root, mh, dh, name)
+    stem = "%s_v%d" % (name, rev)
+    dst_dir = tex_area_dir(game_root, mh, dh)
     os.makedirs(dst_dir, exist_ok=True)
     shutil.copyfile(src, os.path.join(dst_dir, stem + ".tex" + ver))
     return "%s/tex/%s/%s/%s.tex" % (TEMP_DIR, mh, dh, stem)

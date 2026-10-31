@@ -47,30 +47,52 @@ def main():
     print("orig:", got)
     assert got == want, (got, want)
 
-    # 工具导入管理的贴图（带 .tex.<ver> 版本后缀）
+    # 独立管理区（mesh + 原 mdf2）里的导入贴图；同名只保留最高 rev
     d = os.path.join(root, "natives", "x64", "materialTemp", "tex", mh, dh)
     os.makedirs(d, exist_ok=True)
-    open(os.path.join(d, "MyTex_deadbeef.tex.11"), "wb").write(b"TEX0")
-    open(os.path.join(d, "Other_cafebabe.tex"), "wb").write(b"TEX0")
-    got2 = ps.list_managed_textures(root)
-    want2 = ["materialTemp/tex/%s/%s/MyTex_deadbeef.tex" % (mh, dh),
-             "materialTemp/tex/%s/%s/Other_cafebabe.tex" % (mh, dh)]
+    open(os.path.join(d, "Old_deadbeef.tex.11"), "wb").write(b"TEX0")
+    got2 = ps.list_managed_textures(root, mh, dh)
+    want2 = ["materialTemp/tex/%s/%s/Old_deadbeef.tex" % (mh, dh)]
     print("managed:", got2)
     assert got2 == want2, (got2, want2)
 
-    # import_texture：保留 .tex.<数字> 版本后缀；拒绝 .tex.bak 之类
+    # import_texture：<name>_v<rev>.tex，保留 .tex.<数字> 版本后缀
     src1 = os.path.join(root, "in1.tex.11")
     open(src1, "wb").write(b"TEX0-abc")
-    rel1 = ps.import_texture(root, src1, mh, dh)
-    assert rel1.endswith(".tex") and "in1_" in rel1, rel1
+    rel1 = ps.import_texture(root, src1, mh, dh, "MyTex")
+    assert rel1.endswith("/MyTex_v1.tex"), rel1
     dst1 = os.path.join(root, "natives", "x64", rel1.replace("/", os.sep))
     assert os.path.exists(dst1 + ".11"), dst1 + ".11"
 
+    # 同名再导入 → v2，列表只给最新版
+    open(src1, "wb").write(b"TEX0-abc2")
+    rel2 = ps.import_texture(root, src1, mh, dh, "MyTex")
+    assert rel2.endswith("/MyTex_v2.tex"), rel2
+    got3 = ps.list_managed_textures(root, mh, dh)
+    assert "materialTemp/tex/%s/%s/MyTex_v2.tex" % (mh, dh) in got3, got3
+    assert "materialTemp/tex/%s/%s/MyTex_v1.tex" % (mh, dh) not in got3, got3
+
+    # 其他管理区互不可见
+    os.makedirs(os.path.join(root, "natives", "x64", "materialTemp", "tex",
+                             "mh2", "dh2"), exist_ok=True)
+    open(os.path.join(root, "natives", "x64", "materialTemp", "tex",
+                      "mh2", "dh2", "Other_v1.tex"), "wb").write(b"TEX0")
+    assert ps.list_managed_textures(root, mh, dh) == got3, "不应包含其他区"
+
+    # 拒绝 .tex.bak；拒绝非 ASCII 名
     src2 = os.path.join(root, "in2.tex.bak")
     open(src2, "wb").write(b"TEX0-def")
     try:
-        ps.import_texture(root, src2, mh, dh)
+        ps.import_texture(root, src2, mh, dh, "in2")
         raise AssertionError("应当拒绝 .tex.bak")
+    except ValueError:
+        pass
+
+    src3 = os.path.join(root, "in3.tex")
+    open(src3, "wb").write(b"TEX0-ghi")
+    try:
+        ps.import_texture(root, src3, mh, dh, "贴图")
+        raise AssertionError("应当拒绝非 ASCII 名")
     except ValueError:
         pass
 
