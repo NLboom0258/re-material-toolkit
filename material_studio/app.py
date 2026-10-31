@@ -7018,13 +7018,14 @@ class CopyPickerDialog(QDialog):
 
 
 class TexturePickerDialog(QDialog):
-    """贴图选择器：REE list（原版全量）/ 磁盘 natives/<subdir>（mod/解包）。
+    """贴图选择器：贴图 list（原版全量）/ 磁盘 natives/<subdir>（mod/解包）。
 
-    list 来自 `%APPDATA%/REE-Lib/resources/dmc5/dmc5_files.list`（REE 资源仓库），
+    list 优先读 `~/.re-material-toolkit/tex_list.txt`（REE Tools →
+    Generate list file 的产物），其次预览缓存目录、REE 资源仓库缓存。
     解析时去掉 `natives/x64/` 前缀和 `.tex.<ver>` 版本后缀，只留 `.tex`。
     """
 
-    SOURCES = ("贴图列表（REE）", "磁盘（natives/%s）" % ps.NATIVES_SUBDIR)
+    SOURCES = ("贴图列表（list）", "磁盘（natives/%s）" % ps.NATIVES_SUBDIR)
 
     def __init__(self, parent, root, current=""):
         super().__init__(parent)
@@ -7070,8 +7071,9 @@ class TexturePickerDialog(QDialog):
         if self.cmb_src.currentIndex() == 0:
             p = ps.find_tex_list(self._root)
             self._all = ps.load_tex_list(p) if p else []
-            self._info = (("REE list：%s（%d 条）" % (p, len(self._all))) if p else
-                          "未找到 REE list（%APPDATA%/REE-Lib/resources/dmc5/dmc5_files.list）")
+            self._info = (("贴图列表：%s（%d 条）" % (p, len(self._all))) if p else
+                          "未找到贴图 list（把 REE 生成的 list 放到 %s 或 %%APPDATA%%/REE-Lib/resources/dmc5/dmc5_files.list）"
+                          % os.path.join(ps.tool_data_dir(), "tex_list.txt"))
         else:
             self._all = ps.scan_textures(self._root)
             self._info = "磁盘 natives/%s：%d 个 .tex" % (
@@ -7112,7 +7114,7 @@ class TextureEditDialog(QDialog):
         v = QVBoxLayout(self)
         tip = QLabel("材质：%s\n只改路径；槽名（= mmtr SRV 名）不可改。"
                      "应用后先改内存，点「保存到 mdf2」才持久化；"
-                     "pak 内的贴图无法从目录选择，可手输路径或用「导入…」。" % matname)
+                     "pak 内的贴图用「选择…」从贴图 list 选，外部文件用「导入…」。" % matname)
         tip.setWordWrap(True)
         v.addWidget(tip)
 

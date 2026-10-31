@@ -116,16 +116,26 @@ def tex_path_logical(rel):
     return s[:i + 4] if i >= 0 else s
 
 
+def tool_data_dir():
+    """工具自己的用户级数据目录（与游戏根无关，跟随用户配置文件）。"""
+    return os.path.join(os.path.expanduser("~"), ".re-material-toolkit")
+
+
 def find_tex_list(game_root=None):
-    """自动找 REE 资源仓库 / 工具缓存的贴图 list。返回路径或 None。"""
-    cands = []
+    """贴图 list 的查找顺序：工具数据目录 → 预览缓存 → REE 资源仓库缓存。
+
+    第一项 ``~/.re-material-toolkit/tex_list.txt`` 是用户显式放进来的完整
+    list（REE Tools → Generate list file 的产物），优先级最高：REE 仓库里
+    的 ``dmc5_files.list`` 可能落后于游戏更新。
+    """
+    cands = [os.path.join(tool_data_dir(), "tex_list.txt")]
+    if game_root:
+        cands.append(os.path.join(temp_root(game_root), "tex_list.txt"))
     appdata = os.environ.get("APPDATA")
     if appdata:
         base = os.path.join(appdata, "REE-Lib", "resources")
         for g in ("dmc5", "DMC5"):
             cands.append(os.path.join(base, g, g + "_files.list"))
-    if game_root:
-        cands.append(os.path.join(temp_root(game_root), "tex_list.txt"))
     for p in cands:
         if os.path.isfile(p):
             return p
