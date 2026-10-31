@@ -4170,41 +4170,19 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("选择副本：该 mesh 还没有编辑副本（先勾选建一份）")
             return
         groups.sort(key=lambda g: g[1])
-
-        labels, rows = [], []          # rows: (dh, copy)
-        for dh, base, cs in groups:
-            for c in cs:
-                mark = ("  ← 当前" if ent.get("prev") == dh
-                        and ent.get("copy") == c["name"] else "")
-                labels.append("%s（v%d）· %s%s" % (
-                    c["name"], c["rev"], self._rb_short(base, 56) or "?", mark))
-                rows.append((dh, c))
-        # 新建：只有一个原 mdf2 时只给一项；多个时各自一项（不再弹第二层选择）
-        creates = []
-        if len(groups) == 1:
-            labels.append("＋ 新建副本…")
-            creates.append(groups[0][0])
-        else:
-            for dh, base, _cs in groups:
-                labels.append("＋ 新建副本… · %s" % (self._rb_short(base, 48) or "?"))
-                creates.append(dh)
-        default = next((i for i, r in enumerate(rows)
-                        if ent.get("prev") == r[0] and ent.get("copy") == r[1]["name"]), 0)
-        pick, ok = QInputDialog.getItem(
-            self, "选择副本",
-            "对象：%s\n\n选一份挂到这个对象（该 mesh 用到的原 mdf2 的副本都能选）："
-            % self._rb_short(mesh_path, 70),
-            labels, default, False)
-        if not ok:
+        cur = (ent.get("prev") or "", ent.get("copy") or "")
+        dlg = CopyPickerDialog(
+            self, groups, current=cur, mode="pick",
+            prompt="对象：%s\n选一份挂到这个对象（可跨该 mesh 用到的所有原 mdf2）；"
+                   "带「＋」的行可为该原 mdf2 新建副本："
+                   % self._rb_short(mesh_path, 90))
+        if dlg.exec() != QDialog.Accepted or not dlg.choice:
             return
-        i = labels.index(pick)
-        if i >= len(rows):
-            dh = creates[i - len(rows)]
+        kind, dh, c = dlg.choice
+        if kind == "new":
             c = self._rb_new_copy(root, doc, mh, dh)
             if c is None:
                 return
-        else:
-            dh, c = rows[i]
         self._rb_switch_copy(ent, doc, mh, dh, c, root)
 
     def _rb_switch_copy(self, ent, doc, mh, dh, c, root):
@@ -4268,33 +4246,29 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("删除副本：读 holds 失败（%s），暂不删除" % ex)
             return
 
-        rows, labels = [], []
+        groups = []
         for dh in sorted(mdfs):
             e = mdfs[dh]
             base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
-            for c in ps.list_copies(doc, mh, dh):
-                if (dh, c["name"]) in in_use:
-                    continue
-                if c["rel"].lower() in held:
-                    continue
-                labels.append("%s（v%d）· %s" % (
-                    c["name"], c["rev"], self._rb_short(base, 56) or "?"))
-                rows.append((dh, c))
-        if not rows:
+            cs = [c for c in ps.list_copies(doc, mh, dh)
+                  if (dh, c["name"]) not in in_use
+                  and c["rel"].lower() not in held]
+            if cs:
+                groups.append((dh, base, cs))
+        if not groups:
             self._rb_say("删除副本：没有可删的（都在使用中 / 被游戏保持）")
             QMessageBox.information(
                 self, "没有可删除的副本",
                 "该 mesh 的副本都在使用中，或被游戏保持。\n"
                 "先切换到别的副本 / 取消勾选，或在游戏里解除保持后再试。")
             return
-        pick, ok = QInputDialog.getItem(
-            self, "删除副本",
-            "对象：%s\n\n只列**未使用**的副本；删除后文件和登记都会移除（不可恢复）："
-            % self._rb_short(mesh_path, 70),
-            labels, 0, False)
-        if not ok:
+        dlg = CopyPickerDialog(
+            self, groups, mode="delete", title="删除副本",
+            prompt="对象：%s\n只列**未使用**的副本（删除后文件和登记都移除，不可恢复）："
+                   % self._rb_short(mesh_path, 90))
+        if dlg.exec() != QDialog.Accepted or not dlg.choice:
             return
-        dh, c = rows[labels.index(pick)]
+        _kind, dh, c = dlg.choice
         if QMessageBox.question(
                 self, "删除副本",
                 "确定删除副本「%s」v%d？\n\n文件：%s\n\n不可恢复。"
@@ -6556,6 +6530,147 @@ _FLAG_TIPS = {
     "PixelDepthOffsetUsed": "使用像素深度偏移",
     "NoRayTracing": "不参与光追",
 }
+
+
+class CopyPickerDialog(QDialog):
+    """副本选择器：按原 mdf2 分组 + 过滤。
+
+    一个 mesh 可能用到几十个原 mdf2（变体 / 共用模型 / 污浊 / 换色 / 残影 /
+    过场专用材质…），扁平列表会太长，所以按原 mdf2 分组；pick 模式每组末尾
+    带「＋ 新建副本…」。选中子项通过 ``choice`` 返回：
+        ("copy", dh, 副本 dict) / ("new", dh, None)
+    """
+
+    def __init__(self, parent, groups, current=("", ""), mode="pick",
+                 title="选择副本", prompt=""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(840, 580)
+        self._mode = mode
+        self._current = current
+        self.choice = None
+
+        v = QVBoxLayout(self)
+        if prompt:
+            lab = QLabel(prompt)
+            lab.setWordWrap(True)
+            v.addWidget(lab)
+        self.ed_filter = QLineEdit()
+        self.ed_filter.setPlaceholderText("过滤：原 mdf2 路径 / 副本名（输入即筛选）")
+        v.addWidget(self.ed_filter)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["原 mdf2 / 副本", "标记"])
+        self.tree.setColumnWidth(0, 380)
+        self.tree.setColumnWidth(1, 320)
+        self.tree.setAlternatingRowColors(True)
+        v.addWidget(self.tree, 1)
+
+        total = sum(len(cs) for _dh, _b, cs in groups)
+        expand_all = total <= 12
+        target = None
+        for dh, base, copies in groups:
+            g = QTreeWidgetItem(["%s  (%d)" % (os.path.basename(base) or dh,
+                                                len(copies)), base])
+            g.setToolTip(1, base)
+            g.setFlags(g.flags() & ~Qt.ItemIsSelectable)
+            g.setData(0, Qt.UserRole, ("group", dh, None))
+            for c in copies:
+                mark = "← 当前" if (dh, c["name"]) == current else ""
+                it = QTreeWidgetItem(["%s（v%d）" % (c["name"], c["rev"]), mark])
+                it.setToolTip(0, c["rel"])
+                it.setData(0, Qt.UserRole, ("copy", dh, c))
+                g.addChild(it)
+                if (dh, c["name"]) == current:
+                    target = it
+            if mode == "pick":
+                add = QTreeWidgetItem(["＋ 新建副本…", ""])
+                add.setData(0, Qt.UserRole, ("new", dh, None))
+                g.addChild(add)
+            self.tree.addTopLevelItem(g)
+            g.setExpanded(expand_all or (dh == current[0]))
+
+        if target is None:
+            target = self._first_pickable()
+        if target is not None:
+            self.tree.setCurrentItem(target)
+            self.tree.scrollToItem(target)
+
+        self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.bb.button(QDialogButtonBox.Ok).setText("确定")
+        self.bb.button(QDialogButtonBox.Cancel).setText("取消")
+        self.bb.accepted.connect(self.accept)
+        self.bb.rejected.connect(self.reject)
+        v.addWidget(self.bb)
+
+        self.ed_filter.textChanged.connect(self._filter)
+        self.tree.itemDoubleClicked.connect(self._dbl)
+        self.tree.currentItemChanged.connect(lambda *_: self._sync_ok())
+        self._sync_ok()
+
+    def _first_pickable(self):
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            for j in range(g.childCount()):
+                c = g.child(j)
+                if c.data(0, Qt.UserRole)[0] == "copy":
+                    return c
+        return None
+
+    def _first_visible_copy(self):
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            if g.isHidden():
+                continue
+            for j in range(g.childCount()):
+                c = g.child(j)
+                if c.isHidden():
+                    continue
+                if c.data(0, Qt.UserRole)[0] == "copy":
+                    return c
+        return None
+
+    def _selected(self):
+        it = self.tree.currentItem()
+        if it is None or it.isHidden():
+            return None
+        d = it.data(0, Qt.UserRole)
+        return d if d and d[0] != "group" else None
+
+    def _sync_ok(self):
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(self._selected() is not None)
+
+    def _dbl(self, item, _col):
+        d = item.data(0, Qt.UserRole)
+        if d and d[0] != "group":
+            self.accept()
+
+    def _filter(self, text):
+        t = (text or "").strip().lower()
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            ghit = bool(t) and t in (g.text(0) + " " + g.text(1)).lower()
+            shown = 0
+            for j in range(g.childCount()):
+                c = g.child(j)
+                hit = (not t) or ghit or (t in c.text(0).lower())
+                c.setHidden(not hit)
+                if hit:
+                    shown += 1
+            g.setHidden(shown == 0)
+            if t and shown:
+                g.setExpanded(True)
+        cur = self.tree.currentItem()
+        if cur is not None and cur.isHidden():
+            self.tree.setCurrentItem(self._first_visible_copy())
+        self._sync_ok()
+
+    def accept(self):
+        d = self._selected()
+        if d is None:
+            return
+        self.choice = d
+        super().accept()
 
 
 class MaterialAttrsDialog(QDialog):
