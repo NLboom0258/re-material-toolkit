@@ -4171,14 +4171,22 @@ class MaterialSystemPanel(QWidget):
             return
         groups.sort(key=lambda g: g[1])
         cur = (ent.get("prev") or "", ent.get("copy") or "")
+        cur_desc = ""
+        if ent.get("copy"):
+            e0 = ps.get_mdf2(doc, mh, cur[0]) or {}
+            b0 = ps.norm_rel(e0.get("baseMdf2") or e0.get("originalMdf2") or "")
+            cur_desc = "\n当前：%s · %s" % (ent["copy"], self._rb_short(b0, 80))
         dlg = CopyPickerDialog(
             self, groups, current=cur, mode="pick",
-            prompt="对象：%s\n选一份挂到这个对象（可跨该 mesh 用到的所有原 mdf2）；"
+            prompt="对象：%s%s\n选一份挂到这个对象（可跨该 mesh 用到的所有原 mdf2）；"
                    "带「＋」的行可为该原 mdf2 新建副本："
-                   % self._rb_short(mesh_path, 90))
+                   % (self._rb_short(mesh_path, 90), cur_desc))
         if dlg.exec() != QDialog.Accepted or not dlg.choice:
             return
         kind, dh, c = dlg.choice
+        if kind == "copy" and (dh, c["name"]) == cur:
+            self._rb_say("仍是当前副本：%s（v%d）" % (c["name"], c["rev"]))
+            return
         if kind == "new":
             c = self._rb_new_copy(root, doc, mh, dh)
             if c is None:
@@ -6547,7 +6555,6 @@ class CopyPickerDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(840, 580)
         self._mode = mode
-        self._current = current
         self.choice = None
 
         v = QVBoxLayout(self)
@@ -6566,9 +6573,6 @@ class CopyPickerDialog(QDialog):
         self.tree.setAlternatingRowColors(True)
         v.addWidget(self.tree, 1)
 
-        total = sum(len(cs) for _dh, _b, cs in groups)
-        expand_all = total <= 12
-        target = None
         for dh, base, copies in groups:
             g = QTreeWidgetItem(["%s  (%d)" % (os.path.basename(base) or dh,
                                                 len(copies)), base])
@@ -6581,20 +6585,13 @@ class CopyPickerDialog(QDialog):
                 it.setToolTip(0, c["rel"])
                 it.setData(0, Qt.UserRole, ("copy", dh, c))
                 g.addChild(it)
-                if (dh, c["name"]) == current:
-                    target = it
             if mode == "pick":
                 add = QTreeWidgetItem(["＋ 新建副本…", ""])
                 add.setData(0, Qt.UserRole, ("new", dh, None))
                 g.addChild(add)
             self.tree.addTopLevelItem(g)
-            g.setExpanded(expand_all or (dh == current[0]))
-
-        if target is None:
-            target = self._first_pickable()
-        if target is not None:
-            self.tree.setCurrentItem(target)
-            self.tree.scrollToItem(target)
+            # 默认全部折叠、不预选：用户要哪份就展开哪组自己点
+            g.setExpanded(False)
 
         self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.bb.button(QDialogButtonBox.Ok).setText("确定")
@@ -6607,15 +6604,6 @@ class CopyPickerDialog(QDialog):
         self.tree.itemDoubleClicked.connect(self._dbl)
         self.tree.currentItemChanged.connect(lambda *_: self._sync_ok())
         self._sync_ok()
-
-    def _first_pickable(self):
-        for i in range(self.tree.topLevelItemCount()):
-            g = self.tree.topLevelItem(i)
-            for j in range(g.childCount()):
-                c = g.child(j)
-                if c.data(0, Qt.UserRole)[0] == "copy":
-                    return c
-        return None
 
     def _first_visible_copy(self):
         for i in range(self.tree.topLevelItemCount()):
