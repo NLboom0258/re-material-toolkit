@@ -144,31 +144,6 @@ def _rb_addr_key(a):
     return s[2:] if s.startswith("0x") else s
 
 
-def _rb_is_variant(rel):
-    """当前 mdf2 是不是**引擎变体**（湿身 / 燃烧…）。
-
-    DMC5 的变体是在原文件名后加后缀（``pl0800.mdf2`` → ``pl0800_Wet.mdf2``）。
-    变体路径不能当 base：那样「重置」会回到变体参数，而不是原始参数。
-    """
-    stem = (rel or "").lower().rsplit("/", 1)[-1]
-    for tag in ("_wet", "_burn", "_dirt", "_blood", "_poison", "_mud", "_ash"):
-        if tag in stem:
-            return True
-    return False
-
-
-def _rb_variant_base(rel):
-    """``.../pl0800_Wet.mdf2`` → ``.../pl0800.mdf2``（去变体后缀）。"""
-    s = (rel or "").replace("\\", "/")
-    if "." not in s:
-        return ""
-    stem, ext = s.rsplit(".", 1)
-    for tag in ("_wet", "_burn", "_dirt", "_blood", "_poison", "_mud", "_ash"):
-        if stem.lower().endswith(tag):
-            return stem[:-len(tag)] + "." + ext
-    return ""
-
-
 def _rb_parse_vec(value, n):
     """把 "0, 1.78, -0.06" 解析成 n 个 float；解析不了的置 0。"""
     out = [0.0] * n
@@ -4255,12 +4230,11 @@ class MaterialSystemPanel(QWidget):
         if prev and root:
             doc = ps.load_index(root)
             mh = ps.mesh_hash(ent.get("meshPath") or "")
-            ed = ps.norm_rel(((ps.get_mdf2(doc, mh, prev) or {}).get("edit")) or "")
+            reg = ps.get_mdf2(doc, mh, prev) or {}
+            ed = ps.norm_rel(reg.get("edit") or "")
             if ed:
-                parts = ed[len(ps.TEMP_DIR) + 1:].split("/")
-                tag = ("mesh %s · mdf2 %s" % (parts[1], parts[2].split("_p")[0])
-                       if len(parts) >= 3 else "mdf2 %s" % prev)
-                lbl.setText("%s   [预览中 · %s]" % (ed, tag))
+                base = ps.norm_rel(reg.get("baseMdf2") or reg.get("originalMdf2") or "")
+                lbl.setText("%s   [预览中 · 原始: %s]" % (ed, base or "?"))
                 return
         p = None
         try:
@@ -4463,45 +4437,6 @@ class MaterialSystemPanel(QWidget):
             obj = ps.get_object(idx_doc, mh)
             reg = ps.get_mdf2(idx_doc, mh, dh) if obj else None
 
-            # 当前挂的是引擎变体（湿身 _Wet / 燃烧…）：不能拿它当 base，
-            # 否则「重置」会回到变体参数。这里**必须询问**用户：
-            #   用已有的正常副本 / 基于正常 mdf2 新建（不能静默复用）
-            if reg is None and _rb_is_variant(cur):
-                normal = _rb_variant_base(cur) or cur
-                dh2 = ps.mdf2_hash(normal)
-                base2 = normal
-                reg2 = ps.get_mdf2(idx_doc, mh, dh2) if obj else None
-                ed2 = ps.norm_rel((reg2 or {}).get("edit") or "")
-
-                labels, acts = [], []
-                if ed2 and ps.exists_edit(root, ed2):
-                    labels.append("用已有副本: %s" % self._rb_short(ed2))
-                    acts.append("reuse")
-                labels.append("＋ 新建副本（基于正常 mdf2）")
-                acts.append("new")
-                pick, ok = QInputDialog.getItem(
-                    self, "启用预览（引擎变体）",
-                    "当前 mdf2 是引擎变体：%s\n正常 mdf2：%s\n\n"
-                    "「用已有」= 挂已登记的编辑副本；「新建」= 基于正常 mdf2 另建一份。"
-                    % (cur.rsplit("/", 1)[-1], normal),
-                    labels, 0, False)
-                if not ok:
-                    raise RuntimeError("已取消")
-                act = acts[labels.index(pick)]
-                self._rb_say("当前是引擎变体（%s），使用正常 mdf2: %s"
-                             % (cur.rsplit("/", 1)[-1], normal))
-                if act == "reuse":
-                    self._rb_apply_iso(ent, ed2)
-                    ps.upsert_mdf2(idx_doc, mh, dh2, base2, base2, edit_rel=ed2)
-                    ps.save_index(root, idx_doc, log=self._rb_say)
-                    return dh2
-                edit = ps.create_edit(root, mh, dh2, base2, log=self._rb_say)
-                ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
-                ps.upsert_mdf2(idx_doc, mh, dh2, base2, base2, edit_rel=edit)
-                ps.save_index(root, idx_doc, log=self._rb_say)
-                self._rb_apply_iso(ent, edit)
-                return dh2
-
         self._rb_say("身份 mesh=%s / mdf2=%s" % (mh, dh))
         self._rb_say("  mesh = %s" % mesh_path)
         self._rb_say("  base = %s" % base)
@@ -4515,7 +4450,7 @@ class MaterialSystemPanel(QWidget):
             # 接管分支只能拿临时副本当 base（不可靠：那份文件被清掉就没法重置了）。
             reg_base = ps.norm_rel((reg or {}).get("baseMdf2") or "")
             if (not cur.lower().startswith(ps.TEMP_DIR.lower() + "/")
-                    and not _rb_is_variant(cur) and reg_base != cur):
+                    and reg_base != cur):
                 self._rb_say("base 校正为原 mdf2: %s" % cur)
                 base = cur
                 ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=edit)

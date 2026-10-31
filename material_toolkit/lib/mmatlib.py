@@ -103,21 +103,28 @@ def artifact_stem(rel):
     return name
 
 
+_SUFFIX_RES = (
+    re.compile(r"_r\d+$"),                       # 新：<name>_r<rev>
+    re.compile(r"_p\d{8}_\d{6}(?:_\d+)?$"),      # 旧：<name>_p<ts>[_N]
+)
+
+
 def parse_artifact_name(rel):
     """从产物路径解析材质名（只解析字符串，不查登记）。
 
-    先剥 ``_r<rev>``（新命名），再剥 ``_p<YYYYmmdd_HHMMSS>[_N]``（早期命名）。
-    材质名本身可能以这些形式结尾 —— 所以调用方应**先用完整 stem 查一次登记**，
-    再退回这个解析结果（见 ``resolve_material``）。
+    后缀格式固定且**一定在末尾**，所以从后往前按顺序剥：
+      ``<name>_r<rev>`` / ``<name>_p<YYYYmmdd_HHMMSS>[_N]``
+
+    不符合任何已知后缀 → 返回 ``""``（不是我们标准流程的产物；使用它本身有风险，
+    调用方应按未登记处理）。材质名本身可能以这些形式结尾 —— 所以调用方应
+    **先用完整 stem 查一次登记**，再退回这个解析结果（见 ``resolve_material``）。
     """
     stem = artifact_stem(rel)
-    m = re.search(r"_r\d+$", stem)
-    if m:
-        return stem[:m.start()]
-    m = re.search(r"_p\d{8}_\d{6}(?:_\d+)?$", stem)
-    if m:
-        return stem[:m.start()]
-    return stem
+    for rx in _SUFFIX_RES:
+        m = rx.search(stem)
+        if m:
+            return stem[:m.start()]
+    return ""
 
 
 def resolve_material(game_root, mmtr_path):
