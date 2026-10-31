@@ -38,8 +38,10 @@ a = ps.create_copy(root, mh, dh, base_rel, name="默认")
 b = ps.create_copy(root, mh, dh, base_rel, name="高光版")
 assert a["rel"] != b["rel"]
 assert os.path.dirname(a["rel"]) == os.path.dirname(b["rel"])
-assert a["rel"].endswith("/默认_v1.mdf2"), a["rel"]
-assert b["rel"].endswith("/高光版_v1.mdf2"), b["rel"]
+# 磁盘文件名只能是 ASCII（非 ASCII 交给引擎会被按 ANSI 处理）
+assert a["rel"].isascii() and b["rel"].isascii()
+assert a["rel"].endswith("/%s_v1.mdf2" % ps.copy_file_stem("默认")), a["rel"]
+assert b["rel"].endswith("/%s_v1.mdf2" % ps.copy_file_stem("高光版")), b["rel"]
 assert os.path.exists(ps.rel_to_abs(root, a["rel"]))
 assert os.path.exists(ps.rel_to_abs(root, b["rel"]))
 
@@ -48,11 +50,13 @@ for bad in ("", " a", "a/b", "a:b", "con", "x."):
     assert ps.copy_name_error(bad), bad
 assert ps.copy_name_error("默认") == ""
 assert ps.copy_name_error("A_v2") == ""      # 名字自带 _v2 也合法（解析取最后一个后缀）
+assert ps.copy_name_error("默" * 40)          # 编码后超长 → 拒绝
+assert ps.copy_file_stem("默认").isascii()
 
 # 3) rev 递增；磁盘上已存在则继续跳过
 n1 = ps.bump_copy_rel(root, a["rel"])
 assert n1["rev"] == 2 and n1["name"] == "默认"
-assert n1["rel"].endswith("/默认_v2.mdf2")
+assert n1["rel"].endswith("/%s_v2.mdf2" % ps.copy_file_stem("默认"))
 with open(ps.rel_to_abs(root, n1["rel"]), "wb") as f:
     f.write(b"x")
 n2 = ps.bump_copy_rel(root, a["rel"])
@@ -88,6 +92,10 @@ assert ps.load_index(root)["objects"] == {}
 # 6) 路径解析
 assert ps.parse_temp_rel(a["rel"]) == {"kind": "edit", "mh": mh, "dh": dh,
                                        "name": "默认", "rev": 1}
+# 名字自带 _v<数字> 时按最后一个后缀拆
+c = ps.create_copy(root, mh, dh, base_rel, name="A_v2")
+p = ps.parse_temp_rel(c["rel"])
+assert p["name"] == "A_v2" and p["rev"] == 1, p
 assert ps.parse_temp_rel(
     "materialTemp/edit/mh/dh/默认_p20260101_000000.mdf2") is None
 

@@ -35,6 +35,7 @@ import os
 import posixpath
 import re
 import time
+import urllib.parse
 
 from . import mdf2 as mdf2lib
 
@@ -356,16 +357,32 @@ def copy_name_error(name):
         return "副本名不能以句点结尾"
     if s.split(".")[0].lower() in _RESERVED_NAMES:
         return "副本名不能使用 Windows 保留名（CON / NUL / COM1…）"
+    if len(copy_file_stem(s)) > 96:
+        return "副本名太长（含非 ASCII 字符时最多约 32 个汉字）"
     return ""
 
 
+def copy_file_stem(name):
+    """副本名 → 文件名 stem（只含 ASCII）。
+
+    ⚠️ 实测：非 ASCII 路径传给 REEngine 会被按 ANSI 编码处理（中文变乱码），
+    引擎按乱码路径找不到文件 → 材质变成默认方格，对象也会短暂失效。
+    所以磁盘上只用 percent-encoding 后的 ASCII；展示仍用原名（存在 sessions.json）。
+    """
+    return urllib.parse.quote(name, safe="")
+
+
+def copy_name_from_stem(stem):
+    return urllib.parse.unquote(stem)
+
+
 def new_copy_rel(mh, dh, name, rev):
-    """副本相对路径（不带 ``.10``）：``edit/<mh>/<dh>/<name>_v<rev>.mdf2``。"""
+    """副本相对路径（不带 ``.10``）：``edit/<mh>/<dh>/<ASCII名>_v<rev>.mdf2``。"""
     err = copy_name_error(name)
     if err:
         raise ValueError(err)
     return posixpath.join(TEMP_DIR, "edit", mh, dh,
-                          "%s_v%d.mdf2" % (name, int(rev)))
+                          "%s_v%d.mdf2" % (copy_file_stem(name), int(rev)))
 
 
 def new_orig_rel(dh, ts=None, game_root=None):
@@ -417,7 +434,8 @@ def parse_temp_rel(rel):
         m = _COPY_STEM_RE.match(stem)
         if m:
             return {"kind": "edit", "mh": parts[1], "dh": parts[2],
-                    "name": m.group("name"), "rev": int(m.group("rev"))}
+                    "name": copy_name_from_stem(m.group("name")),
+                    "rev": int(m.group("rev"))}
     if len(parts) == 2 and parts[0] == "orig":
         m = _TS_RE.search(parts[1])
         if m and "_p" in parts[1]:

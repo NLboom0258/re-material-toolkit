@@ -4367,15 +4367,6 @@ class MaterialSystemPanel(QWidget):
         self._rb_iso_mdf = rel
         self._rb_say("已挂载工作副本（keep=%s）: %s" % (d.get("keep"), ms[0].get("now") or rel))
 
-    def _rb_ask_first(self, mesh_path, mdf_rel):
-        txt = ("这份原 mdf2 首次进入预览。\n\n"
-               "模型：%s\n原 mdf2：%s\n\n"
-               "将复制一份到 materialTemp/edit/ 下作为「默认」副本，原文件不会改动；"
-               "之后所有调参只作用于副本，可随时另建副本做对比。" % (mesh_path, mdf_rel))
-        return QMessageBox.question(self, "启用预览", txt,
-                                    QMessageBox.Ok | QMessageBox.Cancel,
-                                    QMessageBox.Ok) == QMessageBox.Ok
-
     def _rb_ask_copy(self, idx_doc, mh, dh, copies):
         """该原 mdf2 已有多个副本时让用户挑。返回副本登记项 | "__new__" | None。"""
         e = ps.get_mdf2(idx_doc, mh, dh) or {}
@@ -4397,8 +4388,12 @@ class MaterialSystemPanel(QWidget):
         i = labels.index(pick)
         return "__new__" if i == len(copies) else copies[i]
 
-    def _rb_new_copy(self, root, idx_doc, mh, dh):
-        """弹名字输入 → 基于原 mdf2 建新副本 → 写进登记（不 save_index）。"""
+    def _rb_new_copy(self, root, idx_doc, mh, dh, first=False, mesh_path=""):
+        """弹名字输入 → 基于原 mdf2 建新副本 → 写进登记（不 save_index）。
+
+        first=True：首次为这份原 mdf2 建副本（文案带上模型与原路径）。
+        任何创建入口（首次勾选 / 选择副本里的新建）都必须经过这里，不自作主张用默认名。
+        """
         e = ps.get_mdf2(idx_doc, mh, dh) or {}
         base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
         if not base:
@@ -4406,11 +4401,18 @@ class MaterialSystemPanel(QWidget):
             return None
         names = {c["name"] for c in ps.list_copies(idx_doc, mh, dh)}
         default = "默认" if "默认" not in names else "副本%d" % (len(names) + 1)
+        if first:
+            title = "创建副本"
+            prompt = ("这份原 mdf2 首次进入预览。\n\n"
+                      "模型：%s\n原 mdf2：%s\n\n"
+                      "将复制一份作为工作副本，原文件不会改动。\n"
+                      "副本名（同一原 mdf2 下唯一）：" % (mesh_path, base))
+        else:
+            title = "新建副本"
+            prompt = ("原 mdf2：%s\n\n副本名（同一原 mdf2 下唯一）："
+                      % (self._rb_short(base, 70) or "?"))
         while True:
-            name, ok = QInputDialog.getText(
-                self, "新建副本",
-                "原 mdf2：%s\n\n副本名（同一原 mdf2 下唯一）："
-                % (self._rb_short(base, 70) or "?"), text=default)
+            name, ok = QInputDialog.getText(self, title, prompt, text=default)
             if not ok:
                 return None
             err = ps.copy_name_error(name)
@@ -4433,7 +4435,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_iso_begin(self, root, ent):
         """开启某对象的预览。返回该对象对应的 mdf2Hash（写入 ent["prev"]）。
 
-        已有副本时让用户挑一份或新建；首次则确认后建「默认」副本。
+        已有副本时让用户挑一份或新建；首次则输入名字后建副本。
         """
         ident = self._rb_find_identity(ent)
         if not ident:
@@ -4503,7 +4505,7 @@ class MaterialSystemPanel(QWidget):
             ps.upsert_mdf2(idx_doc, mh, dh, base, base)
             ps.save_index(root, idx_doc, log=self._rb_say)
 
-        # ② 该原 mdf2 已有副本 → 挑一份 / 新建；没有 → 问一次后建「默认」
+        # ② 该原 mdf2 已有副本 → 挑一份 / 新建；没有 → 先问名字再建
         copies = [c for c in ps.list_copies(idx_doc, mh, dh)
                   if ps.exists_edit(root, c["rel"])]
         if copies:
@@ -4518,12 +4520,11 @@ class MaterialSystemPanel(QWidget):
                     if c is None:
                         raise RuntimeError("已取消")
         else:
-            if not self._rb_ask_first(mesh_path, base):
-                raise RuntimeError("已取消")
-            info = ps.create_copy(root, mh, dh, base, name="默认", log=self._rb_say)
             ps.upsert_mdf2(idx_doc, mh, dh, base, base)
-            c = ps.upsert_copy(idx_doc, mh, dh,
-                               info["name"], info["rel"], info["rev"])
+            c = self._rb_new_copy(root, idx_doc, mh, dh,
+                                  first=True, mesh_path=mesh_path)
+            if c is None:
+                raise RuntimeError("已取消")
             ps.save_index(root, idx_doc, log=self._rb_say)
 
         self._rb_apply_iso(ent, c["rel"])
