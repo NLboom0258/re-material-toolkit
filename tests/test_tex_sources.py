@@ -58,6 +58,22 @@ def main():
     print("managed:", got2)
     assert got2 == want2, (got2, want2)
 
+    # import_texture：保留 .tex.<数字> 版本后缀；拒绝 .tex.bak 之类
+    src1 = os.path.join(root, "in1.tex.11")
+    open(src1, "wb").write(b"TEX0-abc")
+    rel1 = ps.import_texture(root, src1, mh, dh)
+    assert rel1.endswith(".tex") and "in1_" in rel1, rel1
+    dst1 = os.path.join(root, "natives", "x64", rel1.replace("/", os.sep))
+    assert os.path.exists(dst1 + ".11"), dst1 + ".11"
+
+    src2 = os.path.join(root, "in2.tex.bak")
+    open(src2, "wb").write(b"TEX0-def")
+    try:
+        ps.import_texture(root, src2, mh, dh)
+        raise AssertionError("应当拒绝 .tex.bak")
+    except ValueError:
+        pass
+
     shutil.rmtree(root)
     print("test_tex_sources: OK")
 

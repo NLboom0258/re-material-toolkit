@@ -4238,9 +4238,6 @@ class MaterialSystemPanel(QWidget):
         if not slots:
             self._rb_say("贴图编辑：材质 %s 没有贴图槽（或服务未更新）" % matname)
             return
-        for s in slots:
-            s["exists"] = ps.texture_exists(root, s["path"])
-
         # 只列两类贴图：原 mdf2 自带（所有材质）/ 工具导入管理。
         # 不扫磁盘、不读 pak 全量列表：那些路径可能属于别的 mod，卸载后就缺失了。
         try:
@@ -7124,8 +7121,8 @@ class TextureEditDialog(QDialog):
         tip.setWordWrap(True)
         v.addWidget(tip)
 
-        self.tbl = QTableWidget(len(slots), 4)
-        self.tbl.setHorizontalHeaderLabels(["槽位", "路径", "状态", "操作"])
+        self.tbl = QTableWidget(len(slots), 3)
+        self.tbl.setHorizontalHeaderLabels(["槽位", "路径", "操作"])
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.tbl.horizontalHeader()
@@ -7133,10 +7130,8 @@ class TextureEditDialog(QDialog):
         hh.setSectionResizeMode(0, QHeaderView.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
         hh.setSectionResizeMode(2, QHeaderView.Interactive)
-        hh.setSectionResizeMode(3, QHeaderView.Interactive)
         self.tbl.setColumnWidth(0, 150)
-        self.tbl.setColumnWidth(2, 64)
-        self.tbl.setColumnWidth(3, 190)
+        self.tbl.setColumnWidth(2, 190)
 
         for r, s in enumerate(slots):
             name = s.get("name") or "?"
@@ -7146,8 +7141,6 @@ class TextureEditDialog(QDialog):
             le = QLineEdit(s.get("path") or "")
             le.setPlaceholderText("相对 natives/%s 的 .tex 路径" % ps.NATIVES_SUBDIR)
             self.tbl.setCellWidget(r, 1, le)
-            st = QLabel("")
-            self.tbl.setCellWidget(r, 2, st)
             ops = QWidget()
             h = QHBoxLayout(ops)
             h.setContentsMargins(0, 0, 0, 0)
@@ -7157,9 +7150,8 @@ class TextureEditDialog(QDialog):
             b_rst = QPushButton("还原")
             for b in (b_pick, b_imp, b_rst):
                 h.addWidget(b)
-            self.tbl.setCellWidget(r, 3, ops)
-            self._rows.append((s, le, st))
-            le.editingFinished.connect(lambda rr=r: self._refresh_status(rr))
+            self.tbl.setCellWidget(r, 2, ops)
+            self._rows.append((s, le))
             b_pick.clicked.connect(lambda _=False, rr=r: self._pick(rr))
             b_imp.clicked.connect(lambda _=False, rr=r: self._import(rr))
             b_rst.clicked.connect(lambda _=False, rr=r: self._restore(rr))
@@ -7170,33 +7162,17 @@ class TextureEditDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
-        for r in range(len(slots)):
-            self._refresh_status(r)
-
-    def _refresh_status(self, r):
-        _s, le, st = self._rows[r]
-        p = ps.norm_rel(le.text())
-        if not p:
-            st.setText("空")
-            st.setStyleSheet("color:#b00020")
-        elif ps.texture_exists(self._root, p):
-            st.setText("OK")
-            st.setStyleSheet("color:#2e7d32")
-        else:
-            st.setText("缺失")
-            st.setStyleSheet("color:#b00020")
 
     def _pick(self, r):
-        s, le, st = self._rows[r]
+        s, le = self._rows[r]
         dlg = TexturePickerDialog(self, self._sources, le.text())
         if dlg.exec() == QDialog.Accepted:
             p = dlg.chosen()
             if p:
                 le.setText(p)
-                self._refresh_status(r)
 
     def _import(self, r):
-        _s, le, st = self._rows[r]
+        _s, le = self._rows[r]
         p, _ = QFileDialog.getOpenFileName(
             self, "导入 .tex（复制到 materialTemp/tex）", "",
             "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
@@ -7208,16 +7184,14 @@ class TextureEditDialog(QDialog):
             QMessageBox.warning(self, "导入失败", str(ex))
             return
         le.setText(rel)
-        self._refresh_status(r)
 
     def _restore(self, r):
-        s, le, st = self._rows[r]
+        s, le = self._rows[r]
         le.setText(s.get("path") or "")
-        self._refresh_status(r)
 
     def changes(self):
         out = {}
-        for s, le, _st in self._rows:
+        for s, le in self._rows:
             p = ps.norm_rel(le.text())
             if p and p != (s.get("path") or ""):
                 out[s.get("name")] = p

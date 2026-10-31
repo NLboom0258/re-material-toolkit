@@ -138,43 +138,12 @@ def list_managed_textures(game_root):
     return sorted(out, key=str.lower)
 
 
-def texture_abs(game_root, tex_rel):
-    """贴图相对路径 → 磁盘绝对路径（兼容 ``.tex`` / ``.tex.10``）。找不到返回 None。"""
-    rel = norm_rel(tex_rel)
-    if not rel:
-        return None
-    p = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR,
-                     rel.replace("/", os.sep))
-    for cand in (p, p + ".tex", p + ".tex.10"):
-        if os.path.exists(cand):
-            return cand
-    d, fn = os.path.split(p)
-    if os.path.isdir(d):
-        low = fn.lower()
-        for n in os.listdir(d):
-            nl = n.lower()
-            if nl == low or (nl.startswith(low + ".") and
-                             nl.rsplit(".", 1)[-1].isdigit()):
-                return os.path.join(d, n)
-    return None
-
-
-def texture_exists(game_root, tex_rel):
-    """贴图是否能被游戏找到：先磁盘 natives/<subdir>，再按 pak 覆盖顺序查。"""
-    if texture_abs(game_root, tex_rel):
-        return True
-    try:
-        from . import pakio
-        return pakio.find_entry(game_root, norm_rel(tex_rel)) is not None
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def import_texture(game_root, src_abs, mh, dh):
     """把外部 ``.tex`` / ``.tex.<ver>`` 复制到缓存目录，返回写进 mdf2 的逻辑路径。
 
     文件名 = ``<原名>_<内容hash>.tex[.<ver>]``；mdf2 里只写 ``.tex``
     （引擎按版本后缀匹配）。只接受 .tex，不转码 DDS。
+    版本后缀只允许 ``.tex`` 或 ``.tex.<数字>``（``.bak`` 之类直接拒绝）。
     """
     src = os.path.abspath(src_abs)
     if not os.path.isfile(src):
@@ -184,10 +153,14 @@ def import_texture(game_root, src_abs, mh, dh):
     i = low.find(".tex")
     if i < 0:
         raise ValueError("只支持 .tex（DDS 请先转成 .tex）: %s" % base)
-    stem, ver = base[:i], base[i + 4:]
+    stem, ver = base[:i].strip(), base[i + 4:]
+    if ver and not (ver.startswith(".") and ver[1:].isdigit()):
+        raise ValueError("版本后缀只能是 .tex 或 .tex.<数字>：%s" % base)
+    if not stem:
+        raise ValueError("文件名为空：%s" % base)
     data = open(src, "rb").read()
     h = hashlib.sha1(data).hexdigest()[:8]
-    stem = "%s_%s" % (stem, h)
+    stem = "%s_%s" % (stem[:64], h)      # 控制路径长度
     dst_dir = os.path.join(temp_root(game_root), "tex", mh, dh)
     os.makedirs(dst_dir, exist_ok=True)
     shutil.copyfile(src, os.path.join(dst_dir, stem + ".tex" + ver))
