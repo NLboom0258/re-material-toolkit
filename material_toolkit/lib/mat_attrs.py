@@ -274,6 +274,58 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
             "changed": True, "touched": touched}
 
 
+def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None):
+    """把所有 edit 副本里引用 old_mmtr 的材质改到 new_mmtr（编译后自动更新）。
+
+    每个受影响的 edit 副本会：
+      1. 把该材质的 ``mmtr_path`` 改成新路径
+      2. 按新 mmtr 的 UserMaterial 重建参数集（同名保留值、新增 0、旧删）
+      3. 存成**新路径**（引擎按路径缓存）
+
+    返回 ``[(old_edit_rel, new_edit_rel, [材质名...])]``。
+    只改文件；apply 到游戏、更新 sessions.json、删旧文件由调用方负责。
+    """
+    log = log or (lambda *_a, **_k: None)
+    from .mmtr import Mmtr
+
+    old_low = ps.norm_rel(old_mmtr or "").lower()
+    if not old_low:
+        return []
+    doc = ps.load_index(game_root)
+    out = []
+    for _mh, o in (doc.get("objects") or {}).items():
+        for _dh, e in (o.get("mdfs") or {}).items():
+            edit = ps.norm_rel(e.get("edit") or "")
+            if not edit:
+                continue
+            src = ps.rel_to_abs(game_root, edit)
+            if not os.path.exists(src):
+                continue
+            try:
+                d = mdf2lib.Mdf2.load(src)
+            except Exception:  # noqa: BLE001
+                continue
+            names = [m.name for m in d.materials
+                     if ps.norm_rel(m.mmtr_path or "").lower() == old_low]
+            if not names:
+                continue
+            mm = Mmtr.from_bytes(new_bytes)
+            for name in names:
+                d.get_material(name).mmtr_path = new_mmtr
+                sync_mdf2(d, mm, prune=True, materials=name)
+            parsed = ps.parse_temp_rel(edit)
+            if not parsed:
+                continue
+            new_rel = ps.new_edit_rel(parsed["mh"], parsed["dh"], game_root=game_root)
+            dst = ps.rel_to_abs(game_root, new_rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            d.save(dst)
+            out.append((edit, new_rel, names))
+            log("自动更新工作副本: %s → %s（%s）"
+                % (edit, new_rel, ", ".join(names)))
+    return out
+
+
 def write_params(game_root, edit_rel, changes, log=None):
     """只把参数值写回（不换母材质、不动 flags），产出新路径。
 

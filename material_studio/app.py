@@ -4032,8 +4032,8 @@ class MaterialSystemPanel(QWidget):
 
         self._rb_update_mdf_label()
         if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
-            # 重新读参数（引擎从新文件加载，值就是刚写进去的）
-            self._rb_pick_mat(self.cmb_rb_mat.currentIndex())
+            # apply 后引擎重建参数块要一点时间，立即读会拿到旧值（延迟读 + 轮询兜底）
+            QTimer.singleShot(600, self._rb_reread_current)
 
         msg = ("已写入 %d 个参数到：\n%s\n\n切到新副本的对象：%d 个"
                % (len(r.get("touched") or []), new_rel, len(moved)))
@@ -4126,8 +4126,8 @@ class MaterialSystemPanel(QWidget):
 
         self._rb_update_mdf_label()
         if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
-            # 重载后参数集可能变了（换母材质），重新读
-            self._rb_pick_mat(self.cmb_rb_mat.currentIndex())
+            # 重载后参数集可能变了（换母材质）；延迟读，等引擎重建完参数块
+            QTimer.singleShot(600, self._rb_reread_current)
 
         msg = "新副本：\n%s\n\n切到新副本的对象：%d 个" % (r["rel"], len(moved))
         rep = r.get("report") or []
@@ -5549,6 +5549,10 @@ class MaterialSystemPanel(QWidget):
                        ensure_ascii=False).encode("utf-8")).hexdigest()
         logs = []
         try:
+            old_item = mlab.get_material(game_root, self.asset.name)
+        except Exception:  # noqa: BLE001
+            old_item = None
+        try:
             item = mlab.register(
                 game_root, self.asset.name, data,
                 asset_path=getattr(self, "_asset_path", "") or "",
@@ -5558,6 +5562,8 @@ class MaterialSystemPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "写产物失败", str(e))
             return
+        # 编译出新版 → 把所有引用旧产物的预览副本自动切过去（UE 式：编译即生效）
+        auto = self._apply_compiled_material(game_root, old_item, item, logs)
         try:
             mlab.prune(game_root, dry_run=False, log=logs.append)
         except Exception as e:  # noqa: BLE001
@@ -5569,12 +5575,85 @@ class MaterialSystemPanel(QWidget):
         self.lbl_status.setStyleSheet("color:#1a7f37")
         self.lbl_status.setText("已编译材质 %s（第 %d 版，%dB，UserMaterial=%d）"
                                 % (mat_name, rev, item["bytes"], len(prof)))
+        auto_note = ("\n已自动把 %d 个预览中的工作副本切到新版本。" % len(auto)
+                     if auto else "")
         QMessageBox.information(
             self, "编译成功",
-            "材质：%s（第 %d 版）\n产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n\n"
+            "材质：%s（第 %d 版）\n产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n%s\n\n"
             "接下来在「实时预览」页把某个材质槽的母材质换成它。\n\n%s"
             % (mat_name, rev, item["rel"], item["bytes"], len(prof),
-               len(item.get("textureSlots") or []), "\n".join(logs)))
+               len(item.get("textureSlots") or []), auto_note, "\n".join(logs)))
+
+    def _rb_addrs_on(self, edit_rel):
+        """当前挂载着某个工作副本的对象 ``[(addr, go)]``（来自 /holds）。"""
+        try:
+            hd = rb.holds().get("holdDetail") or []
+        except rb.BridgeError:
+            return []
+        low = ps.norm_rel(edit_rel).lower()
+        out = []
+        for h in hd:
+            if "ticks" in h:
+                continue
+            if ps.norm_rel(h.get("wantPath") or "").lower() == low:
+                addr = h.get("addr")
+                if addr:
+                    out.append((addr, h.get("go")))
+        return out
+
+    def _rb_reread_current(self):
+        """apply 后延迟重读当前材质的参数表（引擎重建参数块需要一点时间）。"""
+        cmb = getattr(self, "cmb_rb_mat", None)
+        if cmb is not None:
+            self._rb_pick_mat(cmb.currentIndex())
+
+    def _apply_compiled_material(self, root, old_item, item, logs):
+        """编译出新版母材质后，把所有引用旧产物的预览副本自动切过去。
+
+        返回被更新的副本列表 ``[(old, new, [材质名])]``（没有则空）。
+        """
+        old_rel = ps.norm_rel((old_item or {}).get("rel") or "")
+        new_rel = ps.norm_rel(item.get("rel") or "")
+        data = mlab.mmtr_from_item(root, item)
+        if not (old_rel and new_rel and old_rel != new_rel and data):
+            return []
+        try:
+            changed = mattr.repoint_edits(root, old_rel, new_rel, data,
+                                          log=logs.append)
+        except Exception as e:  # noqa: BLE001
+            logs.append("自动更新预览副本失败：%s" % e)
+            return []
+        if not changed:
+            logs.append("没有预览中的材质引用旧母材质（下次勾选时生效）")
+            return []
+
+        # 先更新登记（无论是否在线，下次勾选都要拿到新路径）
+        doc = ps.load_index(root)
+        for old_edit, new_edit, _names in changed:
+            ps.update_edit_paths(doc, old_edit, new_edit)
+        ps.save_index(root, doc, log=logs.append)
+
+        if not self._rb_connected or not self._rb_link_ok:
+            logs.append("已生成 %d 个新副本；当前未连接游戏，重新连接并勾选后生效"
+                        % len(changed))
+            return changed
+
+        moved = 0
+        for old_edit, new_edit, _names in changed:
+            for addr, go in self._rb_addrs_on(old_edit):
+                try:
+                    d = rb.material(go, "apply", mdf=new_edit, addr=addr, keep=True)
+                    ms = d.get("meshes") or []
+                    if d.get("err") or not ms or not ms[0].get("ok"):
+                        logs.append("切换失败 %s: %s" % (go, d.get("err") or "?"))
+                    else:
+                        moved += 1
+                except rb.BridgeError as e:
+                    logs.append("切换失败 %s: %s" % (go, e))
+        logs.append("已自动切换 %d 个对象到新母材质" % moved)
+        if moved:
+            QTimer.singleShot(600, self._rb_reread_current)
+        return changed
 
 
 class EngineResDialog(QDialog):
@@ -6295,22 +6374,28 @@ class MaterialAttrsDialog(QDialog):
         v.addWidget(head)
 
         cur_mmtr = ps.norm_rel(cur.get("mmtr") or "")
+        self._cur_mmtr = cur_mmtr.lower()
+        self._original = ps.norm_rel(original or "")
         row = QHBoxLayout()
         row.addWidget(QLabel("母材质:"))
         self.cmb = NoWheelComboBox()
+        cur_idx = -1
         if original:
-            label = "原始母材质：%s" % original
-            if original.lower() == cur_mmtr.lower():
-                label += "（当前）"
-            self.cmb.addItem(label, "__orig__")
-        self.cmb.addItem("当前，不改：%s" % (cur_mmtr or "(空)"), "")
+            self.cmb.addItem("原始母材质：%s" % original, "__orig__")
+            if self._original.lower() == self._cur_mmtr:
+                cur_idx = self.cmb.count() - 1
         for o in options:
-            label = "%s（第 %s 版 · %s 参数）" % (
-                o["name"], o.get("rev") or 1, o.get("nParams") or 0)
-            if ps.norm_rel(o["rel"]).lower() == cur_mmtr.lower():
-                label += "  ← 当前"
-            self.cmb.addItem(label, o["rel"])
+            self.cmb.addItem("%s（第 %s 版 · %s 参数）" % (
+                o["name"], o.get("rev") or 1, o.get("nParams") or 0), o["rel"])
+            if ps.norm_rel(o["rel"]).lower() == self._cur_mmtr:
+                cur_idx = self.cmb.count() - 1
+        if cur_idx < 0:
+            # 当前值不在选项里（旧产物已删 / 手改的路径）→ 补一项，只用于显示
+            self.cmb.addItem("当前（未登记）：%s" % (cur_mmtr or "(空)"), cur_mmtr)
+            cur_idx = self.cmb.count() - 1
+        self.cmb.setCurrentIndex(cur_idx)
         self.cmb.setToolTip(
+            "打开时选中 mdf2 里实际在用的那一项。\n"
             "原始母材质 = 原始 mdf2 里该材质指向的那份（从 orig 副本 / 原文件读）。\n"
             "其余是工具「编译到预览目录」产出的材质（每个材质名一项）。\n"
             "选新的一项 = 换母材质，按它的 UserMaterial 重建参数集。")
@@ -6388,10 +6473,13 @@ class MaterialAttrsDialog(QDialog):
                     % (self._preview_flags(), self._cur.get("flags_raw") or 0))
 
     def changes(self):
-        """返回改动：``{"mmtr": 逻辑路径?, "flags": {名字: 值}?}``（没改的键不出现）。"""
+        """返回改动：``{"mmtr": 逻辑路径/__orig__, "flags": {名字: 值}?}``（没改的键不出现）。"""
         out = {}
         sel = self.cmb.currentData()
-        if sel:
+        if sel == "__orig__":
+            if self._original.lower() != self._cur_mmtr:
+                out["mmtr"] = sel
+        elif sel and ps.norm_rel(sel).lower() != self._cur_mmtr:
             out["mmtr"] = sel
         fl = {}
         for name, w in self._w.items():
