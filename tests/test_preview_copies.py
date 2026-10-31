@@ -8,6 +8,7 @@
   4. sessions.json 登记 / 查询 / 最近使用（edit 字段）
   5. 旧版 sessions.json 被忽略（开发期不做结构兼容）
   6. 路径解析只认新目录结构
+  7. orig 旧快照清理（保留登记/hold，按 dh 可选）
 """
 import json
 import os
@@ -124,6 +125,24 @@ try:
     raise AssertionError("重名应当报错")
 except ValueError:
     pass
+
+# 9) orig 旧快照清理：只保留 keep 里的，可选按 dh 过滤
+od = os.path.join(ps.temp_root(root), "orig")
+os.makedirs(od, exist_ok=True)
+for fn in ("aaaa1111_p20261101_010101.mdf2.10",
+           "aaaa1111_p20261101_020202.mdf2.10",
+           "bbbb2222_p20261101_030303.mdf2.10"):
+    with open(os.path.join(od, fn), "wb") as f:
+        f.write(b"x")
+keep = ["materialTemp/orig/aaaa1111_p20261101_020202.mdf2"]
+gone = [os.path.basename(x) for x in ps.prune_orig(root, keep)]
+assert sorted(gone) == ["aaaa1111_p20261101_010101.mdf2.10",
+                        "bbbb2222_p20261101_030303.mdf2.10"], gone
+assert os.listdir(od) == ["aaaa1111_p20261101_020202.mdf2.10"]
+with open(os.path.join(od, "aaaa1111_p20261101_040404.mdf2.10"), "wb") as f:
+    f.write(b"y")
+ps.prune_orig(root, keep, dh="aaaa1111")
+assert sorted(os.listdir(od)) == ["aaaa1111_p20261101_020202.mdf2.10"]
 
 shutil.rmtree(root, ignore_errors=True)
 print("test_preview_copies: OK")

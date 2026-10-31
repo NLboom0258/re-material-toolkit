@@ -307,6 +307,37 @@ def delete_unused_texture_revs(game_root, mh, dh, name, log=None):
     return removed
 
 
+def prune_orig(game_root, keep_rels, dh=None, log=None):
+    """删掉 orig 下**未被引用**的旧快照。
+
+    重置必须换新路径（引擎按路径缓存），所以每次取消勾选都会生成一份新 orig；
+    旧的不清会一直堆积。``keep_rels`` = 逻辑 rel（``materialTemp/orig/...mdf2``，
+    不带 ``.10``）集合（小写比较）；给 ``dh`` 时只清理该原 mdf2 的。
+    """
+    d = os.path.join(temp_root(game_root), "orig")
+    if not os.path.isdir(d):
+        return []
+    keep = {norm_rel(x).lower() for x in (keep_rels or ()) if x}
+    removed = []
+    for fn in os.listdir(d):
+        low = fn.lower()
+        if not low.endswith(".mdf2" + MDF2_EXT):
+            continue
+        if dh and not low.startswith(dh.lower() + "_p"):
+            continue
+        logical = "%s/orig/%s" % (TEMP_DIR, fn[:-len(MDF2_EXT)])   # 去掉 ".10"
+        if logical.lower() in keep:
+            continue
+        try:
+            os.remove(os.path.join(d, fn))
+            removed.append(fn)
+        except OSError:
+            pass
+    if removed and log:
+        log("已清理旧 orig 快照：%s" % ", ".join(sorted(removed)))
+    return removed
+
+
 # ---------------------------------------------------------------- sessions.json
 
 def _empty():

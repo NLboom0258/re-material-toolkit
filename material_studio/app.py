@@ -3607,6 +3607,7 @@ class MaterialSystemPanel(QWidget):
             self._rb_game_root = os.path.normpath(g)
             self._cfg_save()
             self._rb_say("游戏根目录（服务）: %s" % self._rb_game_root)
+            self._rb_prune_orig(self._rb_game_root)
         else:
             self._rb_say("⚠ 服务未返回游戏根目录，写盘 / 副本功能暂不可用")
         # 不自动刷新列表：连接只做一次 ping。拉场景（/identity）是引擎调用，
@@ -5271,6 +5272,32 @@ class MaterialSystemPanel(QWidget):
         self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_tex_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_say("已重置：挂到 orig 副本 %s（参数回到原始值，keep 已关）" % orig)
+        self._rb_prune_orig(root, dh=dh_hit)
+
+    def _rb_prune_orig(self, root, dh=None):
+        """删掉 orig 下不再使用的旧快照（登记里的 + 游戏仍 hold 的除外）。
+
+        重置必须换新路径，所以每次取消勾选都会生成一份新 orig；旧的不清会一直堆积。
+        离线时无法确认 hold 状态，保守跳过（下次连上再清）。
+        """
+        if not root:
+            return
+        keep = set()
+        idx = ps.load_index(root)
+        for o in (idx.get("objects") or {}).values():
+            for e in (o.get("mdfs") or {}).values():
+                rel = ps.norm_rel(e.get("orig") or "")
+                if rel:
+                    keep.add(rel)
+        try:
+            hd = rb.holds().get("holdDetail") or []
+        except rb.BridgeError:
+            return
+        for h in hd:
+            rel = ps.norm_rel(h.get("wantPath") or "")
+            if rel:
+                keep.add(rel)
+        ps.prune_orig(root, keep, dh=dh, log=self._rb_say)
 
     def _rb_poll_hold(self):
         """定时查保持项：发现 dead 就清掉那行勾选并提示重选。"""
