@@ -40,7 +40,11 @@ class AttrError(ValueError):
 
 
 def find_mmtr_item(game_root, target):
-    """按材质名或 mmtr 逻辑路径找登记项。"""
+    """按材质名 / mmtr 逻辑路径找登记项。
+
+    路径命中不了时再按“产物名解析”找：旧 rev 路径（不在登记簿里）也能映射到
+    该材质当前那一份（`mmatlib.resolve_material`）。
+    """
     if not target:
         return None
     low = ps.norm_rel(target or "").lower()
@@ -50,7 +54,8 @@ def find_mmtr_item(game_root, target):
             return it
         if (it.get("name") or "").lower() == low:
             return it
-    return None
+    _name, it = mmatlib.resolve_material(game_root, target)
+    return it
 
 
 def list_mmtr_options(game_root):
@@ -274,8 +279,14 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
             "changed": True, "touched": touched}
 
 
-def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None):
-    """把所有 edit 副本里引用 old_mmtr 的材质改到 new_mmtr（编译后自动更新）。
+def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
+                  material_name=""):
+    """把所有 edit 副本里引用旧母材质的材质改到 new_mmtr（编译后自动更新）。
+
+    匹配旧引用的两种方式：
+      - 路径 == ``old_mmtr``（上一版登记项）
+      - 给了 ``material_name`` 时：路径在缓存目录且按产物名解析出同一个名字
+        （覆盖更旧的 rev / 早期时间戳命名）
 
     每个受影响的 edit 副本会：
       1. 把该材质的 ``mmtr_path`` 改成新路径
@@ -289,7 +300,9 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None):
     from .mmtr import Mmtr
 
     old_low = ps.norm_rel(old_mmtr or "").lower()
-    if not old_low:
+    name_low = (material_name or "").lower()
+    prefix = (ps.TEMP_DIR + "/" + mmatlib.MMTR_DIR + "/").lower()
+    if not old_low and not name_low:
         return []
     doc = ps.load_index(game_root)
     out = []
@@ -305,8 +318,14 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None):
                 d = mdf2lib.Mdf2.load(src)
             except Exception:  # noqa: BLE001
                 continue
-            names = [m.name for m in d.materials
-                     if ps.norm_rel(m.mmtr_path or "").lower() == old_low]
+            names = []
+            for m in d.materials:
+                mp = ps.norm_rel(m.mmtr_path or "").lower()
+                if old_low and mp == old_low:
+                    names.append(m.name)
+                elif name_low and mp.startswith(prefix) \
+                        and mmatlib.parse_artifact_name(mp).lower() == name_low:
+                    names.append(m.name)
             if not names:
                 continue
             mm = Mmtr.from_bytes(new_bytes)

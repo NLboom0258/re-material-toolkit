@@ -85,6 +85,62 @@ def mmtr_abs(game_root, rel):
     return os.path.join(ps.temp_root(game_root), s.replace("/", os.sep))
 
 
+def is_artifact_path(rel):
+    """是不是我们缓存目录里的 mmtr 产物（``materialTemp/mmtr/``）。"""
+    s = ps.norm_rel(rel or "")
+    return s.lower().startswith((ps.TEMP_DIR + "/" + MMTR_DIR + "/").lower())
+
+
+def artifact_stem(rel):
+    """``materialTemp/mmtr/Toon_V5_r3.mmtr`` → ``Toon_V5_r3``。"""
+    name = ps.norm_rel(rel or "").rsplit("/", 1)[-1]
+    low = name.lower()
+    if low.endswith(MMTR_VER):
+        name = name[:-len(MMTR_VER)]
+        low = name.lower()
+    if low.endswith(".mmtr"):
+        name = name[:-5]
+    return name
+
+
+def parse_artifact_name(rel):
+    """从产物路径解析材质名（只解析字符串，不查登记）。
+
+    先剥 ``_r<rev>``（新命名），再剥 ``_p<YYYYmmdd_HHMMSS>[_N]``（早期命名）。
+    材质名本身可能以这些形式结尾 —— 所以调用方应**先用完整 stem 查一次登记**，
+    再退回这个解析结果（见 ``resolve_material``）。
+    """
+    stem = artifact_stem(rel)
+    m = re.search(r"_r\d+$", stem)
+    if m:
+        return stem[:m.start()]
+    m = re.search(r"_p\d{8}_\d{6}(?:_\d+)?$", stem)
+    if m:
+        return stem[:m.start()]
+    return stem
+
+
+def resolve_material(game_root, mmtr_path):
+    """缓存目录里的 mmtr 路径 → ``(材质名, 登记项 | None)``。
+
+    命中规则：
+      1. 只处理 ``materialTemp/mmtr/`` 下的路径；游戏原版路径返回 ``("", None)``
+      2. 先用**完整 stem** 查（材质名本身可能带 ``_r123``）
+      3. 再按 ``_r<rev>`` / ``_p<时间戳>`` 剥后缀查
+      4. 都查不到 → 返回解析出的名字 + None（调用方降级成“未登记”/提示）
+    """
+    s = ps.norm_rel(mmtr_path or "")
+    if not is_artifact_path(s):
+        return "", None
+    doc = load(game_root)
+    mats = doc.get("materials") or {}
+    for cand in (artifact_stem(s), parse_artifact_name(s)):
+        it = mats.get(cand)
+        if it and os.path.exists(mmtr_abs(game_root, it.get("rel") or "")):
+            return cand, it
+    return parse_artifact_name(s), None
+
+
 def _old_seq(rel):
     """旧版 ``name_p20261030_081053`` → ``(时间戳, 序号)``（迁移排序用）。"""
     stem = ps.norm_rel(rel or "").rsplit("/", 1)[-1]

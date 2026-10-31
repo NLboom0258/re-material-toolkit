@@ -24,6 +24,7 @@ import os
 import json
 import re
 import sys
+import time
 from collections import Counter, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -154,6 +155,18 @@ def _rb_is_variant(rel):
         if tag in stem:
             return True
     return False
+
+
+def _rb_variant_base(rel):
+    """``.../pl0800_Wet.mdf2`` → ``.../pl0800.mdf2``（去变体后缀）。"""
+    s = (rel or "").replace("\\", "/")
+    if "." not in s:
+        return ""
+    stem, ext = s.rsplit(".", 1)
+    for tag in ("_wet", "_burn", "_dirt", "_blood", "_poison", "_mud", "_ash"):
+        if stem.lower().endswith(tag):
+            return stem[:-len(tag)] + "." + ext
+    return ""
 
 
 def _rb_parse_vec(value, n):
@@ -3463,9 +3476,14 @@ class MaterialSystemPanel(QWidget):
                 d = fut.result()
             except Exception:  # noqa: BLE001
                 d = None
-            if d:
+            # 关键：只应用“比最后一次用户修改更新”的请求结果。
+            # 否则一个在修改前发出的旧请求返回后，会把刚输入的值覆盖回旧值。
+            fresh = (self._rb_sync_sent is not None
+                     and self._rb_sync_sent > self._rb_last_edit_ts)
+            if d and fresh:
                 self._rb_apply_live_params(ent, d)
         try:
+            self._rb_sync_sent = time.monotonic()
             self._rb_sync_fut = self._rb_pool.submit(
                 rb.list_params, ent.get("go"), 32, None, 10.0)
         except (RuntimeError, TypeError):
@@ -3847,6 +3865,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_schedule(self, name, spin):
         """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
         self._rb_pending[name] = spin.value()
+        self._rb_last_edit_ts = time.monotonic()
         self._rb_timer.start()
 
     def _rb_vec_changed(self, name):
@@ -3855,6 +3874,7 @@ class MaterialSystemPanel(QWidget):
         if not sps:
             return
         self._rb_pending[name] = ",".join("%.6f" % s.value() for s in sps)
+        self._rb_last_edit_ts = time.monotonic()
         self._rb_timer.start()
 
     def _rb_flush(self):
@@ -3881,6 +3901,7 @@ class MaterialSystemPanel(QWidget):
             after = [x.get("after") for x in res]
             via = next((x.get("via") for x in res if x.get("via")), "?")
             self._rb_say("set %s = %s  ->  %s  (%s)" % (name, sval, after, via))
+            self._rb_last_edit_ts = time.monotonic()   # 写入完成后才算“基准”
             # 记下改动，供「保存到 mdf2」写盘（按对象地址分组）
             try:
                 vec = [float(t) for t in str(sval).split(",")]
@@ -4079,6 +4100,11 @@ class MaterialSystemPanel(QWidget):
                 return
             cur = {"mmtr": m.mmtr_path, "flags": m.flags_dict(),
                    "flags_raw": m.flags & 0xFFFFFFFF}
+            try:
+                # 从 mmtr 路径反推材质名（只对 materialTemp/mmtr/ 下的产物）
+                cur["resolved_name"] = mlab.resolve_material(root, m.mmtr_path)[0]
+            except Exception:  # noqa: BLE001
+                cur["resolved_name"] = ""
         except Exception as ex:  # noqa: BLE001
             self._rb_say("材质属性：读工作副本失败（%s）" % ex)
             return
@@ -4142,9 +4168,9 @@ class MaterialSystemPanel(QWidget):
         QMessageBox.information(self, "材质属性", msg)
 
     def _rb_pick_copy(self):
-        """选择当前对象挂哪一份 mdf2 副本（edit / orig / 原始）。
+        """选择当前对象挂哪一份**编辑副本**（只列该 mesh 已登记的 edit）。
 
-        只列该 mesh 在 sessions.json 里已登记的副本；没登记时先勾选对象新建。
+        原始状态/重置直接用列表上的取消勾选，不在这里列。
         """
         ent = self._rb_cur_ent()
         if ent is None:
@@ -4162,53 +4188,33 @@ class MaterialSystemPanel(QWidget):
         cur_dh = ent.get("prev")
 
         labels, items = [], []
-        labels.append("原始 mdf2（不预览）")
-        items.append(("__base__", None, ""))
-        default_idx = 0
+        default_idx = -1
         for dh, e in sorted(mdfs.items()):
             edit = ps.norm_rel(e.get("edit") or "")
-            orig = ps.norm_rel(e.get("orig") or "")
-            if edit and os.path.exists(ps.rel_to_abs(root, edit)):
-                labels.append("编辑副本 · %s%s" % (
-                    self._rb_short(edit, 64), "  ← 当前" if dh == cur_dh else ""))
-                items.append(("edit", dh, edit))
-                if dh == cur_dh:
-                    default_idx = len(labels) - 1
-            if orig and os.path.exists(ps.rel_to_abs(root, orig)):
-                labels.append("已重置副本 · %s%s" % (
-                    self._rb_short(orig, 64), "  ← 当前" if dh == cur_dh else ""))
-                items.append(("orig", dh, orig))
-        if len(items) == 1:
-            self._rb_say("选择副本：该 mesh 还没有登记副本（勾选对象会新建一份）")
+            if not edit or not os.path.exists(ps.rel_to_abs(root, edit)):
+                continue
+            labels.append("编辑副本 · %s%s" % (
+                self._rb_short(edit, 64), "  ← 当前" if dh == cur_dh else ""))
+            items.append((dh, edit))
+            if dh == cur_dh:
+                default_idx = len(labels) - 1
+        if not items:
+            self._rb_say("选择副本：该 mesh 还没有编辑副本（勾选对象会新建一份）")
             return
+        if default_idx < 0:
+            default_idx = 0
 
         pick, ok = QInputDialog.getItem(
-            self, "选择 mdf2 副本",
-            "对象：%s\n\n选一份挂到这个对象（“原始”= 回到未预览状态）："
-            % self._rb_short(mesh_path, 70),
+            self, "选择编辑副本",
+            "对象：%s\n\n选一份挂到这个对象：" % self._rb_short(mesh_path, 70),
             labels, default_idx, False)
         if not ok:
             return
-        kind, dh, rel = items[labels.index(pick)]
+        dh, rel = items[labels.index(pick)]
         addr, go = ent.get("addr"), ent.get("go")
 
-        if kind == "__base__":
-            if not cur_dh:
-                self._rb_say("当前已经是原始 mdf2（未预览）")
-                return
-            try:
-                self._rb_iso_end(root, ent)
-            except (rb.BridgeError, RuntimeError, OSError) as e:
-                self._rb_say("恢复原始 mdf2 失败: %s" % e)
-                return
-            ent["prev"] = None
-            self._rb_set_item_check(addr, False)
-            self._rb_sync_enabled()
-            QTimer.singleShot(600, self._rb_update_mdf_label)
-            return
-
         try:
-            d = rb.material(go, "apply", mdf=rel, addr=addr, keep=(kind == "edit"))
+            d = rb.material(go, "apply", mdf=rel, addr=addr, keep=True)
         except rb.BridgeError as e:
             self._rb_say("切换副本失败: %s" % e)
             return
@@ -4218,20 +4224,14 @@ class MaterialSystemPanel(QWidget):
             return
 
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
-        if kind == "edit":
-            ent["prev"] = dh
-            self._rb_iso_mdf = rel
-            self._rb_set_item_check(addr, True)
-        else:
-            ent["prev"] = None
-            self._rb_iso_mdf = None
-            self._rb_set_item_check(addr, False)
+        ent["prev"] = dh
+        self._rb_iso_mdf = rel
+        self._rb_set_item_check(addr, True)
         self._rb_sync_enabled()
         # apply 后引擎重建参数块要一点时间
         QTimer.singleShot(600, self._rb_update_mdf_label)
         QTimer.singleShot(600, self._rb_reread_current)
-        self._rb_say("已切换到%s：%s"
-                     % ("编辑副本" if kind == "edit" else "已重置副本", rel))
+        self._rb_say("已切换到编辑副本：%s" % rel)
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
@@ -4464,17 +4464,43 @@ class MaterialSystemPanel(QWidget):
             reg = ps.get_mdf2(idx_doc, mh, dh) if obj else None
 
             # 当前挂的是引擎变体（湿身 _Wet / 燃烧…）：不能拿它当 base，
-            # 否则「重置」会回到变体参数。同一个模型若已有正常登记，优先用它。
+            # 否则「重置」会回到变体参数。这里**必须询问**用户：
+            #   用已有的正常副本 / 基于正常 mdf2 新建（不能静默复用）
             if reg is None and _rb_is_variant(cur):
-                for d2, e2 in ((obj or {}).get("mdfs") or {}).items():
-                    ed2 = ps.norm_rel(e2.get("edit") or "")
-                    if ed2 and ps.exists_edit(root, ed2):
-                        self._rb_say("当前是引擎变体（%s），改用正常登记 dh=%s"
-                                     % (cur.rsplit("/", 1)[-1], d2))
-                        dh, reg = d2, e2
-                        base = ps.norm_rel(e2.get("baseMdf2")
-                                           or e2.get("originalMdf2") or cur)
-                        break
+                normal = _rb_variant_base(cur) or cur
+                dh2 = ps.mdf2_hash(normal)
+                base2 = normal
+                reg2 = ps.get_mdf2(idx_doc, mh, dh2) if obj else None
+                ed2 = ps.norm_rel((reg2 or {}).get("edit") or "")
+
+                labels, acts = [], []
+                if ed2 and ps.exists_edit(root, ed2):
+                    labels.append("用已有副本: %s" % self._rb_short(ed2))
+                    acts.append("reuse")
+                labels.append("＋ 新建副本（基于正常 mdf2）")
+                acts.append("new")
+                pick, ok = QInputDialog.getItem(
+                    self, "启用预览（引擎变体）",
+                    "当前 mdf2 是引擎变体：%s\n正常 mdf2：%s\n\n"
+                    "「用已有」= 挂已登记的编辑副本；「新建」= 基于正常 mdf2 另建一份。"
+                    % (cur.rsplit("/", 1)[-1], normal),
+                    labels, 0, False)
+                if not ok:
+                    raise RuntimeError("已取消")
+                act = acts[labels.index(pick)]
+                self._rb_say("当前是引擎变体（%s），使用正常 mdf2: %s"
+                             % (cur.rsplit("/", 1)[-1], normal))
+                if act == "reuse":
+                    self._rb_apply_iso(ent, ed2)
+                    ps.upsert_mdf2(idx_doc, mh, dh2, base2, base2, edit_rel=ed2)
+                    ps.save_index(root, idx_doc, log=self._rb_say)
+                    return dh2
+                edit = ps.create_edit(root, mh, dh2, base2, log=self._rb_say)
+                ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
+                ps.upsert_mdf2(idx_doc, mh, dh2, base2, base2, edit_rel=edit)
+                ps.save_index(root, idx_doc, log=self._rb_say)
+                self._rb_apply_iso(ent, edit)
+                return dh2
 
         self._rb_say("身份 mesh=%s / mdf2=%s" % (mh, dh))
         self._rb_say("  mesh = %s" % mesh_path)
@@ -4765,6 +4791,8 @@ class MaterialSystemPanel(QWidget):
         self._rb_pool = ThreadPoolExecutor(max_workers=2)
         # 当前材质的参数值实时同步（1.5s 一次；只更新没在编辑的框）
         self._rb_sync_fut = None
+        self._rb_sync_sent = None
+        self._rb_last_edit_ts = 0.0
         self._rb_sync_timer = QTimer(self)
         self._rb_sync_timer.setInterval(1500)
         self._rb_sync_timer.timeout.connect(self._rb_sync_tick)
@@ -5717,7 +5745,8 @@ class MaterialSystemPanel(QWidget):
             return []
         try:
             changed = mattr.repoint_edits(root, old_rel, new_rel, data,
-                                          log=logs.append)
+                                          log=logs.append,
+                                          material_name=item.get("name") or "")
         except Exception as e:  # noqa: BLE001
             logs.append("自动更新预览副本失败：%s" % e)
             return []
@@ -6474,6 +6503,8 @@ class MaterialAttrsDialog(QDialog):
         cur_mmtr = ps.norm_rel(cur.get("mmtr") or "")
         self._cur_mmtr = cur_mmtr.lower()
         self._original = ps.norm_rel(original or "")
+        resolved = (cur.get("resolved_name") or "").strip()
+        resolved_low = resolved.lower()
         row = QHBoxLayout()
         row.addWidget(QLabel("母材质:"))
         self.cmb = NoWheelComboBox()
@@ -6483,13 +6514,23 @@ class MaterialAttrsDialog(QDialog):
             if self._original.lower() == self._cur_mmtr:
                 cur_idx = self.cmb.count() - 1
         for o in options:
-            self.cmb.addItem("%s（第 %s 版 · %s 参数）" % (
-                o["name"], o.get("rev") or 1, o.get("nParams") or 0), o["rel"])
-            if ps.norm_rel(o["rel"]).lower() == self._cur_mmtr:
+            same = ps.norm_rel(o["rel"]).lower() == self._cur_mmtr
+            match_old = bool(resolved_low) and (o.get("name") or "").lower() == resolved_low
+            label = "%s（第 %s 版 · %s 参数）" % (
+                o["name"], o.get("rev") or 1, o.get("nParams") or 0)
+            if same:
+                label += "  ← 当前"
+            elif match_old:
+                label += "  ← 当前（旧版）"
+            self.cmb.addItem(label, o["rel"])
+            if same:
+                cur_idx = self.cmb.count() - 1
+            elif match_old and cur_idx < 0:
                 cur_idx = self.cmb.count() - 1
         if cur_idx < 0:
             # 当前值不在选项里（旧产物已删 / 手改的路径）→ 补一项，只用于显示
-            self.cmb.addItem("当前（未登记）：%s" % (cur_mmtr or "(空)"), cur_mmtr)
+            shown = resolved or cur_mmtr or "(空)"
+            self.cmb.addItem("当前（未登记）：%s" % shown, cur_mmtr)
             cur_idx = self.cmb.count() - 1
         self.cmb.setCurrentIndex(cur_idx)
         self.cmb.setToolTip(
