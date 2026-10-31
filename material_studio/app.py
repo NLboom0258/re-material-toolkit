@@ -1406,6 +1406,8 @@ class MmtrPanel(QWidget):
         self.tree_group.setHeaderLabels(["组", "代表 / 成员", "记录·blob·内容"])
         self.tree_param = ReorderTree()
         self.tree_param.setHeaderLabels(["", "参数名", "类型", "大小", "offset"])
+        # 末列不拉伸（页面宽时右侧留白，各列宽度可自由拖）
+        self.tree_param.header().setStretchLastSection(False)
         # 拖拽重排(材质参数顺序; 偏移自动重算): 仅第 0 列(≡ 手柄)可发起拖拽, 防误拖。
         self.tree_param.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree_param.setDragEnabled(True)
@@ -2337,6 +2339,8 @@ class Mdf2Panel(QWidget):
                                self._commit_tex_rename))
         self.tree_param = ReorderTree()
         self.tree_param.setHeaderLabels(["", "参数名", "类型", "值", "offset"])
+        # 末列不拉伸（页面宽时右侧留白，各列宽度可自由拖）
+        self.tree_param.header().setStretchLastSection(False)
         # 拖拽重排(仅第0列 ≡ 手柄可发起拖拽, 防误拖)
         self.tree_param.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree_param.setDragEnabled(True)
@@ -3333,18 +3337,11 @@ class MaterialSystemPanel(QWidget):
             p = self._cfg_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
-                json.dump({"game_root": self.ed_rb_root.text().strip(),
+                json.dump({"game_root": getattr(self, "_rb_game_root", ""),
                            "port": self.sp_rb_port.value()}, f,
                           ensure_ascii=False, indent=2)
         except OSError:
             pass
-
-    def _rb_check_root(self, *_):
-        r = self.ed_rb_root.text().strip().strip('"')
-        ok = bool(r) and os.path.isdir(os.path.join(r, "natives", "x64"))
-        self.lbl_rb_root.setText("OK" if ok else "找不到 natives/x64")
-        self.lbl_rb_root.setStyleSheet("color:%s" % ("#2e7d32" if ok else "#b00020"))
-        return ok
 
     # ---- 实时预览（游戏内 C# 桥） ---------------------------------------
     # 见 analysis/runtime_preview_plan.md §10：游戏内跑 mmtr_bridge.cs（REFramework.NET），
@@ -3445,7 +3442,12 @@ class MaterialSystemPanel(QWidget):
         if not self._rb_connected:
             return
         ent = self._rb_cur_ent()
-        if ent is None or not ent.get("prev"):
+        if ent is None:
+            return
+        if not ent.get("prev"):
+            # 未预览的对象：低频查一次当前 mdf2。游戏会自己切 _Wet 等变体，
+            # 不刷新列表也要让顶部状态跟得上；预览中的行由 HoldTick 保持，无需查询。
+            self._rb_watch_identity(ent)
             return
         if self._rb_sync_fut is not None and not self._rb_sync_fut.done():
             return
@@ -3467,6 +3469,45 @@ class MaterialSystemPanel(QWidget):
                 rb.list_params, ent.get("go"), 32, None, 10.0)
         except (RuntimeError, TypeError):
             self._rb_sync_fut = None
+
+    def _rb_watch_identity(self, ent):
+        """未预览对象：每 2 个 tick（约 3s）异步查一次 /identity，更新 mdf2 状态。
+
+        只更新**当前行**且 addr 仍匹配的对象；不重建列表、不动勾选。
+        """
+        if self._rb_ident_fut is not None and not self._rb_ident_fut.done():
+            return
+        if self._rb_ident_fut is not None:
+            fut, self._rb_ident_fut = self._rb_ident_fut, None
+            try:
+                d = fut.result()
+            except Exception:  # noqa: BLE001
+                d = None
+            if d and self._rb_cur_ent() is ent:
+                self._rb_apply_live_identity(ent, d)
+        self._rb_ident_tick = (self._rb_ident_tick + 1) % 2
+        if self._rb_ident_tick:
+            return
+        try:
+            self._rb_ident_fut = self._rb_pool.submit(
+                rb.identity, ent.get("go"), 32, False)
+        except (RuntimeError, TypeError):
+            self._rb_ident_fut = None
+
+    def _rb_apply_live_identity(self, ent, data):
+        """把 /identity 结果里该对象的最新 mdf2 路径写回条目并刷新标签。"""
+        addr = (ent.get("addr") or "").lower()
+        for m in (data.get("meshes") or []):
+            if (m.get("addr") or "").lower() != addr:
+                continue
+            new = ps.norm_rel(m.get("mdf2Path") or "")
+            old = ps.norm_rel(ent.get("mdf2Path") or "")
+            if new and new != old:
+                ent["mdf2Path"] = m.get("mdf2Path")
+                ent["meshPath"] = m.get("meshPath") or ent.get("meshPath")
+                self._rb_update_mdf_label(live_path=new)
+                self._rb_say("当前 mdf2 已变化: %s" % new)
+            return
 
     def _rb_apply_live_params(self, ent, data):
         """把游戏里的实际值填回输入框（正在编辑 / 已有待写值的参数跳过）。"""
@@ -3526,12 +3567,6 @@ class MaterialSystemPanel(QWidget):
             return None
         return v if 1 <= v <= 65535 else None
 
-    def _rb_browse_root(self):
-        d = QFileDialog.getExistingDirectory(self, "选择游戏根目录 (含 natives)")
-        if d:
-            self.ed_rb_root.setText(os.path.normpath(d))
-            self._rb_check_root()
-
     def _rb_toggle_conn(self):
         if self._rb_connected:
             self._rb_disconnect()
@@ -3554,15 +3589,17 @@ class MaterialSystemPanel(QWidget):
             return
         self._rb_ping_timer.start()
         self._rb_sync_timer.start()
-        # 游戏根没填时补上（/paths 只读进程信息，不碰引擎，安全）
-        if not self._rb_root():
-            try:
-                g = rb.paths().get("gameRoot")
-            except rb.BridgeError:
-                g = None
-            if g:
-                self.ed_rb_root.setText(os.path.normpath(g))
-                self._cfg_save()
+        # 游戏根由服务给出（/paths 只读进程信息，不碰引擎，安全）；不要求用户手填。
+        try:
+            g = rb.paths().get("gameRoot")
+        except rb.BridgeError:
+            g = None
+        if g:
+            self._rb_game_root = os.path.normpath(g)
+            self._cfg_save()
+            self._rb_say("游戏根目录（服务）: %s" % self._rb_game_root)
+        else:
+            self._rb_say("⚠ 服务未返回游戏根目录，写盘 / 副本功能暂不可用")
         # 不自动刷新列表：连接只做一次 ping。拉场景（/identity）是引擎调用，
         # 由用户点「刷新列表」单独触发，出问题也好定位。
         self._rb_say("已连接。点「刷新列表」拉取场景对象。")
@@ -3580,6 +3617,7 @@ class MaterialSystemPanel(QWidget):
         self._rb_ping_timer.stop()
         self._rb_sync_timer.stop()
         self._rb_sync_fut = None
+        self._rb_ident_fut = None
         self.btn_rb_conn.setText("连接")
         self._rb_set_link(False, "未连接")
         self._rb_clear_list()
@@ -3779,7 +3817,7 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         if not root:
-            self._rb_say("先在「实时预览」页设置游戏根目录")
+            self._rb_say("游戏根目录未就绪（连接服务后自动获取）")
             self._rb_set_item_check(addr, not want)
             return
         try:
@@ -3858,14 +3896,27 @@ class MaterialSystemPanel(QWidget):
             else:
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
         self._rb_fit_name_width(m)
+        self._rb_fit_value_width(m)
 
     def _rb_fit_name_width(self, m):
-        """按参数名长度给「参数」列一个合适的初始宽度（值列是 stretch，会自动填满）。"""
+        """按参数名长度给「参数」列一个合适的初始宽度（值列宽度见 _rb_fit_value_width）。"""
         fm = self.tbl_rb.fontMetrics()
         need = fm.horizontalAdvance("参数") + 40
         for vv in (m.get("vars") or []):
             need = max(need, fm.horizontalAdvance(str(vv.get("name") or "")) + 32)
         self.tbl_rb.setColumnWidth(0, min(max(160, int(need)), 320))
+
+    def _rb_fit_value_width(self, m):
+        """按当前材质最大的值控件给「值」列一个初始宽度（之后仍可拖）。"""
+        fm = self.tbl_rb.fontMetrics()
+        need = 80
+        for vv in (m.get("vars") or []):
+            vt = vv.get("type") or 0
+            if 2 <= vt <= 4:
+                need = max(need, vt * 72 + 8)
+            elif vt > 4:
+                need = max(need, fm.horizontalAdvance("矩阵（%d 分量，只读）" % vt) + 24)
+        self.tbl_rb.setColumnWidth(1, min(max(80, need), 560))
 
     def _rb_schedule(self, name, spin):
         """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
@@ -4007,7 +4058,7 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         if not root:
-            self._rb_say("保存：未配置游戏根目录")
+            self._rb_say("保存：游戏根目录未就绪（连接服务后自动获取）")
             return
         mh = ps.mesh_hash(ent.get("meshPath") or "")
         dh = ent.get("prev")
@@ -4088,7 +4139,7 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         if not root:
-            self._rb_say("材质属性：未配置游戏根目录")
+            self._rb_say("材质属性：游戏根目录未就绪（连接服务后自动获取）")
             return
         mh = ps.mesh_hash(ent.get("meshPath") or "")
         dh = ent.get("prev")
@@ -4190,7 +4241,7 @@ class MaterialSystemPanel(QWidget):
         root = self._rb_root()
         mesh_path = ent.get("meshPath") or ""
         if not root or not mesh_path:
-            self._rb_say("选择副本：缺少游戏根目录或 meshPath（刷新列表后再试）")
+            self._rb_say("选择副本：缺少游戏根目录或 meshPath（连接服务 / 刷新列表后再试）")
             return
         mh = ps.mesh_hash(mesh_path)
         doc = ps.load_index(root)
@@ -4270,7 +4321,7 @@ class MaterialSystemPanel(QWidget):
         root = self._rb_root()
         mesh_path = ent.get("meshPath") or ""
         if not root or not mesh_path:
-            self._rb_say("管理副本：缺少游戏根目录或 meshPath")
+            self._rb_say("管理副本：缺少游戏根目录或 meshPath（连接服务 / 刷新列表后再试）")
             return
         if not (self._rb_connected and self._rb_link_ok):
             self._rb_say("管理副本：需要先连接游戏（确认没有对象在用它）")
@@ -4405,11 +4456,12 @@ class MaterialSystemPanel(QWidget):
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
     #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
     # 实测：同路径重载无效（引擎按路径缓存），必须换路径。
-    def _rb_update_mdf_label(self):
+    def _rb_update_mdf_label(self, live_path=None):
         """顶部只显示**当前行**对象的 mdf2 副本。
 
         预览中的行不调 get_Material（set_Material 后引擎要过一会儿才更新它的返回值，
         刚挂上时读到的还是旧路径），直接按登记的 copies 显示。
+        live_path：自动轮询已经拿到的路径（避免再同步请求一次）。
         """
         lbl = getattr(self, "lbl_rb_mdf", None)
         if lbl is None:
@@ -4430,13 +4482,14 @@ class MaterialSystemPanel(QWidget):
                 lbl.setText("%s · %s   [预览中 · v%d]"
                             % (c["name"], base or "?", c["rev"]))
                 return
-        p = None
-        try:
-            d = rb.material(ent.get("go"), "info", addr=ent.get("addr"))
-            ms = d.get("meshes") or []
-            p = ms[0].get("path") if ms else None
-        except rb.BridgeError:
-            p = ent.get("mdf2Path")
+        p = live_path
+        if p is None:
+            try:
+                d = rb.material(ent.get("go"), "info", addr=ent.get("addr"))
+                ms = d.get("meshes") or []
+                p = ms[0].get("path") if ms else None
+            except rb.BridgeError:
+                p = ent.get("mdf2Path")
         if not p:
             lbl.setText("当前 mdf2: ?")
             return
@@ -4458,7 +4511,8 @@ class MaterialSystemPanel(QWidget):
     #   取消 → create_orig 生成全新路径 → /material apply(keep=0) → 参数回到原始值
     #   轮询 /holds → dead 为真则清勾选 + 提示重选
     def _rb_root(self):
-        return (self.ed_rb_root.text() or "").strip()
+        """游戏根目录：由 C# 服务 /paths 提供（连接后设置，不要求用户手填）。"""
+        return (getattr(self, "_rb_game_root", "") or "").strip()
 
     # ---- 额外源目录（已移除）----------------------------------------------
     # 早期支持登记另一个解包目录（sources.json）作为 mdf2 源；实际用不上，
@@ -4770,19 +4824,7 @@ class MaterialSystemPanel(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
 
-        # 游戏根：写产物 / 从 pak 提取 mdf2 都要用；连上后服务会告诉我们是哪个目录。
-        root_row = QHBoxLayout()
-        root_row.addWidget(QLabel("游戏根目录:"))
-        self.ed_rb_root = QLineEdit()
-        self.ed_rb_root.setPlaceholderText("含 natives 与 DMC5.exe 的那层（连上后自动填）")
-        root_row.addWidget(self.ed_rb_root, 1)
-        b = QPushButton("浏览…")
-        b.clicked.connect(self._rb_browse_root)
-        root_row.addWidget(b)
-        self.lbl_rb_root = QLabel("未校验")
-        root_row.addWidget(self.lbl_rb_root)
-        self.ed_rb_root.textChanged.connect(self._rb_check_root)
-        v.addLayout(root_row)
+        # 游戏根：由 C# 服务 /paths 返回（连上后自动取，不需要用户手填）
 
         top = QHBoxLayout()
         top.addWidget(QLabel("REF 服务端口:"))
@@ -4877,10 +4919,10 @@ class MaterialSystemPanel(QWidget):
         self.tbl_rb.verticalHeader().setVisible(False)
         self.tbl_rb.setEditTriggers(QAbstractItemView.NoEditTriggers)   # 名字/类型纯显示
         hh = self.tbl_rb.horizontalHeader()
-        # 和本工具其它页（QTreeWidget 默认）一致：末列 stretch 吸收宽度变化，
-        # 总宽始终 = 视口宽；拖动前面的边界时，变化量都由末列承担。
+        # 不强制总宽 = 视口宽：末列保持自己的宽度，页面更宽时右侧留白。
+        # （stretch 会让“值”列在宽页面下被无谓拉长，拖动前面的边界时全部由末列承担。）
         hh.setMinimumSectionSize(40)
-        hh.setStretchLastSection(True)
+        hh.setStretchLastSection(False)
         hh.setSectionResizeMode(0, QHeaderView.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.Interactive)
         self.tbl_rb.setColumnWidth(0, 200)
@@ -4940,19 +4982,21 @@ class MaterialSystemPanel(QWidget):
         self._rb_sync_fut = None
         self._rb_sync_sent = None
         self._rb_last_edit_ts = 0.0
+        self._rb_ident_fut = None     # 未预览对象的身份轮询（见 _rb_watch_identity）
+        self._rb_ident_tick = 0
         self._rb_sync_timer = QTimer(self)
         self._rb_sync_timer.setInterval(1500)
         self._rb_sync_timer.timeout.connect(self._rb_sync_tick)
 
         cfg = self._cfg_load()
-        if cfg.get("game_root"):
-            self.ed_rb_root.setText(cfg["game_root"])
+        # 游戏根由 /paths 从服务拿；这里的缓存只用于重启后读端口文件（不是用户输入）
+        self._rb_game_root = (os.path.normpath(cfg["game_root"])
+                              if cfg.get("game_root") else "")
         try:
             self.sp_rb_port.setValue(int(cfg.get("port") or rb.DEFAULT_PORT))
         except (TypeError, ValueError):
             self.sp_rb_port.setValue(rb.DEFAULT_PORT)
         rb.set_default_port(self.sp_rb_port.value())
-        self._rb_check_root()
         self._rb_set_link(False, "未连接")
         return w
 
