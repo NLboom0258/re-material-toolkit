@@ -99,5 +99,15 @@ assert p["name"] == "A_v2" and p["rev"] == 1, p
 assert ps.parse_temp_rel(
     "materialTemp/edit/mh/dh/默认_p20260101_000000.mdf2") is None
 
+# 7) 删除登记：edit 自动改指到剩下的副本
+ps.upsert_copy(idx2, mh, dh, b["name"], b["rel"], b["rev"])   # b 为最近使用
+removed = ps.remove_copy(idx2, mh, dh, b["name"])
+assert removed and removed["name"] == "高光版"
+assert ps.get_mdf2(idx2, mh, dh)["edit"] == a["rel"]
+assert ps.get_copy(idx2, mh, dh, name="高光版") is None
+assert ps.remove_copy(idx2, mh, dh, "不存在") is None
+ps.remove_copy(idx2, mh, dh, a["name"])
+assert ps.get_mdf2(idx2, mh, dh)["edit"] == ""
+
 shutil.rmtree(root, ignore_errors=True)
 print("test_preview_copies: OK")

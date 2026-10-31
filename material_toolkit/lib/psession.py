@@ -41,10 +41,6 @@ from . import mdf2 as mdf2lib
 
 TEMP_DIR = "materialTemp"
 SESSIONS = "sessions.json"
-# 额外的 mdf2 源目录（解包目录）。游戏根下找不到时从这里取：
-# 只有部分模型被解包到游戏根的 natives/x64，其余还在 pak 里；
-# 用户自己的解包目录（如 REtool / REE 导出的 natives/x64）可以补上。
-SOURCES = "sources.json"
 MDF2_EXT = ".10"
 _TS_RE = re.compile(r"_p(\d{8}_\d{6})")
 
@@ -248,6 +244,25 @@ def upsert_copy(idx, mh, dh, name, rel, rev, current=True):
 
 # ---------------------------------------------------------------- 文件
 
+def remove_copy(idx, mh, dh, name):
+    """删除一个副本登记，返回被删的登记项（不存在返回 None）。
+
+    若它正是该 (mesh, mdf2) 的「最近使用」（edit），自动改指到另一个副本
+    （没有则清空）。文件删除由调用方负责（必须先确认没有对象在用）。
+    """
+    e = get_mdf2(idx, mh, dh)
+    if not e:
+        return None
+    copies = e.get("copies") or {}
+    c = copies.pop(name, None)
+    if c is None:
+        return None
+    if norm_rel(e.get("edit") or "").lower() == norm_rel(c.get("rel") or "").lower():
+        e["edit"] = next((x.get("rel") for x in copies.values() if x.get("rel")), "")
+    e["updatedAt"] = _now_iso()
+    return c
+
+
 def _copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     with open(src, "rb") as f:
@@ -257,81 +272,18 @@ def _copy(src, dst):
     return len(data)
 
 
-# ---------------------------------------------------------------- 额外源目录
-
-_sources_cache = {}
-_sources_ts = {}
-
-
-def load_sources(game_root, ttl=3.0):
-    """读取 ``materialTemp/sources.json`` 里登记的额外源目录列表。
-
-    存在理由：只有部分模型被解包到**游戏根**的 ``natives/x64``，其余还在
-    ``re_chunk_000.pak`` 里。用户自己的解包目录（REE / REtool 导出的
-    ``natives/x64``）可以登记在这里，``mdf2_abs`` 找不到时会去那里取。
-
-    带 3 秒缓存：GUI 刷列表时每个 mesh 都会问一次，不能每次都读盘。
-    """
-    key = os.path.abspath(game_root)
-    now = time.time()
-    if key in _sources_cache and now - _sources_ts.get(key, 0.0) < ttl:
-        return _sources_cache[key]
-    p = os.path.join(temp_root(game_root), SOURCES)
-    roots = []
-    try:
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            roots = [str(r) for r in (d.get("extraRoots") or []) if r and os.path.isdir(str(r))]
-    except Exception:
-        roots = []
-    _sources_cache[key] = roots
-    _sources_ts[key] = now
-    return roots
-
-
-def save_sources(game_root, roots, log=None):
-    """写入额外源目录列表。传空列表 = 清空（只靠游戏根）。"""
-    root = temp_root(game_root)
-    os.makedirs(root, exist_ok=True)
-    p = os.path.join(root, SOURCES)
-    clean = []
-    for r in (roots or []):
-        r = str(r).strip()
-        if r and r not in clean:
-            clean.append(r)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump({"extraRoots": clean}, f, ensure_ascii=False, indent=2)
-    key = os.path.abspath(game_root)
-    _sources_cache.pop(key, None)
-    _sources_ts.pop(key, None)
-    if log:
-        log("源目录已更新：%d 个%s" % (len(clean), ("（" + clean[0] + "）") if clean else ""))
-    return p
-
-
-def mdf2_abs(game_root, mdf_rel, extra_roots=None):
+def mdf2_abs(game_root, mdf_rel):
     """``Character/.../pl0800.mdf2`` → 绝对路径（自动补 ``.10``）。
 
-    查找顺序：游戏根 ``natives/x64`` → ``sources.json`` 里登记的额外源目录
-    （解包目录）。后者用于「该资源还在 pak 里没解包」的模型。
+    只在游戏根 ``natives/x64`` 下找；找不到就去 pak 里提（见 ``ensure_mdf2``）。
     """
     rel = norm_rel(mdf_rel)
-    rel_os = rel.replace("/", os.sep)
-    roots = [os.path.join(os.path.abspath(game_root), "natives", "x64")]
-    if extra_roots is None:
-        extra_roots = load_sources(game_root)
-    roots += [os.path.abspath(r) for r in (extra_roots or []) if r]
-
-    first = None
-    for base in roots:
-        p = os.path.join(base, rel_os)
-        if first is None:
-            first = p
-        for cand in (p, p + MDF2_EXT):
-            if os.path.exists(cand):
-                return cand
-    return first
+    p = os.path.join(os.path.abspath(game_root), "natives", "x64",
+                     rel.replace("/", os.sep))
+    for cand in (p, p + MDF2_EXT):
+        if os.path.exists(cand):
+            return cand
+    return p
 
 
 # 副本名 → 文件名。只做合法性校验，不做字符替换（避免两个不同名字落到同一文件）。
@@ -445,15 +397,15 @@ def parse_temp_rel(rel):
 
 
 def _missing_mdf2_msg(path, rel):
-    """两处都找不到 mdf2 时的报错文案。
+    """磁盘和 pak 都找不到 mdf2 时的报错文案。
 
-    查找顺序：游戏根 ``natives/x64`` → 登记的额外源目录 → **从 pak 按需提取**。
-    三者都没有才报错（通常是游戏版本不一致 / pak 里本来就没这个资源）。
+    查找顺序：游戏根 ``natives/x64`` → **从 pak 按需提取**。
+    两者都没有才报错（通常是游戏版本不一致 / pak 里本来就没这个资源）。
     """
     return (
         "找不到 mdf2：\n%s\n\n"
         "资源路径：%s\n\n"
-        "已经试过：游戏根 natives/x64、登记的额外源目录、从 re_chunk_*.pak 提取。\n"
+        "已经试过：游戏根 natives/x64、从 re_chunk_*.pak 提取。\n"
         "如果游戏刚更新过，可能是 pak 里该资源的路径变了。"
         % (path, norm_rel(rel))
     )

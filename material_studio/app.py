@@ -3392,7 +3392,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy", "btn_rb_del_copy"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -3603,7 +3603,6 @@ class MaterialSystemPanel(QWidget):
             return
         go = self.ed_rb_filter.text().strip()
         root = self._rb_root()
-        self._rb_sync_src_box()
         try:
             d = rb.identity(go=go, limit=120, names=False)
         except rb.BridgeError as e:
@@ -4142,10 +4141,10 @@ class MaterialSystemPanel(QWidget):
         QMessageBox.information(self, "材质属性", msg)
 
     def _rb_pick_copy(self):
-        """选择/新建当前对象的编辑副本。
+        """选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。
 
-        只列**同一个原 mdf2** 下的具名副本（sessions.json 的 copies）；
-        按 mesh 分类、按原 mdf2 分文件夹，跨 mdf2 的切换不属于这里。
+        扁平列表：每行「副本名（vN）· 原 mdf2 路径」。同一 mesh 下不同原 mdf2
+        （正常 / Wet / Burn…）的副本都能挂，切过去时以那一份的原 mdf2 为准。
         """
         ent = self._rb_cur_ent()
         if ent is None:
@@ -4153,51 +4152,73 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         mesh_path = ent.get("meshPath") or ""
-        dh = ent.get("prev")
         if not root or not mesh_path:
             self._rb_say("选择副本：缺少游戏根目录或 meshPath（刷新列表后再试）")
             return
-        if not dh:
-            self._rb_say("选择副本：该对象还没启用预览（先勾选建一份副本）")
-            return
         mh = ps.mesh_hash(mesh_path)
         doc = ps.load_index(root)
-        e = ps.get_mdf2(doc, mh, dh) or {}
-        base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
-        copies = [c for c in ps.list_copies(doc, mh, dh)
+        mdfs = (ps.get_object(doc, mh) or {}).get("mdfs") or {}
+        groups = []
+        for dh in mdfs:
+            e = mdfs[dh]
+            base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+            cs = [c for c in ps.list_copies(doc, mh, dh)
                   if ps.exists_edit(root, c["rel"])]
-        cur = self._rb_copy_of(doc, mh, dh, ent)
-        labels = ["%s（v%d）%s" % (c["name"], c["rev"],
-                                  "  ← 当前" if cur and c["name"] == cur["name"] else "")
-                  for c in copies]
-        labels.append("＋ 新建副本…")
-        default = next((i for i, c in enumerate(copies)
-                        if cur and c["name"] == cur["name"]), 0)
+            if cs:
+                groups.append((dh, base, cs))
+        if not groups:
+            self._rb_say("选择副本：该 mesh 还没有编辑副本（先勾选建一份）")
+            return
+        groups.sort(key=lambda g: g[1])
+
+        labels, rows = [], []          # rows: (dh, copy)
+        for dh, base, cs in groups:
+            for c in cs:
+                mark = ("  ← 当前" if ent.get("prev") == dh
+                        and ent.get("copy") == c["name"] else "")
+                labels.append("%s（v%d）· %s%s" % (
+                    c["name"], c["rev"], self._rb_short(base, 56) or "?", mark))
+                rows.append((dh, c))
+        # 新建：只有一个原 mdf2 时只给一项；多个时各自一项（不再弹第二层选择）
+        creates = []
+        if len(groups) == 1:
+            labels.append("＋ 新建副本…")
+            creates.append(groups[0][0])
+        else:
+            for dh, base, _cs in groups:
+                labels.append("＋ 新建副本… · %s" % (self._rb_short(base, 48) or "?"))
+                creates.append(dh)
+        default = next((i for i, r in enumerate(rows)
+                        if ent.get("prev") == r[0] and ent.get("copy") == r[1]["name"]), 0)
         pick, ok = QInputDialog.getItem(
             self, "选择副本",
-            "原 mdf2：%s\n\n选一份挂到这个对象（同一原 mdf2 下共 %d 份）："
-            % (self._rb_short(base, 70) or "?", len(copies)),
+            "对象：%s\n\n选一份挂到这个对象（该 mesh 用到的原 mdf2 的副本都能选）："
+            % self._rb_short(mesh_path, 70),
             labels, default, False)
         if not ok:
             return
         i = labels.index(pick)
-        if i == len(copies):
+        if i >= len(rows):
+            dh = creates[i - len(rows)]
             c = self._rb_new_copy(root, doc, mh, dh)
             if c is None:
                 return
         else:
-            c = copies[i]
+            dh, c = rows[i]
+        self._rb_switch_copy(ent, doc, mh, dh, c, root)
 
+    def _rb_switch_copy(self, ent, doc, mh, dh, c, root):
+        """把当前对象挂到副本 c（并把它设为该原 mdf2 的最近使用）。"""
         addr, go = ent.get("addr"), ent.get("go")
         try:
             d = rb.material(go, "apply", mdf=c["rel"], addr=addr, keep=True)
         except rb.BridgeError as ex:
             self._rb_say("切换副本失败: %s" % ex)
-            return
+            return False
         ms = d.get("meshes") or []
         if d.get("err") or not ms or not ms[0].get("ok"):
             self._rb_say("切换副本失败: %s" % (d.get("err") or "无命中"))
-            return
+            return False
 
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
         ent["prev"] = dh
@@ -4207,10 +4228,93 @@ class MaterialSystemPanel(QWidget):
         ps.save_index(root, doc, log=self._rb_say)
         self._rb_set_item_check(addr, True)
         self._rb_sync_enabled()
-        # apply 后引擎重建参数块要一点时间
+        # apply 后引擎重建参数块要一点时间；跨原 mdf2 切换时材质集可能不同，整表重读
         QTimer.singleShot(600, self._rb_update_mdf_label)
-        QTimer.singleShot(600, self._rb_reread_current)
+        QTimer.singleShot(600, lambda e=ent: self._rb_load_params(e))
         self._rb_say("已切换到副本「%s」v%d：%s" % (c["name"], c["rev"], c["rel"]))
+        return True
+
+    def _rb_del_copy(self):
+        """删除当前 mesh 下**未被使用**的副本（文件 + 登记）。
+
+        本工具任何一行在用、或游戏仍 hold 的副本都不列：引擎下次重载读不到
+        文件会变默认方格，所以「在用」判断是硬条件。
+        """
+        ent = self._rb_cur_ent()
+        if ent is None:
+            self._rb_say("删除副本：先选一个对象")
+            return
+        root = self._rb_root()
+        mesh_path = ent.get("meshPath") or ""
+        if not root or not mesh_path:
+            self._rb_say("删除副本：缺少游戏根目录或 meshPath")
+            return
+        if not (self._rb_connected and self._rb_link_ok):
+            self._rb_say("删除副本：需要先连接游戏（确认没有对象在用它）")
+            return
+        mh = ps.mesh_hash(mesh_path)
+        doc = ps.load_index(root)
+        mdfs = (ps.get_object(doc, mh) or {}).get("mdfs") or {}
+        in_use = {(m.get("prev"), m.get("copy"))
+                  for m in (getattr(self, "_rb_meshes", None) or [])
+                  if m.get("prev")}
+        held = set()
+        try:
+            for h in (rb.holds().get("holdDetail") or []):
+                p = ps.norm_rel(h.get("wantPath") or "").lower()
+                if p:
+                    held.add(p)
+        except rb.BridgeError as ex:
+            self._rb_say("删除副本：读 holds 失败（%s），暂不删除" % ex)
+            return
+
+        rows, labels = [], []
+        for dh in sorted(mdfs):
+            e = mdfs[dh]
+            base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+            for c in ps.list_copies(doc, mh, dh):
+                if (dh, c["name"]) in in_use:
+                    continue
+                if c["rel"].lower() in held:
+                    continue
+                labels.append("%s（v%d）· %s" % (
+                    c["name"], c["rev"], self._rb_short(base, 56) or "?"))
+                rows.append((dh, c))
+        if not rows:
+            self._rb_say("删除副本：没有可删的（都在使用中 / 被游戏保持）")
+            QMessageBox.information(
+                self, "没有可删除的副本",
+                "该 mesh 的副本都在使用中，或被游戏保持。\n"
+                "先切换到别的副本 / 取消勾选，或在游戏里解除保持后再试。")
+            return
+        pick, ok = QInputDialog.getItem(
+            self, "删除副本",
+            "对象：%s\n\n只列**未使用**的副本；删除后文件和登记都会移除（不可恢复）："
+            % self._rb_short(mesh_path, 70),
+            labels, 0, False)
+        if not ok:
+            return
+        dh, c = rows[labels.index(pick)]
+        if QMessageBox.question(
+                self, "删除副本",
+                "确定删除副本「%s」v%d？\n\n文件：%s\n\n不可恢复。"
+                % (c["name"], c["rev"], c["rel"]),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            os.remove(ps.rel_to_abs(root, c["rel"]))
+        except FileNotFoundError:
+            pass
+        except OSError as ex:
+            self._rb_say("删除文件失败: %s" % ex)
+            QMessageBox.warning(self, "删除失败", str(ex))
+            return
+        ps.remove_copy(doc, mh, dh, c["name"])
+        ps.save_index(root, doc, log=self._rb_say)
+        self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
+        self._rb_update_mdf_label()
+        self._rb_say("已删除副本「%s」v%d" % (c["name"], c["rev"]))
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
@@ -4271,37 +4375,9 @@ class MaterialSystemPanel(QWidget):
     def _rb_root(self):
         return (self.ed_rb_root.text() or "").strip()
 
-    # ---- 额外源目录（解包目录）------------------------------------------
-    def _rb_sync_src_box(self):
-        """把 sources.json 里的解包目录填到输入框（用户正在编辑时不覆盖）。"""
-        box = getattr(self, "ed_rb_src", None)
-        if box is None or box.text().strip():
-            return
-        root = self._rb_root()
-        if not root:
-            return
-        roots = ps.load_sources(root)
-        if roots:
-            box.setText(roots[0].replace("\\", "/"))
-
-    def _rb_browse_src(self):
-        d = QFileDialog.getExistingDirectory(
-            self, "选择解包目录（应指向 natives/x64）",
-            self.ed_rb_src.text().strip() or self._rb_root() or "")
-        if d:
-            self.ed_rb_src.setText(d.replace("\\", "/"))
-
-    def _rb_apply_src(self):
-        root = self._rb_root()
-        if not root:
-            self._rb_say("先配置游戏根目录（实时预览页）")
-            return
-        p = self.ed_rb_src.text().strip().replace("\\", "/")
-        if p and not os.path.isdir(p):
-            QMessageBox.warning(self, "目录不存在", "这个目录不存在：\n%s" % p)
-            return
-        ps.save_sources(root, [p] if p else [], log=self._rb_say)
-        self._rb_refresh()
+    # ---- 额外源目录（已移除）----------------------------------------------
+    # 早期支持登记另一个解包目录（sources.json）作为 mdf2 源；实际用不上，
+    # 且容易误点「应用」。现在只在游戏根 natives/x64 找，找不到就从 pak 提取。
 
     def _rb_find_identity(self, ent):
         """重新查一次对象的身份（按 addr 匹配）。
@@ -4678,28 +4754,17 @@ class MaterialSystemPanel(QWidget):
         iso.addWidget(self.btn_rb_attrs)
         self.btn_rb_copy = QPushButton("选择副本…")
         self.btn_rb_copy.setToolTip(
-            "选择/新建当前对象这份原 mdf2 下的编辑副本。\n"
-            "列表显示「副本名（版本）」，只看同一个原 mdf2；取消勾选才是回到原始状态。")
+            "选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。\n"
+            "每行显示「副本名（版本）· 原 mdf2 路径」；取消勾选才是回到原始状态。")
         self.btn_rb_copy.clicked.connect(self._rb_pick_copy)
         iso.addWidget(self.btn_rb_copy)
+        self.btn_rb_del_copy = QPushButton("删除副本…")
+        self.btn_rb_del_copy.setToolTip(
+            "删除当前 mesh 下未被使用的副本（文件 + 登记，不可恢复）。\n"
+            "本工具在用 / 游戏仍保持的副本不会列出。")
+        self.btn_rb_del_copy.clicked.connect(self._rb_del_copy)
+        iso.addWidget(self.btn_rb_del_copy)
         v.addLayout(iso)
-
-        # 额外源目录：只有部分模型被解包到游戏根，其余还在 pak 里。
-        # 这里可以指向自己解包出的另一个 natives/x64。
-        srcrow = QHBoxLayout()
-        srcrow.addWidget(QLabel("解包目录(可选):"))
-        self.ed_rb_src = QLineEdit()
-        self.ed_rb_src.setPlaceholderText(
-            "另一个 natives/x64（REE / REtool 的解包目录）；游戏根找不到 mdf2 时从这里取")
-        srcrow.addWidget(self.ed_rb_src, 1)
-        b = QPushButton("浏览…")
-        b.clicked.connect(self._rb_browse_src)
-        srcrow.addWidget(b)
-        b = QPushButton("应用")
-        b.setToolTip("保存后在列表里重新判断哪些对象的源 mdf2 可用")
-        b.clicked.connect(self._rb_apply_src)
-        srcrow.addWidget(b)
-        v.addLayout(srcrow)
 
         f = QHBoxLayout()
         f.addWidget(QLabel("GameObject 过滤:"))
