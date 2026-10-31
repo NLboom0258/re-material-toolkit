@@ -2520,9 +2520,11 @@ class Mdf2Panel(QWidget):
             return
         relayout_offsets(m)   # 让 offset 显示与实际导出一致(新参数不再显示 0)
         names = [n for n, _ in PARAM_TYPES]
-        # 类型列宽度按"最长的类型名"算(如 float4x4), 避免固定宽度截断长名
+        # 类型列宽度按**当前材质实际用到的类型**算（不是全部类型的最长名，
+        # 否则材质里只有 float 时也会按 float4x4 留出很宽的列）
         fm = self.tree_param.fontMetrics()
-        type_w = max(fm.horizontalAdvance(n) for n in names) + 36   # 文字 + 下拉箭头/内边距
+        cur_types = {pr.type for pr in m.properties} or {"float4"}
+        type_w = max(fm.horizontalAdvance(n) for n in cur_types) + 36
         for pr in m.properties:
             it = QTreeWidgetItem(["", pr.name, "", "", f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
@@ -2543,7 +2545,10 @@ class Mdf2Panel(QWidget):
             self.tree_param.setItemWidget(it, 3, ValueEditor(pr))
         fit_columns(self.tree_param, [1, 4], pad=24, min_w=90, max_w=420)
         self.tree_param.setColumnWidth(2, type_w + 12)
-        self.tree_param.setColumnWidth(3, 360)
+        # 值列按当前材质最大分量数给初宽（矩阵在 mdf2 页是逗号文本，给 360）
+        max_n = max((len(pr.values) for pr in m.properties), default=4)
+        self.tree_param.setColumnWidth(
+            3, 360 if max_n > 4 else max(120, max_n * 72 + 24))
 
     def _on_param_moved(self, *_a):
         """材质参数拖拽重排: 读当前行顺序 -> 重排 properties + 重算偏移。"""
@@ -3896,6 +3901,7 @@ class MaterialSystemPanel(QWidget):
             else:
                 self.tbl_rb.setItem(r, 2, QTableWidgetItem(str(vv.get("value"))))
         self._rb_fit_name_width(m)
+        self._rb_fit_type_width(m)
         self._rb_fit_value_width(m)
 
     def _rb_fit_name_width(self, m):
@@ -3906,17 +3912,25 @@ class MaterialSystemPanel(QWidget):
             need = max(need, fm.horizontalAdvance(str(vv.get("name") or "")) + 32)
         self.tbl_rb.setColumnWidth(0, min(max(160, int(need)), 320))
 
-    def _rb_fit_value_width(self, m):
-        """按当前材质最大的值控件给「值」列一个初始宽度（之后仍可拖）。"""
+    def _rb_fit_type_width(self, m):
+        """「类型」列按当前材质实际用到的类型文本给初宽（min 56 / max 120）。"""
         fm = self.tbl_rb.fontMetrics()
-        need = 80
+        need = fm.horizontalAdvance("类型") + 24
+        for vv in (m.get("vars") or []):
+            need = max(need, fm.horizontalAdvance(_rb_typename(vv.get("type"))) + 24)
+        self.tbl_rb.setColumnWidth(1, min(max(56, need), 120))
+
+    def _rb_fit_value_width(self, m):
+        """按当前材质最大的值控件给「值」列（第 2 列）一个初始宽度（之后仍可拖）。"""
+        fm = self.tbl_rb.fontMetrics()
+        need = 96
         for vv in (m.get("vars") or []):
             vt = vv.get("type") or 0
             if 2 <= vt <= 4:
-                need = max(need, vt * 72 + 8)
+                need = max(need, vt * 72 + 16)
             elif vt > 4:
-                need = max(need, fm.horizontalAdvance("矩阵（%d 分量，只读）" % vt) + 24)
-        self.tbl_rb.setColumnWidth(1, min(max(80, need), 560))
+                need = max(need, fm.horizontalAdvance("矩阵（%d 分量，只读）" % vt) + 28)
+        self.tbl_rb.setColumnWidth(2, min(max(96, need), 600))
 
     def _rb_schedule(self, name, spin):
         """合并连续拖动：只发最后一次值（否则拖一下会发几十个请求）。"""
