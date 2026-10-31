@@ -3436,7 +3436,11 @@ class MaterialSystemPanel(QWidget):
             self._rb_ping_fut = None
 
     def _rb_sync_tick(self):
-        """当前查看的材质：定时从游戏读实际值，更新未被编辑的输入框。
+        """当前查看的材质/对象：
+
+        - 已预览：定时从游戏读参数实际值，更新未被编辑的输入框；
+        - 未预览：每 2 个 tick 查一次 /identity，更新顶部当前 mdf2
+          （游戏切 _Wet 等变体时自动跟上）。
 
         解决“工具侧显示的值和游戏实际值不一致，切到别的对象再切回来才刷新”。
         游戏里有些参数会被引擎自己改（湿身/变体切换、动画驱动的 Alpha 等），
@@ -3724,7 +3728,6 @@ class MaterialSystemPanel(QWidget):
             return
         ent = self._rb_meshes[row]
         self._rb_cur_addr = ent.get("addr")
-        self._rb_go = ent.get("go")
         self._rb_mesh_i = ent.get("i")
         self._rb_update_mdf_label()
         self._rb_load_params(ent)
@@ -4117,7 +4120,6 @@ class MaterialSystemPanel(QWidget):
         if moved:
             for a in moved:
                 self._rb_edits.pop(a, None)
-            self._rb_iso_mdf = new_rel
 
         self._rb_update_mdf_label()
         if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
@@ -4221,9 +4223,6 @@ class MaterialSystemPanel(QWidget):
                                               addr_go, name=r["name"], rev=r["rev"])
         for a in moved:
             self._rb_edits.pop(a, None)
-        if moved:
-            self._rb_iso_mdf = r["rel"]
-
         self._rb_update_mdf_label()
         if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
             # 重载后参数集可能变了（换母材质）；延迟读，等引擎重建完参数块
@@ -4245,7 +4244,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_pick_copy(self):
         """选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。
 
-        扁平列表：每行「副本名（vN）· 原 mdf2 路径」。同一 mesh 下不同原 mdf2
+        树形（按原 mdf2 分组）：每行「副本名（vN）· 原 mdf2 路径」。同一 mesh 下不同原 mdf2
         （正常 / Wet / Burn…）的副本都能挂，切过去时以那一份的原 mdf2 为准。
         """
         ent = self._rb_cur_ent()
@@ -4311,7 +4310,6 @@ class MaterialSystemPanel(QWidget):
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
         ent["prev"] = dh
         ent["copy"] = c["name"]
-        self._rb_iso_mdf = c["rel"]
         ps.upsert_copy(doc, mh, dh, c["name"], c["rel"], c["rev"])
         ps.save_index(root, doc, log=self._rb_say)
         self._rb_set_item_check(addr, True)
@@ -4593,7 +4591,6 @@ class MaterialSystemPanel(QWidget):
         for m in ms:
             if not m.get("ok"):
                 raise rb.BridgeError("apply 失败: %s" % (m.get("err") or "?"))
-        self._rb_iso_mdf = rel
         self._rb_say("已挂载工作副本（keep=%s）: %s" % (d.get("keep"), ms[0].get("now") or rel))
 
     def _rb_ask_copy(self, idx_doc, mh, dh, copies):
@@ -4795,7 +4792,6 @@ class MaterialSystemPanel(QWidget):
         ps.upsert_mdf2(idx_doc, mh_hit, dh_hit, orig_target, orig_target,
                        orig_rel=orig)
         ps.save_index(root, idx_doc, log=self._rb_say)
-        self._rb_iso_mdf = None
         # 取消 = 放弃本会话的改动，写盘记录一并丢弃（否则下次保存会把旧值写回去）
         self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_say("已重置：挂到 orig 副本 %s（参数回到原始值，keep 已关）" % orig)
@@ -4964,11 +4960,9 @@ class MaterialSystemPanel(QWidget):
         self._rb_mats = []
         self._rb_spins = {}
         self._rb_vec_spins = {}
-        self._rb_go = None
         self._rb_mesh_i = None
         self._rb_cur_addr = None      # 当前行的对象地址（一切操作的定位键）
         self._rb_building = False     # 重建列表时忽略 itemChanged
-        self._rb_iso_mdf = None
         self._rb_matname = None
         self._rb_pending = {}
         # 本会话改过的参数：{对象地址: {材质名: {参数名: [float...]}}}
@@ -5911,7 +5905,9 @@ class MaterialSystemPanel(QWidget):
         QMessageBox.information(
             self, "编译成功",
             "材质：%s（第 %d 版）\n产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n%s\n\n"
-            "接下来在「实时预览」页把某个材质槽的母材质换成它。\n\n%s"
+            "接下来在「实时预览」页把某个材质槽的母材质换成它。\n\n"
+            "注意：新 mmtr 是全新的资源路径，游戏暂停（ESC 菜单）时不会加载它；\n"
+            "若在暂停中切换母材质 / 副本，可能暂时显示默认方格，恢复游戏后才会生效。\n\n%s"
             % (mat_name, rev, item["rel"], item["bytes"], len(prof),
                len(item.get("textureSlots") or []), auto_note, "\n".join(logs)))
 
