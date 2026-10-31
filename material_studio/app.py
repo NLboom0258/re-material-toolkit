@@ -4066,11 +4066,12 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("旧副本删除失败（可忽略）: %s" % ex)
         return moved, failed
 
-    def _rb_repoint_texture_copies(self, root, mh, dh, name, new_rel, skip_rel):
-        """同 (mesh, 原 mdf2) 下引用该导入贴图的**其他副本**改到 new_rel。
+    def _rb_repoint_texture_copies(self, root, mh, dh, new_paths, skip_rel):
+        """同 (mesh, 原 mdf2) 下引用这些导入贴图的**其他副本**改到各自新 rev。
 
-        返回 ``[{name, old, new, rev, addr_go}]``；只改文件，登记/切换由调用方。
-        会把副本上对象的未保存参数/贴图改动一并写进新文件（和材质属性应用一致）。
+        ``new_paths`` = ``{name_low: (原名, 新路径, rev)}``（一次处理多个贴图，
+        每个副本只重写一次）。返回 ``[{name, old, new, rev, addr_go}]``；
+        只改文件，登记/切换由调用方。会把副本上对象的未保存参数/贴图改动一并写进新文件。
         """
         doc = ps.load_index(root)
         out = []
@@ -4086,7 +4087,10 @@ class MaterialSystemPanel(QWidget):
                 d = mdf2lib.Mdf2.load(src)
             except Exception:  # noqa: BLE001
                 continue
-            refs = ps.tex_refs_in_mdf2(d, name, mh, dh)
+            refs = {}
+            for _low, (nm, newp, _rev) in new_paths.items():
+                for mat, slots in ps.tex_refs_in_mdf2(d, nm, mh, dh).items():
+                    refs.setdefault(mat, {}).update({s: newp for s in slots})
             if not refs:
                 continue
             mat_names = {m.name for m in d.materials}
@@ -4102,7 +4106,7 @@ class MaterialSystemPanel(QWidget):
                         changes.setdefault(mat, {}).setdefault("textures", {}).update(slots)
             for mat, slots in refs.items():
                 ch = changes.setdefault(mat, {})
-                ch.setdefault("textures", {}).update({s: new_rel for s in slots})
+                ch.setdefault("textures", {}).update(slots)
             try:
                 r = mattr.apply_attrs(root, rel, changes, log=self._rb_say)
             except Exception as ex:  # noqa: BLE001
@@ -4152,6 +4156,122 @@ class MaterialSystemPanel(QWidget):
                 pass
         return moved, failed
 
+    def _rb_persist_textures(self, ent, root, mh, dh, edit_rel, addr_go, extra=None):
+        """把贴图改动写进 mdf2 副本，并联动同 (mesh, 原 mdf2) 的所有副本。
+
+        返回 ``(ok, msg)``；ok=False 时 msg 是错误文案。
+        ``extra`` = ``{材质: {槽名: 新路径}}``，与 pending 的贴图/参数改动合并。
+        """
+        merged = {}
+        for k in addr_go:
+            for mat, props in (self._rb_edits.get(k) or {}).items():
+                merged.setdefault(mat, {}).update(props)
+        tex = {}
+        for k in addr_go:
+            for mat, slots in (self._rb_tex_edits.get(k) or {}).items():
+                tex.setdefault(mat, {}).update(slots)
+        for mat, slots in (extra or {}).items():
+            tex.setdefault(mat, {}).update(slots)
+        if not merged and not tex:
+            return True, "保存：没有改动"
+
+        # 本次涉及的导入贴图（name → (原名, 新路径, rev)）；同名取最高 rev。
+        new_paths = {}
+        for slots in tex.values():
+            for path in slots.values():
+                pt = ps.parse_tex_rel(path)
+                if not pt or pt["mh"].lower() != mh.lower() \
+                        or pt["dh"].lower() != dh.lower():
+                    continue
+                old = new_paths.get(pt["name"].lower())
+                if old is None or pt["rev"] > old[2]:
+                    new_paths[pt["name"].lower()] = (
+                        pt["name"], ps.norm_rel(path), pt["rev"])
+        # 同名贴图统一到最高 rev（不同材质 pending 的旧 rev 也归一），再合并进 changes。
+        if new_paths:
+            for slots in tex.values():
+                for slot, path in list(slots.items()):
+                    pt = ps.parse_tex_rel(path)
+                    if pt and pt["name"].lower() in new_paths:
+                        slots[slot] = new_paths[pt["name"].lower()][1]
+
+        changes = {}
+        for mat in set(merged) | set(tex):
+            ch = {}
+            if merged.get(mat):
+                ch["params"] = merged[mat]
+            if tex.get(mat):
+                ch["textures"] = tex[mat]
+            changes[mat] = ch
+
+        if new_paths:
+            try:
+                cur_doc = mdf2lib.Mdf2.load(ps.rel_to_abs(root, edit_rel))
+                for _low, (nm, newp, _rev) in new_paths.items():
+                    for mat, slots in ps.tex_refs_in_mdf2(cur_doc, nm, mh, dh).items():
+                        ch = changes.setdefault(mat, {})
+                        ch.setdefault("textures", {}).update(
+                            {slot: newp for slot in slots})
+            except Exception as ex:  # noqa: BLE001
+                self._rb_say("贴图更新：读当前副本失败（%s）" % ex)
+
+        try:
+            r2 = mattr.apply_attrs(root, edit_rel, changes, log=self._rb_say)
+        except Exception as ex:  # noqa: BLE001
+            return False, "保存失败: %s" % ex
+        if not r2.get("changed"):
+            return True, "保存：没有改动"
+        new_rel = r2["rel"]
+        moved, failed = self._rb_switch_all_to(
+            root, mh, dh, edit_rel, new_rel, addr_go,
+            name=r2["name"], rev=r2["rev"])
+        if moved:
+            for a in moved:
+                self._rb_edits.pop(a, None)
+                self._rb_tex_edits.pop(a, None)
+
+        # 同 (mesh, 原 mdf2) 的其他副本：引用这些贴图的槽全部切到各自新 rev。
+        repointed = self._rb_repoint_texture_copies(
+            root, mh, dh, new_paths, new_rel)
+        moved2, failed2 = self._rb_apply_repointed_textures(
+            root, mh, dh, repointed)
+
+        # 所有对象内存里的待保存贴图路径也归一到新 rev
+        # （否则它们之后保存时会写已被删掉的旧 rev）。
+        for low, (_nm, newp, _rev) in new_paths.items():
+            for mats in self._rb_tex_edits.values():
+                for slots in mats.values():
+                    for slot, path in list(slots.items()):
+                        pt = ps.parse_tex_rel(path)
+                        if pt and pt["mh"].lower() == mh.lower() \
+                                and pt["dh"].lower() == dh.lower() \
+                                and pt["name"].lower() == low:
+                            slots[slot] = newp
+
+        for _low, (nm, _newp, _rev) in new_paths.items():
+            ps.delete_unused_texture_revs(root, mh, dh, nm, log=self._rb_say)
+
+        self._rb_update_mdf_label()
+        if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
+            QTimer.singleShot(600, self._rb_reread_current)
+
+        ntex = sum(len(v) for v in tex.values())
+        msg = ("已写入 %d 个参数 + %d 个贴图槽到副本「%s」v%d：\n%s\n\n"
+               "切到新副本的对象：%d 个"
+               % (sum(len(v) for v in merged.values()), ntex,
+                  r2["name"], r2["rev"], new_rel, len(moved)))
+        if repointed:
+            msg += "\n\n联动更新同 mdf2 的其他副本：%d 个（切换对象：%d 个）" % (
+                len(repointed), moved2)
+            if failed2:
+                msg += "\n未切换成功：\n" + "\n".join(failed2)
+        rep = r2.get("report") or []
+        if rep:
+            msg += "\n\n" + "\n".join(rep)
+        if failed:
+            msg += "\n\n未切换成功：\n" + "\n".join(failed)
+        return True, msg
+
     def _rb_save_to_mdf2(self):
         """把本会话改过的参数写进工作副本（新路径），并让游戏重载。"""
         ent = self._rb_cur_ent()
@@ -4190,83 +4310,11 @@ class MaterialSystemPanel(QWidget):
 
         # 有贴图改动：必须 Mdf2.save() 重排（贴图路径是字符串），参数值一并写入。
         if tex:
-            changes = {}
-            for mat in set(merged) | set(tex):
-                ch = {}
-                if merged.get(mat):
-                    ch["params"] = merged[mat]
-                if tex.get(mat):
-                    ch["textures"] = tex[mat]
-                changes[mat] = ch
-
-            # 本次保存里用到的导入贴图 rev（name → 新逻辑路径）。
-            # 同一副本里其他材质引用同名贴图的槽也要一起改，否则它们还指旧 rev。
-            new_paths = {}
-            for slots in tex.values():
-                for path in slots.values():
-                    pt = ps.parse_tex_rel(path)
-                    if pt and pt["mh"].lower() == mh.lower() \
-                            and pt["dh"].lower() == dh.lower():
-                        new_paths.setdefault(pt["name"].lower(),
-                                             (pt["name"], ps.norm_rel(path)))
-            if new_paths:
-                try:
-                    cur_doc = mdf2lib.Mdf2.load(ps.rel_to_abs(root, edit_rel))
-                    for _low, (nm, newp) in new_paths.items():
-                        for mat, slots in ps.tex_refs_in_mdf2(cur_doc, nm, mh, dh).items():
-                            ch = changes.setdefault(mat, {})
-                            ch.setdefault("textures", {}).update(
-                                {slot: newp for slot in slots})
-                except Exception as ex:  # noqa: BLE001
-                    self._rb_say("贴图更新：读当前副本失败（%s）" % ex)
-
-            try:
-                r2 = mattr.apply_attrs(root, edit_rel, changes, log=self._rb_say)
-            except Exception as ex:  # noqa: BLE001
-                self._rb_say("保存失败: %s" % ex)
-                QMessageBox.warning(self, "保存失败", str(ex))
+            ok, msg = self._rb_persist_textures(ent, root, mh, dh, edit_rel, addr_go)
+            if not ok:
+                self._rb_say(msg)
+                QMessageBox.warning(self, "保存失败", msg)
                 return
-            if not r2.get("changed"):
-                self._rb_say("保存：没有改动")
-                return
-            new_rel = r2["rel"]
-            moved, failed = self._rb_switch_all_to(
-                root, mh, dh, edit_rel, new_rel, addr_go,
-                name=r2["name"], rev=r2["rev"])
-            if moved:
-                for a in moved:
-                    self._rb_edits.pop(a, None)
-                    self._rb_tex_edits.pop(a, None)
-
-            # 同 (mesh, 原 mdf2) 的其他副本：引用同名贴图的槽全部切到新 rev。
-            # 只改文件/登记/切换；旧贴图文件等全部重指完后再删。
-            repointed = []
-            for _low, (nm, newp) in new_paths.items():
-                repointed += self._rb_repoint_texture_copies(
-                    root, mh, dh, nm, newp, new_rel)
-            moved2, failed2 = self._rb_apply_repointed_textures(
-                root, mh, dh, repointed)
-            for _low, (nm, _newp) in new_paths.items():
-                ps.delete_unused_texture_revs(root, mh, dh, nm, log=self._rb_say)
-
-            self._rb_update_mdf_label()
-            if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
-                QTimer.singleShot(600, self._rb_reread_current)
-            ntex = sum(len(v) for v in tex.values())
-            msg = ("已写入 %d 个参数 + %d 个贴图槽到副本「%s」v%d：\n%s\n\n"
-                   "切到新副本的对象：%d 个"
-                   % (sum(len(v) for v in merged.values()), ntex,
-                      r2["name"], r2["rev"], new_rel, len(moved)))
-            if repointed:
-                msg += "\n\n联动更新同 mdf2 的其他副本：%d 个（切换对象：%d 个）" % (
-                    len(repointed), moved2)
-                if failed2:
-                    msg += "\n未切换成功：\n" + "\n".join(failed2)
-            rep = r2.get("report") or []
-            if rep:
-                msg += "\n\n" + "\n".join(rep)
-            if failed:
-                msg += "\n\n未切换成功：\n" + "\n".join(failed)
             self._rb_say(msg.replace("\n", "  "))
             QMessageBox.information(self, "保存到 mdf2", msg)
             return
@@ -4312,9 +4360,13 @@ class MaterialSystemPanel(QWidget):
         self._rb_say(msg.replace("\n", "  "))
         QMessageBox.information(self, "保存到 mdf2", msg)
 
-    # ---- 贴图槽编辑（运行时 setMaterialTexture；持久化见 _rb_save_to_mdf2）----
+    # ---- 贴图槽编辑（导入贴图应用即写 mdf2；原 mdf2 路径仍可保存时落盘）----
     def _rb_edit_textures(self):
-        """编辑当前材质的贴图槽：应用 = 内存热替换，保存 = 写入 mdf2 新 rev。"""
+        """编辑当前材质的贴图槽。
+
+        导入贴图：应用即写新 rev 副本，并联动同 (mesh, 原 mdf2) 的所有副本（mmtr 同款）。
+        原 mdf2 自带的路径：应用 = 内存热替换，保存到 mdf2 时落盘。
+        """
         ent = self._rb_cur_ent()
         if ent is None or not ent.get("prev"):
             self._rb_say("贴图编辑：先勾选列表里的对象（改贴图需要工作副本）")
@@ -4408,6 +4460,31 @@ class MaterialSystemPanel(QWidget):
                 "%s：%s（%s）" % x for x in bad)
             self._rb_say(msg.replace("\n", "  "))
             QMessageBox.warning(self, "贴图编辑", msg)
+            return
+
+        # 导入贴图：像 mmtr 一样“更新即同步”——立即写 mdf2 并联动同 (mesh, 原 mdf2)
+        # 的所有副本（含同副本其他材质），切到新副本，旧贴图无引用后删。
+        managed = {}
+        for name, path in ch.items():
+            pt = ps.parse_tex_rel(path)
+            if pt and pt["mh"].lower() == mh.lower() \
+                    and pt["dh"].lower() == dh.lower():
+                managed[name] = path
+        if managed:
+            doc = ps.load_index(root)
+            c = self._rb_copy_of(doc, mh, dh, ent)
+            edit_rel = ps.norm_rel((c or {}).get("rel") or "")
+            if not edit_rel or not ps.exists_edit(root, edit_rel):
+                self._rb_say("贴图编辑：工作副本不存在（%s）" % (edit_rel or "未登记"))
+                return
+            addr_go = self._rb_attach_points(ent, edit_rel)
+            ok, msg = self._rb_persist_textures(
+                ent, root, mh, dh, edit_rel, addr_go, extra={matname: ch})
+            if not ok:
+                self._rb_say(msg)
+                QMessageBox.warning(self, "贴图编辑", msg)
+                return
+            self._rb_say(msg.replace("\n", "  "))
             return
 
         key = _rb_addr_key(ent.get("addr"))
@@ -7268,9 +7345,9 @@ class TextureEditDialog(QDialog):
 
         v = QVBoxLayout(self)
         tip = QLabel("材质：%s\n只改路径；槽名（= mmtr SRV 名）不可改。"
-                     "应用后先改内存，点「保存到 mdf2」才持久化；"
-                     "「选择…」= 原 mdf2 自带的贴图 / 工具导入管理的贴图，"
-                     "外部文件用「导入…」复制进缓存。" % matname)
+                     "「选择…」= 原 mdf2 自带的贴图 / 工具导入管理的贴图；"
+                     "应用导入贴图会立即写 mdf2 并联动同 mdf2 的副本；"
+                     "原 mdf2 路径的改动先改内存，点「保存到 mdf2」才持久化。" % matname)
         tip.setWordWrap(True)
         v.addWidget(tip)
 
