@@ -132,20 +132,22 @@ def resolve_material(game_root, mmtr_path):
 
     命中规则：
       1. 只处理 ``materialTemp/mmtr/`` 下的路径；游戏原版路径返回 ``("", None)``
-      2. 先用**完整 stem** 查（材质名本身可能带 ``_r123``）
-      3. 再按 ``_r<rev>`` / ``_p<时间戳>`` 剥后缀查
-      4. 都查不到 → 返回解析出的名字 + None（调用方降级成“未登记”/提示）
+      2. 按固定后缀（``_r<rev>`` / ``_p<ts>``）严格解析出材质名
+      3. 用解析出的名字查登记（**不拿完整 stem 当名字查**：否则 `XXX_r6.mmtr`
+         会误命中名为 `XXX_r6` 的材质）
+      4. 名字查不到 → 返回 ``(name, None)``（调用方降级成“未登记”/提示）
     """
     s = ps.norm_rel(mmtr_path or "")
     if not is_artifact_path(s):
         return "", None
+    name = parse_artifact_name(s)
+    if not name:
+        return "", None
     doc = load(game_root)
-    mats = doc.get("materials") or {}
-    for cand in (artifact_stem(s), parse_artifact_name(s)):
-        it = mats.get(cand)
-        if it and os.path.exists(mmtr_abs(game_root, it.get("rel") or "")):
-            return cand, it
-    return parse_artifact_name(s), None
+    it = (doc.get("materials") or {}).get(name)
+    if it and os.path.exists(mmtr_abs(game_root, it.get("rel") or "")):
+        return name, it
+    return name, None
 
 
 def _old_seq(rel):
