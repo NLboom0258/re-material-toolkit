@@ -3441,6 +3441,81 @@ class MaterialSystemPanel(QWidget):
         except RuntimeError:          # 线程池已关闭（程序退出中）
             self._rb_ping_fut = None
 
+    def _rb_sync_tick(self):
+        """当前查看的材质：定时从游戏读实际值，更新未被编辑的输入框。
+
+        解决“工具侧显示的值和游戏实际值不一致，切到别的对象再切回来才刷新”。
+        游戏里有些参数会被引擎自己改（湿身/变体切换、动画驱动的 Alpha 等），
+        只靠“打开页面时读一次”不够。
+
+        与用户输入的冲突：正在拖动/聚焦的框、以及已在待写队列里的参数不覆盖。
+        """
+        if not self._rb_connected:
+            return
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            return
+        if self._rb_sync_fut is not None and not self._rb_sync_fut.done():
+            return
+        if self._rb_sync_fut is not None:
+            fut, self._rb_sync_fut = self._rb_sync_fut, None
+            try:
+                d = fut.result()
+            except Exception:  # noqa: BLE001
+                d = None
+            if d:
+                self._rb_apply_live_params(ent, d)
+        try:
+            self._rb_sync_fut = self._rb_pool.submit(
+                rb.list_params, ent.get("go"), 32, None, 10.0)
+        except (RuntimeError, TypeError):
+            self._rb_sync_fut = None
+
+    def _rb_apply_live_params(self, ent, data):
+        """把游戏里的实际值填回输入框（正在编辑 / 已有待写值的参数跳过）。"""
+        addr = ent.get("addr")
+        target = None
+        for mm in (data.get("meshes") or []):
+            if addr and mm.get("addr") == addr:
+                target = mm
+                break
+        if target is None:
+            return
+        matname = getattr(self, "_rb_matname", None)
+        mat = next((m for m in (target.get("mats") or [])
+                    if m.get("name") == matname), None)
+        if mat is None:
+            return
+        pending = getattr(self, "_rb_pending", {}) or {}
+        for vv in (mat.get("vars") or []):
+            name = vv.get("name")
+            if not name or name in pending:
+                continue
+            sp = self._rb_spins.get(name)
+            if sp is not None:
+                if sp.hasFocus():
+                    continue
+                try:
+                    val = float(vv.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                if abs(sp.value() - val) > 1e-6:
+                    sp.blockSignals(True)
+                    sp.setValue(val)
+                    sp.blockSignals(False)
+                continue
+            sps = self._rb_vec_spins.get(name)
+            if not sps:
+                continue
+            if any(s.hasFocus() for s in sps):
+                continue
+            vals = _rb_parse_vec(vv.get("value"), len(sps))
+            for s, v in zip(sps, vals):
+                if abs(s.value() - v) > 1e-6:
+                    s.blockSignals(True)
+                    s.setValue(v)
+                    s.blockSignals(False)
+
     def _rb_read_port_file(self):
         """游戏侧改端口后会写这个文件；连接时以它为准。"""
         root = self._rb_root()
@@ -3481,6 +3556,7 @@ class MaterialSystemPanel(QWidget):
             self._rb_disconnect(say=False)
             return
         self._rb_ping_timer.start()
+        self._rb_sync_timer.start()
         # 游戏根没填时补上（/paths 只读进程信息，不碰引擎，安全）
         if not self._rb_root():
             try:
@@ -3505,6 +3581,8 @@ class MaterialSystemPanel(QWidget):
         """退回未连接：停轮询、按钮变回「连接」、清空列表。"""
         self._rb_connected = False
         self._rb_ping_timer.stop()
+        self._rb_sync_timer.stop()
+        self._rb_sync_fut = None
         self.btn_rb_conn.setText("连接")
         self._rb_set_link(False, "未连接")
         self._rb_clear_list()
@@ -4005,8 +4083,14 @@ class MaterialSystemPanel(QWidget):
             self._rb_say("材质属性：读工作副本失败（%s）" % ex)
             return
 
+        # 原始母材质（从原始 mdf2 读；读不到就只列当前 + 工具材质）
+        try:
+            orig = mattr.original_mmtr(root, mh, dh, matname)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("材质属性：读原始母材质失败（%s）" % ex)
+            orig = ""
         opts = mattr.list_mmtr_options(root)
-        dlg = MaterialAttrsDialog(self, matname, cur, opts)
+        dlg = MaterialAttrsDialog(self, matname, cur, opts, original=orig)
         if dlg.exec() != QDialog.Accepted:
             return
         ch = dlg.changes()
@@ -4580,7 +4664,12 @@ class MaterialSystemPanel(QWidget):
         self._rb_ping_timer = QTimer(self)
         self._rb_ping_timer.setInterval(1000)
         self._rb_ping_timer.timeout.connect(self._rb_ping_tick)
-        self._rb_pool = ThreadPoolExecutor(max_workers=1)
+        self._rb_pool = ThreadPoolExecutor(max_workers=2)
+        # 当前材质的参数值实时同步（1.5s 一次；只更新没在编辑的框）
+        self._rb_sync_fut = None
+        self._rb_sync_timer = QTimer(self)
+        self._rb_sync_timer.setInterval(1500)
+        self._rb_sync_timer.timeout.connect(self._rb_sync_tick)
 
         cfg = self._cfg_load()
         if cfg.get("game_root"):
@@ -5475,14 +5564,16 @@ class MaterialSystemPanel(QWidget):
             logs.append("清理旧产物失败（不影响本次结果）：%s" % e)
 
         prof = item.get("userMaterial") or []
+        mat_name = item.get("name") or os.path.basename(item["rel"])
+        rev = item.get("rev") or 1
         self.lbl_status.setStyleSheet("color:#1a7f37")
-        self.lbl_status.setText("已编译 %s（%dB，UserMaterial=%d）"
-                                % (os.path.basename(item["rel"]), item["bytes"], len(prof)))
+        self.lbl_status.setText("已编译材质 %s（第 %d 版，%dB，UserMaterial=%d）"
+                                % (mat_name, rev, item["bytes"], len(prof)))
         QMessageBox.information(
             self, "编译成功",
-            "产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n\n"
+            "材质：%s（第 %d 版）\n产物：%s\n大小：%d B\nUserMaterial：%d 个\n贴图槽：%d 个\n\n"
             "接下来在「实时预览」页把某个材质槽的母材质换成它。\n\n%s"
-            % (item["rel"], item["bytes"], len(prof),
+            % (mat_name, rev, item["rel"], item["bytes"], len(prof),
                len(item.get("textureSlots") or []), "\n".join(logs)))
 
 
@@ -6189,7 +6280,7 @@ class MaterialAttrsDialog(QDialog):
     ``_rb_edit_attrs`` 负责。
     """
 
-    def __init__(self, parent, mat_name, cur, options):
+    def __init__(self, parent, mat_name, cur, options, original=""):
         super().__init__(parent)
         self.setWindowTitle("材质属性 - %s" % mat_name)
         self.resize(660, 580)
@@ -6203,18 +6294,26 @@ class MaterialAttrsDialog(QDialog):
         head.setTextFormat(Qt.RichText)
         v.addWidget(head)
 
+        cur_mmtr = ps.norm_rel(cur.get("mmtr") or "")
         row = QHBoxLayout()
         row.addWidget(QLabel("母材质:"))
         self.cmb = NoWheelComboBox()
-        self.cmb.addItem("%s（当前，不改）" % (cur.get("mmtr") or "(空)"), "")
+        if original:
+            label = "原始母材质：%s" % original
+            if original.lower() == cur_mmtr.lower():
+                label += "（当前）"
+            self.cmb.addItem(label, "__orig__")
+        self.cmb.addItem("当前，不改：%s" % (cur_mmtr or "(空)"), "")
         for o in options:
-            self.cmb.addItem("%s  ·  %s  ·  %d 参数"
-                             % (o["assetName"], os.path.basename(o["rel"]),
-                                o.get("nParams") or 0),
-                             o["rel"])
+            label = "%s（第 %s 版 · %s 参数）" % (
+                o["name"], o.get("rev") or 1, o.get("nParams") or 0)
+            if ps.norm_rel(o["rel"]).lower() == cur_mmtr.lower():
+                label += "  ← 当前"
+            self.cmb.addItem(label, o["rel"])
         self.cmb.setToolTip(
-            "只有「编译到预览目录」产出的 mmtr 可选（登记在 materialTemp/materials.json）。\n"
-            "选新的一项 = 换母材质：按它的 UserMaterial 重建该材质的参数集。")
+            "原始母材质 = 原始 mdf2 里该材质指向的那份（从 orig 副本 / 原文件读）。\n"
+            "其余是工具「编译到预览目录」产出的材质（每个材质名一项）。\n"
+            "选新的一项 = 换母材质，按它的 UserMaterial 重建参数集。")
         row.addWidget(self.cmb, 1)
         v.addLayout(row)
         if not options:
@@ -6256,8 +6355,9 @@ class MaterialAttrsDialog(QDialog):
         self._refresh_flags_label()
 
         hint = QLabel(
-            "• 换母材质会按新 mmtr 重建该材质的参数集：同名参数保留值、"
+            "• 换母材质会按新材质的 UserMaterial 重建参数集：同名参数保留值、"
             "新增参数默认 0、旧独有参数丢弃。\n"
+            "• 选「原始母材质」= 从原始 mdf2 恢复该材质的母材质与参数集。\n"
             "• 应用后生成**新路径**副本并让所有关联对象重载"
             "（引擎按路径缓存，同路径改了不生效），画面会短暂闪一下。\n"
             "• 新增参数默认 0 —— 例如 Alpha=0 会让材质变透明，应用后请到参数表里调。\n"

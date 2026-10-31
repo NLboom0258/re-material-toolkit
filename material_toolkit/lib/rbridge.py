@@ -127,14 +127,14 @@ def identity(go="", limit=40, names=False, port=None):
     return d
 
 
-def list_params(go, limit=1, port=None):
+def list_params(go, limit=1, port=None, timeout=40.0):
     """读某个 GameObject 下 mesh 的材质参数。
 
     返回 {meshes: [{i, go, mats: [{name, varCount, vars: [{j,name,type,value}]}]}]}
     type = 分量数（1=float, 2=float2, 3=float3, 4=float4）；
     float2/3/4 的 value 已是解包后的 "x, y, z" 形式（老版本会是 REFrameworkNET.ValueType）。
     """
-    d = probe("params", go=go, limit=limit, port=port, timeout=40.0)
+    d = probe("params", go=go, limit=limit, port=port, timeout=timeout)
     p = d.get("params") or {}
     if p.get("err"):
         raise BridgeError(p["err"])

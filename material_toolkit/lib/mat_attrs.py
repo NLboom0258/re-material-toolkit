@@ -39,53 +39,115 @@ class AttrError(ValueError):
     """材质属性应用失败（材质不存在 / mmtr 未登记 / 值个数与类型不符）。"""
 
 
-def find_mmtr_item(game_root, logic_path):
-    """按 mmtr **逻辑路径**（mdf2 里存的形式，如 `materialTemp/mmtr/X_p1.mmtr`）找登记项。"""
-    low = ps.norm_rel(logic_path or "").lower()
-    if not low:
+def find_mmtr_item(game_root, target):
+    """按材质名或 mmtr 逻辑路径找登记项。"""
+    if not target:
         return None
+    low = ps.norm_rel(target or "").lower()
     doc = mmatlib.load(game_root)
-    for it in (doc.get("items") or {}).values():
+    for it in (doc.get("materials") or {}).values():
         if ps.norm_rel(it.get("rel") or "").lower() == low:
+            return it
+        if (it.get("name") or "").lower() == low:
             return it
     return None
 
 
 def list_mmtr_options(game_root):
-    """可选的母材质清单（只来自母材质库登记项，不碰游戏原版）。
+    """可选的母材质清单（工具编译的材质，每个名字一项）。
 
-    返回 [{assetName, id, rel, bytes, createdAt, shading, nParams}...]，按 assetName 分组倒序展平。
+    返回 [{name, rel, bytes, createdAt, rev, shading, nParams}...]，按名字排序。
     """
     out = []
-    for name, lst in sorted(mmatlib.items_of(game_root).items()):
-        for it in lst:
-            um = it.get("userMaterial") or []
-            out.append({
-                "assetName": name,
-                "id": it.get("id"),
-                "rel": ps.norm_rel(it.get("rel") or ""),
-                "bytes": it.get("bytes"),
-                "createdAt": it.get("createdAt"),
-                "shading": it.get("shading"),
-                "nParams": len(um),
-            })
+    for it in mmatlib.list_materials(game_root):
+        um = it.get("userMaterial") or []
+        out.append({
+            "name": it.get("name") or "?",
+            "rel": ps.norm_rel(it.get("rel") or ""),
+            "bytes": it.get("bytes"),
+            "createdAt": it.get("createdAt"),
+            "rev": it.get("rev"),
+            "shading": it.get("shading") or {},
+            "nParams": len(um),
+        })
     return out
 
 
-def _apply_one(mdf2, mat, ch, game_root, report):
+def _original_mdf2_path(game_root, mh, dh):
+    """原始 mdf2 的可用磁盘路径（orig 副本优先，其次 originalMdf2/baseMdf2）。"""
+    doc = ps.load_index(game_root)
+    e = ps.get_mdf2(doc, mh, dh) or {}
+    rel = ps.norm_rel(e.get("orig") or "")
+    if rel:
+        p = ps.rel_to_abs(game_root, rel)
+        if os.path.exists(p):
+            return p
+    base = ps.norm_rel(e.get("originalMdf2") or e.get("baseMdf2") or "")
+    if not base:
+        return None
+    try:
+        return ps.ensure_mdf2(game_root, base)
+    except Exception:  # noqa: BLE001 —— pak 里也没有时只能放弃
+        return None
+
+
+def original_material(game_root, mh, dh, mat_name):
+    """原始 mdf2 里的同名材质（读不到返回 None）。"""
+    p = _original_mdf2_path(game_root, mh, dh)
+    if not p:
+        return None
+    try:
+        m = mdf2lib.Mdf2.load(p)
+    except Exception:  # noqa: BLE001
+        return None
+    return m.get_material(mat_name)
+
+
+def original_mmtr(game_root, mh, dh, mat_name):
+    """原始 mdf2 里该材质指向的母材质逻辑路径（原始母材质）。"""
+    mat = original_material(game_root, mh, dh, mat_name)
+    return ps.norm_rel(mat.mmtr_path or "") if mat is not None else ""
+
+
+def _clone_props(props):
+    """深拷贝参数表（只带名字/值；偏移与 hash 由 save 重算）。"""
+    out = []
+    for p in props:
+        q = mdf2lib.Property()
+        q.name = p.name
+        q.values = list(p.values)
+        q.param_count = len(q.values)
+        out.append(q)
+    return out
+
+
+def _apply_one(mdf2, mat, ch, game_root, report, mh=None, dh=None):
     """对单个材质应用一组改动。返回是否有实际变更。"""
     changed = False
     name = mat.name
 
-    # ① 换母材质：改引用 + 按新 mmtr 对齐参数集
+    # ① 换母材质
     target = (ch.get("mmtr") or "").strip()
     if target:
         cur = ps.norm_rel(mat.mmtr_path or "")
-        if target.lower() != cur.lower():
+        if target == "__orig__":
+            # 恢复原始母材质 + 原始参数集（原始 mdf2 是权威，不需要读游戏原版 mmtr）
+            src = original_material(game_root, mh, dh, name)
+            if src is None:
+                raise AttrError("读不到原始 mdf2 里的材质 %s（原文件可能已不在）" % name)
+            src_path = ps.norm_rel(src.mmtr_path or "")
+            if (src_path.lower() != cur.lower()
+                    or [p.name for p in src.properties] != [p.name for p in mat.properties]):
+                mat.mmtr_path = src.mmtr_path
+                mat.properties = _clone_props(src.properties)
+                report.append("%s: 母材质 → 原始（%s，%d 参数）"
+                              % (name, src_path or "(空)", len(mat.properties)))
+                changed = True
+        elif target.lower() != cur.lower():
             item = find_mmtr_item(game_root, target)
             if item is None:
                 raise AttrError(
-                    "母材质未登记：%s\n\n只能选用「编译到预览目录」产出的 mmtr"
+                    "母材质未登记：%s\n\n只能选用「编译到预览目录」产出的材质"
                     "（登记在 materialTemp/materials.json）。" % target)
             data = mmatlib.mmtr_from_item(game_root, item)
             if not data:
@@ -98,7 +160,8 @@ def _apply_one(mdf2, mat, ch, game_root, report):
             sync_mdf2(mdf2, Mmtr.from_bytes(data), prune=True, materials=name)
             after = [p.name for p in mat.properties]
             report.append("%s: 母材质 → %s（参数 %d → %d）"
-                          % (name, os.path.basename(target), len(before), len(after)))
+                          % (name, item.get("name") or os.path.basename(target),
+                             len(before), len(after)))
             changed = True
 
     # ② 覆盖参数值（当前内存里的用户改动）
@@ -168,7 +231,8 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
         mat = d.get_material(name)
         if mat is None:
             raise AttrError("材质不存在：%s" % name)
-        if _apply_one(d, mat, ch, game_root, report):
+        if _apply_one(d, mat, ch, game_root, report,
+                      mh=parsed.get("mh"), dh=parsed.get("dh")):
             touched.append(name)
 
     if not touched:
