@@ -3404,7 +3404,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -4141,6 +4141,98 @@ class MaterialSystemPanel(QWidget):
         self._rb_say(msg.replace("\n", "  "))
         QMessageBox.information(self, "材质属性", msg)
 
+    def _rb_pick_copy(self):
+        """选择当前对象挂哪一份 mdf2 副本（edit / orig / 原始）。
+
+        只列该 mesh 在 sessions.json 里已登记的副本；没登记时先勾选对象新建。
+        """
+        ent = self._rb_cur_ent()
+        if ent is None:
+            self._rb_say("选择副本：先选一个对象")
+            return
+        root = self._rb_root()
+        mesh_path = ent.get("meshPath") or ""
+        if not root or not mesh_path:
+            self._rb_say("选择副本：缺少游戏根目录或 meshPath（刷新列表后再试）")
+            return
+        mh = ps.mesh_hash(mesh_path)
+        doc = ps.load_index(root)
+        o = ps.get_object(doc, mh) or {}
+        mdfs = o.get("mdfs") or {}
+        cur_dh = ent.get("prev")
+
+        labels, items = [], []
+        labels.append("原始 mdf2（不预览）")
+        items.append(("__base__", None, ""))
+        default_idx = 0
+        for dh, e in sorted(mdfs.items()):
+            edit = ps.norm_rel(e.get("edit") or "")
+            orig = ps.norm_rel(e.get("orig") or "")
+            if edit and os.path.exists(ps.rel_to_abs(root, edit)):
+                labels.append("编辑副本 · %s%s" % (
+                    self._rb_short(edit, 64), "  ← 当前" if dh == cur_dh else ""))
+                items.append(("edit", dh, edit))
+                if dh == cur_dh:
+                    default_idx = len(labels) - 1
+            if orig and os.path.exists(ps.rel_to_abs(root, orig)):
+                labels.append("已重置副本 · %s%s" % (
+                    self._rb_short(orig, 64), "  ← 当前" if dh == cur_dh else ""))
+                items.append(("orig", dh, orig))
+        if len(items) == 1:
+            self._rb_say("选择副本：该 mesh 还没有登记副本（勾选对象会新建一份）")
+            return
+
+        pick, ok = QInputDialog.getItem(
+            self, "选择 mdf2 副本",
+            "对象：%s\n\n选一份挂到这个对象（“原始”= 回到未预览状态）："
+            % self._rb_short(mesh_path, 70),
+            labels, default_idx, False)
+        if not ok:
+            return
+        kind, dh, rel = items[labels.index(pick)]
+        addr, go = ent.get("addr"), ent.get("go")
+
+        if kind == "__base__":
+            if not cur_dh:
+                self._rb_say("当前已经是原始 mdf2（未预览）")
+                return
+            try:
+                self._rb_iso_end(root, ent)
+            except (rb.BridgeError, RuntimeError, OSError) as e:
+                self._rb_say("恢复原始 mdf2 失败: %s" % e)
+                return
+            ent["prev"] = None
+            self._rb_set_item_check(addr, False)
+            self._rb_sync_enabled()
+            QTimer.singleShot(600, self._rb_update_mdf_label)
+            return
+
+        try:
+            d = rb.material(go, "apply", mdf=rel, addr=addr, keep=(kind == "edit"))
+        except rb.BridgeError as e:
+            self._rb_say("切换副本失败: %s" % e)
+            return
+        ms = d.get("meshes") or []
+        if d.get("err") or not ms or not ms[0].get("ok"):
+            self._rb_say("切换副本失败: %s" % (d.get("err") or "无命中"))
+            return
+
+        self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
+        if kind == "edit":
+            ent["prev"] = dh
+            self._rb_iso_mdf = rel
+            self._rb_set_item_check(addr, True)
+        else:
+            ent["prev"] = None
+            self._rb_iso_mdf = None
+            self._rb_set_item_check(addr, False)
+        self._rb_sync_enabled()
+        # apply 后引擎重建参数块要一点时间
+        QTimer.singleShot(600, self._rb_update_mdf_label)
+        QTimer.singleShot(600, self._rb_reread_current)
+        self._rb_say("已切换到%s：%s"
+                     % ("编辑副本" if kind == "edit" else "已重置副本", rel))
+
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
     #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
@@ -4560,6 +4652,12 @@ class MaterialSystemPanel(QWidget):
             "母材质只能选「编译到预览目录」产出的 mmtr（登记在 materials.json）。")
         self.btn_rb_attrs.clicked.connect(self._rb_edit_attrs)
         iso.addWidget(self.btn_rb_attrs)
+        self.btn_rb_copy = QPushButton("选择副本…")
+        self.btn_rb_copy.setToolTip(
+            "选择当前对象挂哪一份 mdf2 副本（编辑副本 / 已重置副本 / 原始 mdf2）。\n"
+            "只列该 mesh 已登记的副本；没有登记时先勾选对象新建。")
+        self.btn_rb_copy.clicked.connect(self._rb_pick_copy)
+        iso.addWidget(self.btn_rb_copy)
         v.addLayout(iso)
 
         # 额外源目录：只有部分模型被解包到游戏根，其余还在 pak 里。
