@@ -200,6 +200,18 @@ def _apply_one(mdf2, mat, ch, game_root, report, mh=None, dh=None):
             report.append("%s: flags → 0x%08X" % (name, mat.flags & 0xFFFFFFFF))
             changed = True
 
+    # ④ 贴图槽路径（只改 path，不改 type；type 需与 mmtr 的 SRV 名一致）
+    for ttype, tpath in (ch.get("textures") or {}).items():
+        tb = mat.get_texture(ttype)
+        if tb is None:
+            report.append("%s: 贴图槽 %s 不存在，丢弃" % (name, ttype))
+            continue
+        tpath = (tpath or "").strip()
+        if tpath and tpath != tb.texture_path:
+            tb.texture_path = tpath
+            changed = True
+            report.append("%s: 贴图 %s → %s" % (name, ttype, tpath))
+
     return changed
 
 
@@ -210,6 +222,7 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
 
         {"Leg": {"mmtr": "materialTemp/mmtr/Toon_V5_p20261031_010203.mmtr",
                  "params": {"AlphaValue": [1.0], "MatCapColor": [1.0, 1.0, 1.0]},
+                 "textures": {"BaseColorMap": "materialTemp/tex/.../x.tex"},
                  "flags":  {"ShadowCastDisable": True}},
          "Body": {"flags": {"TwoSideEnable": False}}}
 
@@ -273,6 +286,10 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
         if (a.flags & 0xFFFFFFFF) != (b.flags & 0xFFFFFFFF):
             os.remove(dst)
             raise AttrError("产出文件 %s 的 flags 写入不一致，已删除" % name)
+        if [(t.texture_type, t.texture_path) for t in a.textures] != \
+           [(t.texture_type, t.texture_path) for t in b.textures]:
+            os.remove(dst)
+            raise AttrError("产出文件 %s 的贴图槽写入不一致，已删除" % name)
 
     log("产出 %s（%s v%d，%d B，改动材质：%s）"
         % (new_rel, new["name"], new["rev"], n, ", ".join(touched)))

@@ -3398,7 +3398,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy", "btn_rb_manage"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_tex", "btn_rb_copy", "btn_rb_manage"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -3638,6 +3638,7 @@ class MaterialSystemPanel(QWidget):
         self.lst_rb.blockSignals(False)
         self._rb_building = False
         self._rb_meshes = []
+        self._rb_tex_edits = {}
         self._rb_cur_addr = None
         self._rb_mats = []
         self._rb_fill_mats()
@@ -3993,6 +3994,7 @@ class MaterialSystemPanel(QWidget):
         self._rb_set_item_check(addr, False)
         self._rb_sync_enabled()
         self._rb_edits.pop(_rb_addr_key(addr), None)
+        self._rb_tex_edits.pop(_rb_addr_key(addr), None)
         self._rb_say("⚠ 对象已失效（%s）：%s" % (_rb_addr_short(addr), why))
         QMessageBox.warning(
             self, "对象已失效",
@@ -4092,11 +4094,59 @@ class MaterialSystemPanel(QWidget):
         for k in addr_go:
             for mat, props in (self._rb_edits.get(k) or {}).items():
                 merged.setdefault(mat, {}).update(props)
-        if not merged:
+        tex = {}
+        for k in addr_go:
+            for mat, slots in (self._rb_tex_edits.get(k) or {}).items():
+                tex.setdefault(mat, {}).update(slots)
+        if not merged and not tex:
             self._rb_say("保存：没有改动")
             return
 
-        # 写盘（生成新路径）
+        # 有贴图改动：必须 Mdf2.save() 重排（贴图路径是字符串），参数值一并写入。
+        if tex:
+            changes = {}
+            for mat in set(merged) | set(tex):
+                ch = {}
+                if merged.get(mat):
+                    ch["params"] = merged[mat]
+                if tex.get(mat):
+                    ch["textures"] = tex[mat]
+                changes[mat] = ch
+            try:
+                r2 = mattr.apply_attrs(root, edit_rel, changes, log=self._rb_say)
+            except Exception as ex:  # noqa: BLE001
+                self._rb_say("保存失败: %s" % ex)
+                QMessageBox.warning(self, "保存失败", str(ex))
+                return
+            if not r2.get("changed"):
+                self._rb_say("保存：没有改动")
+                return
+            new_rel = r2["rel"]
+            moved, failed = self._rb_switch_all_to(
+                root, mh, dh, edit_rel, new_rel, addr_go,
+                name=r2["name"], rev=r2["rev"])
+            if moved:
+                for a in moved:
+                    self._rb_edits.pop(a, None)
+                    self._rb_tex_edits.pop(a, None)
+            self._rb_update_mdf_label()
+            if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
+                QTimer.singleShot(600, self._rb_reread_current)
+            ntex = sum(len(v) for v in tex.values())
+            msg = ("已写入 %d 个参数 + %d 个贴图槽到副本「%s」v%d：\n%s\n\n"
+                   "切到新副本的对象：%d 个"
+                   % (sum(len(v) for v in merged.values()), ntex,
+                      r2["name"], r2["rev"], new_rel, len(moved)))
+            rep = r2.get("report") or []
+            if rep:
+                msg += "\n\n" + "\n".join(rep)
+            if failed:
+                msg += "\n\n未切换成功：\n" + "\n".join(failed)
+            self._rb_say(msg.replace("\n", "  "))
+            QMessageBox.information(self, "保存到 mdf2", msg)
+            return
+
+        # 无贴图改动：原地覆盖参数值（更轻，不重排文件）
         try:
             r = ps.save_params(root, edit_rel, merged, log=self._rb_say)
         except Exception as ex:
@@ -4136,6 +4186,99 @@ class MaterialSystemPanel(QWidget):
             msg += "\n\n未切换成功：\n" + "\n".join(failed)
         self._rb_say(msg.replace("\n", "  "))
         QMessageBox.information(self, "保存到 mdf2", msg)
+
+    # ---- 贴图槽编辑（运行时 setMaterialTexture；持久化见 _rb_save_to_mdf2）----
+    def _rb_edit_textures(self):
+        """编辑当前材质的贴图槽：应用 = 内存热替换，保存 = 写入 mdf2 新 rev。"""
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            self._rb_say("贴图编辑：先勾选列表里的对象（改贴图需要工作副本）")
+            return
+        matname = getattr(self, "_rb_matname", None)
+        if not matname:
+            self._rb_say("贴图编辑：先在右侧选一个材质")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("贴图编辑：游戏根目录未就绪（连接服务后自动获取）")
+            return
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent.get("prev")
+
+        # 运行时列表（EMV 同款：getMaterialTextureNum/Name/Texture）
+        slots = []
+        try:
+            d = rb.texture_list(ent.get("go"), matname, addr=ent.get("addr"))
+            for mm in (d.get("meshes") or []):
+                if _rb_addr_key(mm.get("addr")) != _rb_addr_key(ent.get("addr")):
+                    continue
+                for m in (mm.get("mats") or []):
+                    if m.get("name") != matname:
+                        continue
+                    for s in (m.get("slots") or []):
+                        slots.append({"slot": s.get("slot"),
+                                      "name": s.get("name") or "?",
+                                      "path": ps.norm_rel(s.get("path") or "")})
+                    break
+        except rb.BridgeError as ex:
+            self._rb_say("贴图编辑：读运行时贴图槽失败（%s），改用工作副本文件" % ex)
+        if not slots:
+            # 旧插件 / 读不到时退回工作副本文件（只能显示路径，应用仍需新插件）
+            try:
+                doc = ps.load_index(root)
+                c = self._rb_copy_of(doc, mh, dh, ent)
+                edit_rel = ps.norm_rel((c or {}).get("rel") or "")
+                dm = mdf2lib.Mdf2.load(ps.rel_to_abs(root, edit_rel)) if edit_rel else None
+                fm = dm.get_material(matname) if dm else None
+                for i, tb in enumerate((fm.textures if fm else []) or []):
+                    slots.append({"slot": i, "name": tb.texture_type,
+                                  "path": ps.norm_rel(tb.texture_path)})
+            except Exception as ex:  # noqa: BLE001
+                self._rb_say("贴图编辑：读工作副本贴图槽失败（%s）" % ex)
+        if not slots:
+            self._rb_say("贴图编辑：材质 %s 没有贴图槽（或服务未更新）" % matname)
+            return
+        for s in slots:
+            s["exists"] = ps.texture_exists(root, s["path"])
+
+        dlg = TextureEditDialog(self, matname, slots, root, mh, dh)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        ch = dlg.changes()
+        if not ch:
+            self._rb_say("贴图编辑：没有改动")
+            return
+
+        key = _rb_addr_key(ent.get("addr"))
+        per = self._rb_tex_edits.setdefault(key, {}).setdefault(matname, {})
+        ok, bad = [], []
+        for name, path in ch.items():
+            s = next((x for x in slots if x["name"] == name), None)
+            if s is None:
+                continue
+            try:
+                r = rb.texture_set(ent.get("go"), matname, s["slot"], path,
+                                   addr=ent.get("addr"))
+                if not r.get("ok") or not (r.get("touched") or 0):
+                    err = r.get("err") or "; ".join(
+                        (x.get("err") or "?") for x in (r.get("results") or [])) or "无命中"
+                    bad.append("%s: %s" % (name, err))
+                    continue
+                per[name] = path
+                ok.append(name)
+            except rb.BridgeError as ex:
+                bad.append("%s: %s" % (name, ex))
+        if not per:
+            self._rb_tex_edits.get(key, {}).pop(matname, None)
+            if not self._rb_tex_edits.get(key):
+                self._rb_tex_edits.pop(key, None)
+        msg = "已应用 %d 个贴图（内存）" % len(ok)
+        if bad:
+            msg += "；失败 %d 个：\n%s" % (len(bad), "\n".join(bad))
+        msg += "\n点「保存到 mdf2」持久化。"
+        self._rb_say(msg.replace("\n", "  "))
+        if bad:
+            QMessageBox.warning(self, "贴图编辑", msg)
 
     # ---- 材质属性：换母材质 / 改 flags -----------------------------------
     # 三者（mmtr 引用 / 参数集 / flags）必须**一次 save 一起做**：
@@ -4206,6 +4349,12 @@ class MaterialSystemPanel(QWidget):
         if edits:
             ch["params"] = edits
             self._rb_say("一并写入 %d 个改过的参数值" % len(edits))
+        tex_edits = {}
+        for k in self._rb_attach_points(ent, edit_rel):
+            tex_edits.update((self._rb_tex_edits.get(k) or {}).get(matname) or {})
+        if tex_edits:
+            ch["textures"] = tex_edits
+            self._rb_say("一并写入 %d 个改过的贴图槽" % len(tex_edits))
 
         try:
             r = mattr.apply_attrs(root, edit_rel, {matname: ch}, log=self._rb_say)
@@ -4223,6 +4372,7 @@ class MaterialSystemPanel(QWidget):
                                               addr_go, name=r["name"], rev=r["rev"])
         for a in moved:
             self._rb_edits.pop(a, None)
+            self._rb_tex_edits.pop(a, None)
         self._rb_update_mdf_label()
         if _rb_addr_key(getattr(self, "_rb_cur_addr", None)) in moved:
             # 重载后参数集可能变了（换母材质）；延迟读，等引擎重建完参数块
@@ -4308,6 +4458,7 @@ class MaterialSystemPanel(QWidget):
             return False
 
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
+        self._rb_tex_edits.pop(_rb_addr_key(addr), None)
         ent["prev"] = dh
         ent["copy"] = c["name"]
         ps.upsert_copy(doc, mh, dh, c["name"], c["rel"], c["rev"])
@@ -4404,6 +4555,7 @@ class MaterialSystemPanel(QWidget):
         ps.remove_copy(doc, mh, dh, c["name"])
         ps.save_index(root, doc, log=self._rb_say)
         self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
+        self._rb_tex_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_update_mdf_label()
         self._rb_say("已删除副本「%s」v%d" % (c["name"], c["rev"]))
 
@@ -4794,6 +4946,7 @@ class MaterialSystemPanel(QWidget):
         ps.save_index(root, idx_doc, log=self._rb_say)
         # 取消 = 放弃本会话的改动，写盘记录一并丢弃（否则下次保存会把旧值写回去）
         self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
+        self._rb_tex_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_say("已重置：挂到 orig 副本 %s（参数回到原始值，keep 已关）" % orig)
 
     def _rb_poll_hold(self):
@@ -4879,6 +5032,14 @@ class MaterialSystemPanel(QWidget):
             "母材质只能选「编译到预览目录」产出的 mmtr（登记在 materials.json）。")
         self.btn_rb_attrs.clicked.connect(self._rb_edit_attrs)
         iso.addWidget(self.btn_rb_attrs)
+        self.btn_rb_tex = QPushButton("贴图编辑…")
+        self.btn_rb_tex.setToolTip(
+            "编辑当前材质的贴图槽（只改路径，不改槽名）。\n"
+            "应用 = 运行时 setMaterialTexture 热替换（不写盘）；\n"
+            "点「保存到 mdf2」后才会持久化到工作副本的新版本。\n"
+            "新贴图首次加载在游戏暂停时同样会延迟（恢复后生效）。")
+        self.btn_rb_tex.clicked.connect(self._rb_edit_textures)
+        iso.addWidget(self.btn_rb_tex)
         self.btn_rb_copy = QPushButton("选择副本…")
         self.btn_rb_copy.setToolTip(
             "选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。\n"
@@ -4968,6 +5129,7 @@ class MaterialSystemPanel(QWidget):
         # 本会话改过的参数：{对象地址: {材质名: {参数名: [float...]}}}
         # 保存到 mdf2 时只写这些（不动文件里其他参数）。
         self._rb_edits = {}
+        self._rb_tex_edits = {}   # {addr: {材质: {槽名: 新路径}}}
         self._rb_timer = QTimer(self)
         self._rb_timer.setSingleShot(True)
         self._rb_timer.setInterval(250)
@@ -6853,6 +7015,138 @@ class CopyPickerDialog(QDialog):
             return
         self.choice = d
         super().accept()
+
+
+class TextureEditDialog(QDialog):
+    """当前材质的贴图槽编辑（只改 path，不改槽名）。
+
+    "选择…" 只能选 natives/<subdir> 下已有的 .tex；外部文件用 "导入…"
+    （复制到 materialTemp/tex，按内容 hash 命名）。应用结果由调用方
+    用 /texture set 热替换；本对话框只收集路径改动。
+    """
+
+    def __init__(self, parent, matname, slots, root, mh, dh):
+        super().__init__(parent)
+        self.setWindowTitle("贴图编辑 - %s" % matname)
+        self.resize(880, 480)
+        self._root = root
+        self._mh, self._dh = mh, dh
+        self._rows = []
+
+        v = QVBoxLayout(self)
+        tip = QLabel("材质：%s\n只改路径；槽名（= mmtr SRV 名）不可改。"
+                     "应用后先改内存，点「保存到 mdf2」才持久化；"
+                     "pak 内的贴图无法从目录选择，可手输路径或用「导入…」。" % matname)
+        tip.setWordWrap(True)
+        v.addWidget(tip)
+
+        self.tbl = QTableWidget(len(slots), 4)
+        self.tbl.setHorizontalHeaderLabels(["槽位", "路径", "状态", "操作"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hh = self.tbl.horizontalHeader()
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Interactive)
+        hh.setSectionResizeMode(3, QHeaderView.Interactive)
+        self.tbl.setColumnWidth(0, 150)
+        self.tbl.setColumnWidth(2, 64)
+        self.tbl.setColumnWidth(3, 190)
+
+        for r, s in enumerate(slots):
+            name = s.get("name") or "?"
+            it = QTableWidgetItem("%s  (#%s)" % (name, s.get("slot")))
+            it.setToolTip(name)
+            self.tbl.setItem(r, 0, it)
+            le = QLineEdit(s.get("path") or "")
+            le.setPlaceholderText("相对 natives/%s 的 .tex 路径" % ps.NATIVES_SUBDIR)
+            self.tbl.setCellWidget(r, 1, le)
+            st = QLabel("")
+            self.tbl.setCellWidget(r, 2, st)
+            ops = QWidget()
+            h = QHBoxLayout(ops)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(2)
+            b_pick = QPushButton("选择…")
+            b_imp = QPushButton("导入…")
+            b_rst = QPushButton("还原")
+            for b in (b_pick, b_imp, b_rst):
+                h.addWidget(b)
+            self.tbl.setCellWidget(r, 3, ops)
+            self._rows.append((s, le, st))
+            le.editingFinished.connect(lambda rr=r: self._refresh_status(rr))
+            b_pick.clicked.connect(lambda _=False, rr=r: self._pick(rr))
+            b_imp.clicked.connect(lambda _=False, rr=r: self._import(rr))
+            b_rst.clicked.connect(lambda _=False, rr=r: self._restore(rr))
+
+        v.addWidget(self.tbl, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("应用")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        for r in range(len(slots)):
+            self._refresh_status(r)
+
+    def _refresh_status(self, r):
+        _s, le, st = self._rows[r]
+        p = ps.norm_rel(le.text())
+        if not p:
+            st.setText("空")
+            st.setStyleSheet("color:#b00020")
+        elif ps.texture_exists(self._root, p):
+            st.setText("OK")
+            st.setStyleSheet("color:#2e7d32")
+        else:
+            st.setText("缺失")
+            st.setStyleSheet("color:#b00020")
+
+    def _pick(self, r):
+        _s, le, st = self._rows[r]
+        start = os.path.join(self._root, "natives", ps.NATIVES_SUBDIR)
+        p, _ = QFileDialog.getOpenFileName(
+            self, "选择 .tex（只列磁盘文件；pak 内请手输或导入）", start,
+            "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
+        if not p:
+            return
+        rel = ps.rel_to_natives(self._root, p)
+        if rel is None:
+            QMessageBox.warning(
+                self, "不在 natives 下",
+                "只能直接选择 natives/%s 下的文件；\n"
+                "其它位置的 .tex 请用「导入…」复制到缓存目录。" % ps.NATIVES_SUBDIR)
+            return
+        le.setText(rel)
+        self._refresh_status(r)
+
+    def _import(self, r):
+        _s, le, st = self._rows[r]
+        p, _ = QFileDialog.getOpenFileName(
+            self, "导入 .tex（复制到 materialTemp/tex）", "",
+            "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
+        if not p:
+            return
+        try:
+            rel = ps.import_texture(self._root, p, self._mh, self._dh)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "导入失败", str(ex))
+            return
+        le.setText(rel)
+        self._refresh_status(r)
+
+    def _restore(self, r):
+        s, le, st = self._rows[r]
+        le.setText(s.get("path") or "")
+        self._refresh_status(r)
+
+    def changes(self):
+        out = {}
+        for s, le, _st in self._rows:
+            p = ps.norm_rel(le.text())
+            if p and p != (s.get("path") or ""):
+                out[s.get("name")] = p
+        return out
 
 
 class MaterialAttrsDialog(QDialog):

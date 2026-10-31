@@ -206,3 +206,18 @@ def material(go, action="info", mdf=None, idx=None, keep=None, addr=None, port=N
                               "keep": None if keep is None else (1 if keep else 0),
                               "addr": addr},
                 port=port, timeout=60.0)
+
+
+def texture_list(go, mat="", addr=None, port=None):
+    """列某个对象的贴图槽（mat 为空 = 全部材质）。
+
+    返回 ``{meshes: [{mats: [{name, slots: [{slot, name, path}]}]}]}``。
+    """
+    return _get("/texture", {"action": "list", "go": go, "mat": mat, "addr": addr},
+                port=port, timeout=60.0)
+
+
+def texture_set(go, mat, slot, path, addr=None, port=None):
+    """运行时换贴图（setMaterialTexture，内存级，不写 mdf2）。"""
+    return _get("/texture", {"action": "set", "go": go, "mat": mat, "slot": slot,
+                             "path": path, "addr": addr}, port=port, timeout=60.0)

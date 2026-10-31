@@ -9,7 +9,7 @@
   ⇒ 编辑副本（edit）平时可以稳定复用；只有「写回内容」时才需要换新路径。
 - 参数块结构（已逆向）：``mesh+0x1f8`` → 材质数组 → mgr → ``base + offset``。
 
-目录（全部在 ``<root>/natives/x64/materialTemp`` 下）::
+目录（全部在 ``<root>/natives/<subdir>/materialTemp`` 下）::
 
     sessions.json                                          ← 唯一真相源
     orig/<mdf2Hash>_p<ts>.mdf2.10                          ← 重置用，所有模型共用
@@ -34,12 +34,17 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import time
 import urllib.parse
 
 from . import mdf2 as mdf2lib
 
 TEMP_DIR = "materialTemp"
+# natives 下的游戏子目录：DMC5 = x64，RE2/3/7/8 = stm。
+# 预览产物必须放在引擎实际读取的那一层，不能放到 natives 根。
+# 适配其它游戏时改这里（或在加载时按游戏覆盖）。
+NATIVES_SUBDIR = "x64"
 SESSIONS = "sessions.json"
 MDF2_EXT = ".10"
 _TS_RE = re.compile(r"_p(\d{8}_\d{6})")
@@ -58,10 +63,9 @@ def _now_iso():
 
 
 def norm_rel(p):
-    """统一成 natives/x64 下的相对路径：正斜杠、去掉前导 natives/x64、小写。
+    """统一成 natives/<subdir> 下的相对路径：正斜杠、去掉前导 natives/x64 等、保留大小写。
 
-    引擎返回的路径大小写混用（``Character/Player/...`` 与 ``character/player/...``），
-    而 hash 必须稳定，所以一律小写。原始大小写另存一份用于日志展示。
+    小写只在计算 hash 时做；这里保留原始大小写以便日志展示。
     """
     if not p:
         return ""
@@ -90,12 +94,12 @@ def mdf2_hash(mdf2_path):
 
 
 def temp_root(game_root):
-    return os.path.join(os.path.abspath(game_root), "natives", "x64", TEMP_DIR)
+    return os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR, TEMP_DIR)
 
 
 def rel_to_natives(game_root, abs_path):
     """绝对路径 → ``materialTemp/...`` 形式的相对路径（给 /material apply 用）。"""
-    nat = os.path.join(os.path.abspath(game_root), "natives", "x64")
+    nat = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR)
     try:
         rel = os.path.relpath(abs_path, nat)
     except ValueError:
@@ -103,6 +107,62 @@ def rel_to_natives(game_root, abs_path):
     if rel.startswith(".."):
         return None
     return rel.replace("\\", "/")
+
+
+def texture_abs(game_root, tex_rel):
+    """贴图相对路径 → 磁盘绝对路径（兼容 ``.tex`` / ``.tex.10``）。找不到返回 None。"""
+    rel = norm_rel(tex_rel)
+    if not rel:
+        return None
+    p = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR,
+                     rel.replace("/", os.sep))
+    for cand in (p, p + ".tex", p + ".tex.10"):
+        if os.path.exists(cand):
+            return cand
+    d, fn = os.path.split(p)
+    if os.path.isdir(d):
+        low = fn.lower()
+        for n in os.listdir(d):
+            nl = n.lower()
+            if nl == low or (nl.startswith(low + ".") and
+                             nl.rsplit(".", 1)[-1].isdigit()):
+                return os.path.join(d, n)
+    return None
+
+
+def texture_exists(game_root, tex_rel):
+    """贴图是否能被游戏找到：先磁盘 natives/<subdir>，再按 pak 覆盖顺序查。"""
+    if texture_abs(game_root, tex_rel):
+        return True
+    try:
+        from . import pakio
+        return pakio.find_entry(game_root, norm_rel(tex_rel)) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def import_texture(game_root, src_abs, mh, dh):
+    """把外部 ``.tex`` / ``.tex.<ver>`` 复制到缓存目录，返回写进 mdf2 的逻辑路径。
+
+    文件名 = ``<原名>_<内容hash>.tex[.<ver>]``；mdf2 里只写 ``.tex``
+    （引擎按版本后缀匹配）。只接受 .tex，不转码 DDS。
+    """
+    src = os.path.abspath(src_abs)
+    if not os.path.isfile(src):
+        raise FileNotFoundError(src)
+    base = os.path.basename(src)
+    low = base.lower()
+    i = low.find(".tex")
+    if i < 0:
+        raise ValueError("只支持 .tex（DDS 请先转成 .tex）: %s" % base)
+    stem, ver = base[:i], base[i + 4:]
+    data = open(src, "rb").read()
+    h = hashlib.sha1(data).hexdigest()[:8]
+    stem = "%s_%s" % (stem, h)
+    dst_dir = os.path.join(temp_root(game_root), "tex", mh, dh)
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.copyfile(src, os.path.join(dst_dir, stem + ".tex" + ver))
+    return "%s/tex/%s/%s/%s.tex" % (TEMP_DIR, mh, dh, stem)
 
 
 # ---------------------------------------------------------------- sessions.json
@@ -304,10 +364,10 @@ def _copy(src, dst):
 def mdf2_abs(game_root, mdf_rel):
     """``Character/.../pl0800.mdf2`` → 绝对路径（自动补 ``.10``）。
 
-    只在游戏根 ``natives/x64`` 下找；找不到就去 pak 里提（见 ``ensure_mdf2``）。
+    只在游戏根 ``natives/<subdir>`` 下找；找不到就去 pak 里提（见 ``ensure_mdf2``）。
     """
     rel = norm_rel(mdf_rel)
-    p = os.path.join(os.path.abspath(game_root), "natives", "x64",
+    p = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR,
                      rel.replace("/", os.sep))
     for cand in (p, p + MDF2_EXT):
         if os.path.exists(cand):
@@ -428,13 +488,13 @@ def parse_temp_rel(rel):
 def _missing_mdf2_msg(path, rel):
     """磁盘和 pak 都找不到 mdf2 时的报错文案。
 
-    查找顺序：游戏根 ``natives/x64`` → **从 pak 按需提取**。
+    查找顺序：游戏根 ``natives/<subdir>`` → **从 pak 按需提取**。
     两者都没有才报错（通常是游戏版本不一致 / pak 里本来就没这个资源）。
     """
     return (
         "找不到 mdf2：\n%s\n\n"
         "资源路径：%s\n\n"
-        "已经试过：游戏根 natives/x64、从 re_chunk_*.pak 提取。\n"
+        "已经试过：游戏根 natives/<subdir>、从 re_chunk_*.pak 提取。\n"
         "如果游戏刚更新过，可能是 pak 里该资源的路径变了。"
         % (path, norm_rel(rel))
     )
