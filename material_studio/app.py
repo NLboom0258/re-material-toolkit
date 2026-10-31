@@ -3392,7 +3392,7 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy", "btn_rb_del_copy"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_copy", "btn_rb_manage"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -3682,8 +3682,11 @@ class MaterialSystemPanel(QWidget):
         self._rb_update_mdf_label()
         self._rb_load_params(ent)
 
-    def _rb_load_params(self, ent):
-        """按 addr 读这个对象的材质参数（索引变了也能对上）。"""
+    def _rb_load_params(self, ent, keep_mat=None):
+        """按 addr 读这个对象的材质参数（索引变了也能对上）。
+
+        keep_mat：重读后尽量保持当前选中的材质（参数集变了也能回到原材质）。
+        """
         go, addr = ent.get("go"), ent.get("addr")
         try:
             p = rb.list_params(go, limit=32)
@@ -3710,19 +3713,25 @@ class MaterialSystemPanel(QWidget):
         else:
             self._rb_mesh_i = target.get("i")
             self._rb_mats = target.get("mats") or []
-        self._rb_fill_mats()
+        self._rb_fill_mats(keep_mat=keep_mat)
         self._rb_say("mesh [%s] %s: %d 个材质（i=%s）" % (
             _rb_addr_short(addr), go, len(self._rb_mats), self._rb_mesh_i))
 
-    def _rb_fill_mats(self):
+    def _rb_fill_mats(self, keep_mat=None):
         self.cmb_rb_mat.blockSignals(True)
         self.cmb_rb_mat.clear()
         for i, m in enumerate(self._rb_mats):
             self.cmb_rb_mat.addItem("%s  (%d 参数)" % (m.get("name"), m.get("varCount") or 0), i)
         self.cmb_rb_mat.blockSignals(False)
         if self._rb_mats:
-            self.cmb_rb_mat.setCurrentIndex(0)
-            self._rb_pick_mat(0)
+            idx = 0
+            if keep_mat:
+                for i, m in enumerate(self._rb_mats):
+                    if m.get("name") == keep_mat:
+                        idx = i
+                        break
+            self.cmb_rb_mat.setCurrentIndex(idx)
+            self._rb_pick_mat(idx)
         else:
             self.tbl_rb.setRowCount(0)
         self._rb_sync_enabled()
@@ -4220,27 +4229,30 @@ class MaterialSystemPanel(QWidget):
         self._rb_say("已切换到副本「%s」v%d：%s" % (c["name"], c["rev"], c["rel"]))
         return True
 
-    def _rb_del_copy(self):
-        """删除当前 mesh 下**未被使用**的副本（文件 + 登记）。
+    def _rb_manage_copy(self):
+        """管理当前 mesh 的副本：重命名 / 删除（都只对未使用副本）。
 
-        本工具任何一行在用、或游戏仍 hold 的副本都不列：引擎下次重载读不到
-        文件会变默认方格，所以「在用」判断是硬条件。
+        本工具任何一行在用、或游戏仍 hold 的副本标「使用中」，不能改名/删除：
+        引擎下次重载读不到文件会变默认方格。
         """
         ent = self._rb_cur_ent()
         if ent is None:
-            self._rb_say("删除副本：先选一个对象")
+            self._rb_say("管理副本：先选一个对象")
             return
         root = self._rb_root()
         mesh_path = ent.get("meshPath") or ""
         if not root or not mesh_path:
-            self._rb_say("删除副本：缺少游戏根目录或 meshPath")
+            self._rb_say("管理副本：缺少游戏根目录或 meshPath")
             return
         if not (self._rb_connected and self._rb_link_ok):
-            self._rb_say("删除副本：需要先连接游戏（确认没有对象在用它）")
+            self._rb_say("管理副本：需要先连接游戏（确认没有对象在用它）")
             return
         mh = ps.mesh_hash(mesh_path)
         doc = ps.load_index(root)
         mdfs = (ps.get_object(doc, mh) or {}).get("mdfs") or {}
+        if not mdfs:
+            self._rb_say("管理副本：该 mesh 还没有副本")
+            return
         in_use = {(m.get("prev"), m.get("copy"))
                   for m in (getattr(self, "_rb_meshes", None) or [])
                   if m.get("prev")}
@@ -4251,32 +4263,38 @@ class MaterialSystemPanel(QWidget):
                 if p:
                     held.add(p)
         except rb.BridgeError as ex:
-            self._rb_say("删除副本：读 holds 失败（%s），暂不删除" % ex)
+            self._rb_say("管理副本：读 holds 失败（%s），暂不操作" % ex)
             return
 
         groups = []
         for dh in sorted(mdfs):
             e = mdfs[dh]
             base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
-            cs = [c for c in ps.list_copies(doc, mh, dh)
-                  if (dh, c["name"]) not in in_use
-                  and c["rel"].lower() not in held]
+            cs = []
+            for c in ps.list_copies(doc, mh, dh):
+                c = dict(c)
+                c["_in_use"] = ((dh, c["name"]) in in_use
+                                or c["rel"].lower() in held)
+                cs.append(c)
             if cs:
                 groups.append((dh, base, cs))
-        if not groups:
-            self._rb_say("删除副本：没有可删的（都在使用中 / 被游戏保持）")
-            QMessageBox.information(
-                self, "没有可删除的副本",
-                "该 mesh 的副本都在使用中，或被游戏保持。\n"
-                "先切换到别的副本 / 取消勾选，或在游戏里解除保持后再试。")
-            return
+
         dlg = CopyPickerDialog(
-            self, groups, mode="delete", title="删除副本",
-            prompt="对象：%s\n只列**未使用**的副本（删除后文件和登记都移除，不可恢复）："
+            self, groups,
+            current=(ent.get("prev") or "", ent.get("copy") or ""),
+            mode="manage", title="管理副本",
+            prompt="对象：%s\n选中**未使用**的副本后可重命名 / 删除；"
+                   "标「使用中」的需先切换或取消勾选："
                    % self._rb_short(mesh_path, 90))
-        if dlg.exec() != QDialog.Accepted or not dlg.choice:
+        if dlg.exec() != QDialog.Accepted or not dlg.action:
             return
-        _kind, dh, c = dlg.choice
+        kind, dh, c = dlg.action
+        if kind == "delete":
+            self._rb_delete_copy(ent, root, doc, mh, dh, c)
+        else:
+            self._rb_rename_copy(ent, root, doc, mh, dh, c)
+
+    def _rb_delete_copy(self, ent, root, doc, mh, dh, c):
         if QMessageBox.question(
                 self, "删除副本",
                 "确定删除副本「%s」v%d？\n\n文件：%s\n\n不可恢复。"
@@ -4297,6 +4315,63 @@ class MaterialSystemPanel(QWidget):
         self._rb_edits.pop(_rb_addr_key(ent.get("addr")), None)
         self._rb_update_mdf_label()
         self._rb_say("已删除副本「%s」v%d" % (c["name"], c["rev"]))
+
+    def _rb_rename_copy(self, ent, root, doc, mh, dh, c):
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+        names = {x["name"] for x in ps.list_copies(doc, mh, dh)} - {c["name"]}
+        new_name = self._rb_prompt_copy_name(
+            names, c["name"], "重命名副本",
+            "原 mdf2：%s\n\n新名字（同一原 mdf2 下唯一）："
+            % (self._rb_short(base, 70) or "?"))
+        if not new_name or new_name == c["name"]:
+            return
+        rev = c["rev"]
+        while True:
+            new_rel = ps.new_copy_rel(mh, dh, new_name, rev)
+            if not os.path.exists(ps.rel_to_abs(root, new_rel)):
+                break
+            rev += 1
+        old_abs = ps.rel_to_abs(root, c["rel"])
+        new_abs = ps.rel_to_abs(root, new_rel)
+        try:
+            os.makedirs(os.path.dirname(new_abs), exist_ok=True)
+            os.replace(old_abs, new_abs)
+        except OSError as ex:
+            self._rb_say("重命名失败（文件）: %s" % ex)
+            QMessageBox.warning(self, "重命名失败", str(ex))
+            return
+        try:
+            ps.rename_copy(doc, mh, dh, c["name"], new_name, new_rel)
+        except Exception as ex:  # noqa: BLE001
+            try:
+                os.replace(new_abs, old_abs)
+            except OSError:
+                pass
+            self._rb_say("重命名失败（登记）: %s" % ex)
+            QMessageBox.warning(self, "重命名失败", str(ex))
+            return
+        ps.save_index(root, doc, log=self._rb_say)
+        if ent.get("copy") == c["name"]:
+            ent["copy"] = new_name
+        self._rb_update_mdf_label()
+        self._rb_say("副本「%s」→「%s」（v%d）" % (c["name"], new_name, rev))
+
+    def _rb_prompt_copy_name(self, taken, default, title, prompt):
+        """弹名字输入并校验（非法字符 / 重名）；取消返回 ""。"""
+        while True:
+            name, ok = QInputDialog.getText(self, title, prompt, text=default)
+            if not ok:
+                return ""
+            err = ps.copy_name_error(name)
+            if err:
+                QMessageBox.warning(self, "副本名不可用", err)
+                continue
+            if name in taken:
+                QMessageBox.warning(self, "副本名重复",
+                                    "该原 mdf2 下已有名为「%s」的副本。" % name)
+                continue
+            return name
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
@@ -4469,19 +4544,9 @@ class MaterialSystemPanel(QWidget):
             title = "新建副本"
             prompt = ("原 mdf2：%s\n\n副本名（同一原 mdf2 下唯一）："
                       % (self._rb_short(base, 70) or "?"))
-        while True:
-            name, ok = QInputDialog.getText(self, title, prompt, text=default)
-            if not ok:
-                return None
-            err = ps.copy_name_error(name)
-            if err:
-                QMessageBox.warning(self, "副本名不可用", err)
-                continue
-            if name in names:
-                QMessageBox.warning(self, "副本名重复",
-                                    "该原 mdf2 下已有名为「%s」的副本。" % name)
-                continue
-            break
+        name = self._rb_prompt_copy_name(names, default, title, prompt)
+        if not name:
+            return None
         try:
             info = ps.create_copy(root, mh, dh, base, name=name, log=self._rb_say)
         except Exception as ex:  # noqa: BLE001
@@ -4740,12 +4805,12 @@ class MaterialSystemPanel(QWidget):
             "每行显示「副本名（版本）· 原 mdf2 路径」；取消勾选才是回到原始状态。")
         self.btn_rb_copy.clicked.connect(self._rb_pick_copy)
         iso.addWidget(self.btn_rb_copy)
-        self.btn_rb_del_copy = QPushButton("删除副本…")
-        self.btn_rb_del_copy.setToolTip(
-            "删除当前 mesh 下未被使用的副本（文件 + 登记，不可恢复）。\n"
-            "本工具在用 / 游戏仍保持的副本不会列出。")
-        self.btn_rb_del_copy.clicked.connect(self._rb_del_copy)
-        iso.addWidget(self.btn_rb_del_copy)
+        self.btn_rb_manage = QPushButton("管理副本…")
+        self.btn_rb_manage.setToolTip(
+            "重命名 / 删除当前 mesh 下的副本（不可恢复）。\n"
+            "标「使用中」的副本（本工具挂着 / 游戏仍保持）不能操作。")
+        self.btn_rb_manage.clicked.connect(self._rb_manage_copy)
+        iso.addWidget(self.btn_rb_manage)
         v.addLayout(iso)
 
         f = QHBoxLayout()
@@ -5773,10 +5838,15 @@ class MaterialSystemPanel(QWidget):
         return out
 
     def _rb_reread_current(self):
-        """apply 后延迟重读当前材质的参数表（引擎重建参数块需要一点时间）。"""
-        cmb = getattr(self, "cmb_rb_mat", None)
-        if cmb is not None:
-            self._rb_pick_mat(cmb.currentIndex())
+        """apply 后延迟**整表重读**（参数集可能变了：换母材质 / 编译新版本）。
+
+        以前只拿旧的 _rb_mats 快照重画，新增/删除的参数根本不会出现，
+        只能切到别的对象再切回来才好 —— 现在直接重新问引擎，并保留当前材质。
+        """
+        ent = self._rb_cur_ent()
+        if ent is None:
+            return
+        self._rb_load_params(ent, keep_mat=getattr(self, "_rb_matname", None))
 
     def _apply_compiled_material(self, root, old_item, item, logs):
         """编译出新版母材质后，把所有引用旧产物的预览副本自动切过去。
@@ -6556,6 +6626,7 @@ class CopyPickerDialog(QDialog):
         self.resize(840, 580)
         self._mode = mode
         self.choice = None
+        self.action = None
 
         v = QVBoxLayout(self)
         if prompt:
@@ -6580,8 +6651,13 @@ class CopyPickerDialog(QDialog):
             g.setFlags(g.flags() & ~Qt.ItemIsSelectable)
             g.setData(0, Qt.UserRole, ("group", dh, None))
             for c in copies:
-                mark = "← 当前" if (dh, c["name"]) == current else ""
-                it = QTreeWidgetItem(["%s（v%d）" % (c["name"], c["rev"]), mark])
+                marks = []
+                if c.get("_in_use"):
+                    marks.append("使用中")
+                if (dh, c["name"]) == current:
+                    marks.append("← 当前")
+                it = QTreeWidgetItem(["%s（v%d）" % (c["name"], c["rev"]),
+                                      " · ".join(marks)])
                 it.setToolTip(0, c["rel"])
                 it.setData(0, Qt.UserRole, ("copy", dh, c))
                 g.addChild(it)
@@ -6593,17 +6669,26 @@ class CopyPickerDialog(QDialog):
             # 默认全部折叠、不预选：用户要哪份就展开哪组自己点
             g.setExpanded(False)
 
-        self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.bb.button(QDialogButtonBox.Ok).setText("确定")
-        self.bb.button(QDialogButtonBox.Cancel).setText("取消")
-        self.bb.accepted.connect(self.accept)
-        self.bb.rejected.connect(self.reject)
+        if mode == "manage":
+            self.bb = QDialogButtonBox(QDialogButtonBox.Close)
+            self.bb.button(QDialogButtonBox.Close).setText("关闭")
+            self.btn_rename = self.bb.addButton("重命名…", QDialogButtonBox.ActionRole)
+            self.btn_delete = self.bb.addButton("删除…", QDialogButtonBox.ActionRole)
+            self.btn_rename.clicked.connect(lambda: self._act("rename"))
+            self.btn_delete.clicked.connect(lambda: self._act("delete"))
+            self.bb.rejected.connect(self.reject)
+        else:
+            self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            self.bb.button(QDialogButtonBox.Ok).setText("确定")
+            self.bb.button(QDialogButtonBox.Cancel).setText("取消")
+            self.bb.accepted.connect(self.accept)
+            self.bb.rejected.connect(self.reject)
         v.addWidget(self.bb)
 
         self.ed_filter.textChanged.connect(self._filter)
         self.tree.itemDoubleClicked.connect(self._dbl)
-        self.tree.currentItemChanged.connect(lambda *_: self._sync_ok())
-        self._sync_ok()
+        self.tree.currentItemChanged.connect(lambda *_: self._sync_buttons())
+        self._sync_buttons()
 
     def _first_visible_copy(self):
         for i in range(self.tree.topLevelItemCount()):
@@ -6625,10 +6710,25 @@ class CopyPickerDialog(QDialog):
         d = it.data(0, Qt.UserRole)
         return d if d and d[0] != "group" else None
 
-    def _sync_ok(self):
-        self.bb.button(QDialogButtonBox.Ok).setEnabled(self._selected() is not None)
+    def _sync_buttons(self):
+        d = self._selected()
+        if self._mode == "manage":
+            usable = bool(d and d[0] == "copy" and not d[2].get("_in_use"))
+            self.btn_rename.setEnabled(usable)
+            self.btn_delete.setEnabled(usable)
+        else:
+            self.bb.button(QDialogButtonBox.Ok).setEnabled(d is not None)
+
+    def _act(self, kind):
+        d = self._selected()
+        if not d or d[0] != "copy" or d[2].get("_in_use"):
+            return
+        self.action = (kind, d[1], d[2])
+        super().accept()
 
     def _dbl(self, item, _col):
+        if self._mode != "pick":
+            return
         d = item.data(0, Qt.UserRole)
         if d and d[0] != "group":
             self.accept()
@@ -6651,9 +6751,11 @@ class CopyPickerDialog(QDialog):
         cur = self.tree.currentItem()
         if cur is not None and cur.isHidden():
             self.tree.setCurrentItem(self._first_visible_copy())
-        self._sync_ok()
+        self._sync_buttons()
 
     def accept(self):
+        if self._mode != "pick":
+            return
         d = self._selected()
         if d is None:
             return

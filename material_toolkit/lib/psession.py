@@ -263,6 +263,35 @@ def remove_copy(idx, mh, dh, name):
     return c
 
 
+def rename_copy(idx, mh, dh, old_name, new_name, new_rel):
+    """把一个副本改名（登记 + 路径），返回更新后的登记项。
+
+    只改 sessions 里的 key/name/rel；磁盘文件改名由调用方负责（要先确认没在用）。
+    新名字已存在 → ValueError。
+    """
+    e = get_mdf2(idx, mh, dh)
+    if not e:
+        return None
+    copies = e.get("copies") or {}
+    c = copies.get(old_name)
+    if c is None:
+        return None
+    if new_name in copies:
+        raise ValueError("该原 mdf2 下已有名为「%s」的副本" % new_name)
+    old_rel = norm_rel(c.get("rel") or "")
+    del copies[old_name]
+    c["name"] = new_name
+    c["rel"] = norm_rel(new_rel)
+    p = parse_temp_rel(c["rel"])
+    if p:
+        c["rev"] = p["rev"]
+    copies[new_name] = c
+    if norm_rel(e.get("edit") or "").lower() == old_rel.lower():
+        e["edit"] = c["rel"]
+    e["updatedAt"] = _now_iso()
+    return c
+
+
 def _copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     with open(src, "rb") as f:

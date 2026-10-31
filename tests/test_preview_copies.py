@@ -109,5 +109,21 @@ assert ps.remove_copy(idx2, mh, dh, "不存在") is None
 ps.remove_copy(idx2, mh, dh, a["name"])
 assert ps.get_mdf2(idx2, mh, dh)["edit"] == ""
 
+# 8) 重命名：登记 key/rel/rev 同步，重名报错
+c = ps.create_copy(root, mh, dh, base_rel, name="旧名")
+ps.upsert_copy(idx2, mh, dh, c["name"], c["rel"], c["rev"])
+assert ps.get_mdf2(idx2, mh, dh)["edit"] == c["rel"]
+new_rel = ps.new_copy_rel(mh, dh, "新名", c["rev"])
+ps.rename_copy(idx2, mh, dh, "旧名", "新名", new_rel)
+assert ps.get_copy(idx2, mh, dh, name="新名")["rel"] == new_rel
+assert ps.get_copy(idx2, mh, dh, name="旧名") is None
+assert ps.get_mdf2(idx2, mh, dh)["edit"] == new_rel      # 原本是当前 → 跟着改
+ps.upsert_copy(idx2, mh, dh, "另一个", new_rel, 1, current=False)
+try:
+    ps.rename_copy(idx2, mh, dh, "新名", "另一个", new_rel)
+    raise AssertionError("重名应当报错")
+except ValueError:
+    pass
+
 shutil.rmtree(root, ignore_errors=True)
 print("test_preview_copies: OK")
