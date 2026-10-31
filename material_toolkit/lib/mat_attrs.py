@@ -244,9 +244,9 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
         log("没有任何实际变更（值都没变）")
         return {"rel": old_rel, "old": old_rel, "bytes": 0, "report": report, "changed": False}
 
-    # 新路径：同一 (mesh, mdf2) 链换新时间戳（引擎按路径缓存，必须换）
-    # game_root 用于避重：同一秒内连续产出时会自动追加 _1 / _2…
-    new_rel = ps.new_edit_rel(parsed["mh"], parsed["dh"], game_root=game_root)
+    # 新路径：同一副本 rev+1（引擎按路径缓存，必须换）
+    new = ps.bump_copy_rel(game_root, old_rel)
+    new_rel = new["rel"]
     dst = ps.rel_to_abs(game_root, new_rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     n = d.save(dst)
@@ -274,26 +274,30 @@ def apply_attrs(game_root, edit_rel, changes, log=None):
             os.remove(dst)
             raise AttrError("产出文件 %s 的 flags 写入不一致，已删除" % name)
 
-    log("产出 %s（%d B，改动材质：%s）" % (new_rel, n, ", ".join(touched)))
+    log("产出 %s（%s v%d，%d B，改动材质：%s）"
+        % (new_rel, new["name"], new["rev"], n, ", ".join(touched)))
     return {"rel": new_rel, "old": old_rel, "bytes": n, "report": report,
-            "changed": True, "touched": touched}
+            "changed": True, "touched": touched,
+            "name": new["name"], "rev": new["rev"],
+            "mh": new["mh"], "dh": new["dh"]}
 
 
 def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
                   material_name=""):
-    """把所有 edit 副本里引用旧母材质的材质改到 new_mmtr（编译后自动更新）。
+    """把所有副本里引用旧母材质的材质改到 new_mmtr（编译后自动更新）。
 
     匹配旧引用的两种方式：
       - 路径 == ``old_mmtr``（上一版登记项）
       - 给了 ``material_name`` 时：路径在缓存目录且按产物名解析出同一个名字
-        （覆盖更旧的 rev / 早期时间戳命名）
+        （覆盖更旧的 rev）
 
-    每个受影响的 edit 副本会：
+    遍历的是 ``sessions.json`` 里登记的**全部具名副本**（不只是最近使用的）。
+    每个受影响的副本会：
       1. 把该材质的 ``mmtr_path`` 改成新路径
       2. 按新 mmtr 的 UserMaterial 重建参数集（同名保留值、新增 0、旧删）
-      3. 存成**新路径**（引擎按路径缓存）
+      3. 存成**同一副本的 rev+1 路径**（引擎按路径缓存）
 
-    返回 ``[(old_edit_rel, new_edit_rel, [材质名...])]``。
+    返回 ``[{mh, dh, name, old, new, rev, materials}]``。
     只改文件；apply 到游戏、更新 sessions.json、删旧文件由调用方负责。
     """
     log = log or (lambda *_a, **_k: None)
@@ -306,42 +310,44 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
         return []
     doc = ps.load_index(game_root)
     out = []
-    for _mh, o in (doc.get("objects") or {}).items():
-        for _dh, e in (o.get("mdfs") or {}).items():
-            edit = ps.norm_rel(e.get("edit") or "")
-            if not edit:
-                continue
-            src = ps.rel_to_abs(game_root, edit)
-            if not os.path.exists(src):
-                continue
-            try:
-                d = mdf2lib.Mdf2.load(src)
-            except Exception:  # noqa: BLE001
-                continue
-            names = []
-            for m in d.materials:
-                mp = ps.norm_rel(m.mmtr_path or "").lower()
-                if old_low and mp == old_low:
-                    names.append(m.name)
-                elif name_low and mp.startswith(prefix) \
-                        and mmatlib.parse_artifact_name(mp).lower() == name_low:
-                    names.append(m.name)
-            if not names:
-                continue
-            mm = Mmtr.from_bytes(new_bytes)
-            for name in names:
-                d.get_material(name).mmtr_path = new_mmtr
-                sync_mdf2(d, mm, prune=True, materials=name)
-            parsed = ps.parse_temp_rel(edit)
-            if not parsed:
-                continue
-            new_rel = ps.new_edit_rel(parsed["mh"], parsed["dh"], game_root=game_root)
-            dst = ps.rel_to_abs(game_root, new_rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            d.save(dst)
-            out.append((edit, new_rel, names))
-            log("自动更新工作副本: %s → %s（%s）"
-                % (edit, new_rel, ", ".join(names)))
+    seen = set()
+    for mh, o in (doc.get("objects") or {}).items():
+        for dh in (o.get("mdfs") or {}):
+            for c in ps.list_copies(doc, mh, dh):
+                rel = c["rel"]
+                if rel.lower() in seen:      # 同一文件被多条登记引用时只处理一次
+                    continue
+                seen.add(rel.lower())
+                src = ps.rel_to_abs(game_root, rel)
+                if not os.path.exists(src):
+                    continue
+                try:
+                    d = mdf2lib.Mdf2.load(src)
+                except Exception:  # noqa: BLE001
+                    continue
+                names = []
+                for m in d.materials:
+                    mp = ps.norm_rel(m.mmtr_path or "").lower()
+                    if old_low and mp == old_low:
+                        names.append(m.name)
+                    elif name_low and mp.startswith(prefix) \
+                            and mmatlib.parse_artifact_name(mp).lower() == name_low:
+                        names.append(m.name)
+                if not names:
+                    continue
+                mm = Mmtr.from_bytes(new_bytes)
+                for name in names:
+                    d.get_material(name).mmtr_path = new_mmtr
+                    sync_mdf2(d, mm, prune=True, materials=name)
+                new = ps.bump_copy_rel(game_root, rel)
+                dst = ps.rel_to_abs(game_root, new["rel"])
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                d.save(dst)
+                out.append({"mh": mh, "dh": dh, "name": c["name"],
+                            "old": rel, "new": new["rel"], "rev": new["rev"],
+                            "materials": names})
+                log("自动更新副本: %s → %s（%s）"
+                    % (rel, new["rel"], ", ".join(names)))
     return out
 
 

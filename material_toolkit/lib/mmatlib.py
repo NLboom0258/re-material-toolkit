@@ -47,9 +47,9 @@ LIB = "materials.json"
 MMTR_DIR = "mmtr"                     # 位于 materialTemp 下
 LIB_VERSION = 2
 
-_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-# 旧版的产物 stem：`<name>_p<YYYYmmdd_HHMMSS>` 可选跟 `_<序号>`（仅迁移时用）
-_RE_OLD_STEM = re.compile(r"_p(\d{8}_\d{6})(?:_(\d+))?$")
+_BAD_CHARS = re.compile(r'[<>":/\\|?*\x00-\x1f]')
+# 产物 stem 后缀：`<name>_r<rev>`（开发期不做旧时间戳命名兼容）
+_REV_SUFFIX_RE = re.compile(r"_r\d+$")
 
 
 def safe_name(name, fallback="Material"):
@@ -103,28 +103,18 @@ def artifact_stem(rel):
     return name
 
 
-_SUFFIX_RES = (
-    re.compile(r"_r\d+$"),                       # 新：<name>_r<rev>
-    re.compile(r"_p\d{8}_\d{6}(?:_\d+)?$"),      # 旧：<name>_p<ts>[_N]
-)
-
-
 def parse_artifact_name(rel):
     """从产物路径解析材质名（只解析字符串，不查登记）。
 
-    后缀格式固定且**一定在末尾**，所以从后往前按顺序剥：
-      ``<name>_r<rev>`` / ``<name>_p<YYYYmmdd_HHMMSS>[_N]``
+    后缀格式固定为 ``<name>_r<rev>`` 且**一定在末尾**，所以从后往前剥。
 
-    不符合任何已知后缀 → 返回 ``""``（不是我们标准流程的产物；使用它本身有风险，
-    调用方应按未登记处理）。材质名本身可能以这些形式结尾 —— 所以调用方应
-    **先用完整 stem 查一次登记**，再退回这个解析结果（见 ``resolve_material``）。
+    不符合该后缀 → 返回 ``""``（不是我们标准流程的产物；使用它本身有风险，
+    调用方应按未登记处理）。材质名本身也可能以 ``_r<数字>`` 结尾 —— 所以
+    解析只用于反推名字，调用方拿到名字后再查登记（见 ``resolve_material``）。
     """
     stem = artifact_stem(rel)
-    for rx in _SUFFIX_RES:
-        m = rx.search(stem)
-        if m:
-            return stem[:m.start()]
-    return ""
+    m = _REV_SUFFIX_RE.search(stem)
+    return stem[:m.start()] if m else ""
 
 
 def resolve_material(game_root, mmtr_path):
@@ -132,10 +122,9 @@ def resolve_material(game_root, mmtr_path):
 
     命中规则：
       1. 只处理 ``materialTemp/mmtr/`` 下的路径；游戏原版路径返回 ``("", None)``
-      2. 按固定后缀（``_r<rev>`` / ``_p<ts>``）严格解析出材质名
-      3. 用解析出的名字查登记（**不拿完整 stem 当名字查**：否则 `XXX_r6.mmtr`
-         会误命中名为 `XXX_r6` 的材质）
-      4. 名字查不到 → 返回 ``(name, None)``（调用方降级成“未登记”/提示）
+      2. 按固定后缀 ``_r<rev>`` 严格解析出材质名（**不拿完整 stem 当名字查**：
+         否则 `XXX_r6.mmtr` 会误命中名为 `XXX_r6` 的材质）
+      3. 名字查不到 → 返回 ``(name, None)``（调用方降级成“未登记”/提示）
     """
     s = ps.norm_rel(mmtr_path or "")
     if not is_artifact_path(s):
@@ -148,50 +137,6 @@ def resolve_material(game_root, mmtr_path):
     if it and os.path.exists(mmtr_abs(game_root, it.get("rel") or "")):
         return name, it
     return name, None
-
-
-def _old_seq(rel):
-    """旧版 ``name_p20261030_081053`` → ``(时间戳, 序号)``（迁移排序用）。"""
-    stem = ps.norm_rel(rel or "").rsplit("/", 1)[-1]
-    if stem.lower().endswith(".mmtr"):
-        stem = stem[:-5]
-    m = _RE_OLD_STEM.search(stem)
-    return (m.group(1), int(m.group(2) or 0)) if m else ("", 0)
-
-
-def _migrate_v1(doc):
-    """旧版 ``{items, active}`` → 新版 ``{materials}``。
-
-    每个材质名只保留一份：优先 ``active``，否则取文件名时间戳最新的一份。
-    旧文件不在这里删；下次 ``prune`` 时按“未登记且未被引用”清掉。
-    """
-    groups = {}
-    for it in (doc.get("items") or {}).values():
-        groups.setdefault(it.get("assetName") or "?", []).append(it)
-    mats = {}
-    active = doc.get("active") or {}
-    for name, lst in groups.items():
-        pick = None
-        aid = active.get(name)
-        if aid:
-            pick = next((x for x in lst if x.get("id") == aid), None)
-        if pick is None:
-            lst.sort(key=lambda x: _old_seq(x.get("rel")), reverse=True)
-            pick = lst[0]
-        mats[name] = {
-            "name": name,
-            "rev": 0,                       # 下一次编译从 1 开始
-            "rel": ps.norm_rel(pick.get("rel") or ""),
-            "assetPath": pick.get("assetPath") or "",
-            "bytes": pick.get("bytes"),
-            "createdAt": pick.get("createdAt") or now_iso(),
-            "sourceHash": pick.get("sourceHash") or "",
-            "shading": dict(pick.get("shading") or {}),
-            "userMaterial": list(pick.get("userMaterial") or []),
-            "textureSlots": list(pick.get("textureSlots") or []),
-        }
-    return {"version": LIB_VERSION, "mmtrVer": doc.get("mmtrVer") or MMTR_VER,
-            "materials": mats}
 
 
 # ---------------------------------------------------------------- 读写登记簿
@@ -207,8 +152,6 @@ def load(game_root):
             doc = None
     if not isinstance(doc, dict):
         doc = {}
-    if (doc.get("version") or 1) < 2 or "materials" not in doc:
-        doc = _migrate_v1(doc)
     doc.setdefault("materials", {})
     doc["version"] = LIB_VERSION
     doc.setdefault("mmtrVer", MMTR_VER)
@@ -332,15 +275,15 @@ def mmtr_from_item(game_root, item):
 # ---------------------------------------------------------------- 在用检测 / 清理
 
 def referenced_mmtrs(game_root):
-    """扫 sessions.json 里所有 edit/orig 的 mdf2，收集它们引用的 mmtr 逻辑路径。"""
+    """扫 sessions.json 里所有副本（含 orig）的 mdf2，收集它们引用的 mmtr 路径。"""
     out = set()
     doc = ps.load_index(game_root)
-    for o in (doc.get("objects") or {}).values():
-        for e in (o.get("mdfs") or {}).values():
-            for kind in ("edit", "orig"):
-                rel = ps.norm_rel(e.get(kind) or "")
-                if not rel:
-                    continue
+    for mh, o in (doc.get("objects") or {}).items():
+        for dh, e in (o.get("mdfs") or {}).items():
+            rels = [c["rel"] for c in ps.list_copies(doc, mh, dh)]
+            if e.get("orig"):
+                rels.append(ps.norm_rel(e["orig"]))
+            for rel in rels:
                 p = ps.rel_to_abs(game_root, rel)
                 if not os.path.exists(p):
                     continue

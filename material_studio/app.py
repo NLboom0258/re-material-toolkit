@@ -2981,7 +2981,7 @@ class MaterialSystemPanel(QWidget):
         self.btn_compile_prev = QPushButton("编译到预览目录")
         self.btn_compile_prev.setToolTip(
             "把当前材质资产编译成 mmtr，写进游戏缓存目录（materialTemp/mmtr）并登记。\n"
-            "文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。\n\n"
+            "文件名带版本号（<材质名>_r<rev>）：引擎按路径缓存资源，同路径改了内容不会重载。\n\n"
             "需要先在「实时预览」页连上游戏内 REF 服务。")
         self.btn_compile_prev.setEnabled(False)
         self.btn_compile_prev.clicked.connect(self.compile_to_preview)
@@ -3620,6 +3620,7 @@ class MaterialSystemPanel(QWidget):
             cur = ps.norm_rel(m.get("mdf2Path") or "")
             hit = self._rb_lookup_by_path(idx_doc, cur) if cur else None
             m["prev"] = hit["dh"] if (hit and hit["kind"] == "edit") else None
+            m["copy"] = hit.get("copy") if m["prev"] else None
             # 磁盘上没有时，还能从 pak 按需提取（只部分模型被解包）
             missing = False
             pak_only = False
@@ -3775,6 +3776,7 @@ class MaterialSystemPanel(QWidget):
             else:
                 self._rb_iso_end(root, ent)
                 ent["prev"] = None
+                ent["copy"] = None
         except (rb.BridgeError, RuntimeError, OSError) as e:
             self._rb_say("预览开关失败: %s" % e)
             self._rb_set_item_check(addr, not want)
@@ -3889,6 +3891,7 @@ class MaterialSystemPanel(QWidget):
         """对象已被游戏重载：清掉该行的勾选与状态，并提示重选。"""
         addr = ent.get("addr")
         ent["prev"] = None
+        ent["copy"] = None
         if getattr(self, "_rb_cur_addr", None) == addr:
             self._rb_mesh_i = None
         self._rb_set_item_check(addr, False)
@@ -3930,14 +3933,14 @@ class MaterialSystemPanel(QWidget):
             addr_go[_rb_addr_key(ent.get("addr"))] = (ent.get("addr"), ent.get("go"))
         return addr_go
 
-    def _rb_switch_all_to(self, root, mh, dh, edit_rel, new_rel, addr_go):
+    def _rb_switch_all_to(self, root, mh, dh, edit_rel, new_rel, addr_go,
+                          name, rev):
         """把挂在旧副本上的对象全部切到新副本 + 更新登记 + 删旧文件。
 
         返回 ``(moved_keys, failed_msgs)``。moved 为空时不改登记也不删旧文件
         （否则会把还在用的文件删掉）。
         """
         doc = ps.load_index(root)
-        e = ps.get_mdf2(doc, mh, dh) or {}
         moved, failed = [], []
         for k, (raw, g) in addr_go.items():
             try:
@@ -3955,16 +3958,7 @@ class MaterialSystemPanel(QWidget):
         if not moved:
             return moved, failed
 
-        ps.upsert_mdf2(doc, mh, dh,
-                       e.get("originalMdf2") or e.get("baseMdf2") or "",
-                       e.get("baseMdf2") or "",
-                       edit_rel=new_rel)
-        # 同一条链上可能有多条登记（湿身/正常各登过一次），全部改到新路径，
-        # 否则会留下指向旧文件的死引用。
-        fixed = ps.update_edit_paths(doc, edit_rel, new_rel)
-        fixed += ps.heal_missing_edits(root, doc, mh, new_rel)
-        if len(fixed) > 1:
-            self._rb_say("同步了 %d 条登记到新副本" % len(fixed))
+        ps.upsert_copy(doc, mh, dh, name, new_rel, rev)
         ps.save_index(root, doc, log=self._rb_say)
         # 旧文件此时已无 mesh 引用
         try:
@@ -3990,8 +3984,8 @@ class MaterialSystemPanel(QWidget):
         mh = ps.mesh_hash(ent.get("meshPath") or "")
         dh = ent.get("prev")
         doc = ps.load_index(root)
-        e = ps.get_mdf2(doc, mh, dh) or {}
-        edit_rel = ps.norm_rel(e.get("edit") or "")
+        c = self._rb_copy_of(doc, mh, dh, ent)
+        edit_rel = ps.norm_rel((c or {}).get("rel") or "")
         if not edit_rel or not ps.exists_edit(root, edit_rel):
             self._rb_say("保存：登记的工作副本不存在（%s）" % (edit_rel or "未登记"))
             return
@@ -4020,7 +4014,8 @@ class MaterialSystemPanel(QWidget):
         new_rel = r["rel"]
 
         # 所有共用该副本的对象切到新文件（keep 保持）
-        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, new_rel, addr_go)
+        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, new_rel,
+                                              addr_go, name=r["name"], rev=r["rev"])
         if moved:
             for a in moved:
                 self._rb_edits.pop(a, None)
@@ -4031,8 +4026,9 @@ class MaterialSystemPanel(QWidget):
             # apply 后引擎重建参数块要一点时间，立即读会拿到旧值（延迟读 + 轮询兜底）
             QTimer.singleShot(600, self._rb_reread_current)
 
-        msg = ("已写入 %d 个参数到：\n%s\n\n切到新副本的对象：%d 个"
-               % (len(r.get("touched") or []), new_rel, len(moved)))
+        msg = ("已写入 %d 个参数到副本「%s」v%d：\n%s\n\n切到新副本的对象：%d 个"
+               % (len(r.get("touched") or []), r["name"], r["rev"],
+                  new_rel, len(moved)))
         if failed:
             msg += "\n\n未切换成功：\n" + "\n".join(failed)
         self._rb_say(msg.replace("\n", "  "))
@@ -4060,8 +4056,9 @@ class MaterialSystemPanel(QWidget):
             return
         mh = ps.mesh_hash(ent.get("meshPath") or "")
         dh = ent.get("prev")
-        e = ps.get_mdf2(ps.load_index(root), mh, dh) or {}
-        edit_rel = ps.norm_rel(e.get("edit") or "")
+        doc = ps.load_index(root)
+        c = self._rb_copy_of(doc, mh, dh, ent)
+        edit_rel = ps.norm_rel((c or {}).get("rel") or "")
         if not edit_rel or not ps.exists_edit(root, edit_rel):
             self._rb_say("材质属性：工作副本不存在（%s）" % (edit_rel or "未登记"))
             return
@@ -4119,7 +4116,8 @@ class MaterialSystemPanel(QWidget):
 
         # 所有挂旧副本的对象切到新文件
         addr_go = self._rb_attach_points(ent, edit_rel)
-        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, r["rel"], addr_go)
+        moved, failed = self._rb_switch_all_to(root, mh, dh, edit_rel, r["rel"],
+                                              addr_go, name=r["name"], rev=r["rev"])
         for a in moved:
             self._rb_edits.pop(a, None)
         if moved:
@@ -4130,7 +4128,8 @@ class MaterialSystemPanel(QWidget):
             # 重载后参数集可能变了（换母材质）；延迟读，等引擎重建完参数块
             QTimer.singleShot(600, self._rb_reread_current)
 
-        msg = "新副本：\n%s\n\n切到新副本的对象：%d 个" % (r["rel"], len(moved))
+        msg = "副本「%s」→ v%d：\n%s\n\n切到新副本的对象：%d 个" % (
+            r["name"], r["rev"], r["rel"], len(moved))
         rep = r.get("report") or []
         if rep:
             msg += "\n\n" + "\n".join(rep)
@@ -4143,9 +4142,10 @@ class MaterialSystemPanel(QWidget):
         QMessageBox.information(self, "材质属性", msg)
 
     def _rb_pick_copy(self):
-        """选择当前对象挂哪一份**编辑副本**（只列该 mesh 已登记的 edit）。
+        """选择/新建当前对象的编辑副本。
 
-        原始状态/重置直接用列表上的取消勾选，不在这里列。
+        只列**同一个原 mdf2** 下的具名副本（sessions.json 的 copies）；
+        按 mesh 分类、按原 mdf2 分文件夹，跨 mdf2 的切换不属于这里。
         """
         ent = self._rb_cur_ent()
         if ent is None:
@@ -4153,45 +4153,46 @@ class MaterialSystemPanel(QWidget):
             return
         root = self._rb_root()
         mesh_path = ent.get("meshPath") or ""
+        dh = ent.get("prev")
         if not root or not mesh_path:
             self._rb_say("选择副本：缺少游戏根目录或 meshPath（刷新列表后再试）")
             return
+        if not dh:
+            self._rb_say("选择副本：该对象还没启用预览（先勾选建一份副本）")
+            return
         mh = ps.mesh_hash(mesh_path)
         doc = ps.load_index(root)
-        o = ps.get_object(doc, mh) or {}
-        mdfs = o.get("mdfs") or {}
-        cur_dh = ent.get("prev")
-
-        labels, items = [], []
-        default_idx = -1
-        for dh, e in sorted(mdfs.items()):
-            edit = ps.norm_rel(e.get("edit") or "")
-            if not edit or not os.path.exists(ps.rel_to_abs(root, edit)):
-                continue
-            labels.append("编辑副本 · %s%s" % (
-                self._rb_short(edit, 64), "  ← 当前" if dh == cur_dh else ""))
-            items.append((dh, edit))
-            if dh == cur_dh:
-                default_idx = len(labels) - 1
-        if not items:
-            self._rb_say("选择副本：该 mesh 还没有编辑副本（勾选对象会新建一份）")
-            return
-        if default_idx < 0:
-            default_idx = 0
-
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+        copies = [c for c in ps.list_copies(doc, mh, dh)
+                  if ps.exists_edit(root, c["rel"])]
+        cur = self._rb_copy_of(doc, mh, dh, ent)
+        labels = ["%s（v%d）%s" % (c["name"], c["rev"],
+                                  "  ← 当前" if cur and c["name"] == cur["name"] else "")
+                  for c in copies]
+        labels.append("＋ 新建副本…")
+        default = next((i for i, c in enumerate(copies)
+                        if cur and c["name"] == cur["name"]), 0)
         pick, ok = QInputDialog.getItem(
-            self, "选择编辑副本",
-            "对象：%s\n\n选一份挂到这个对象：" % self._rb_short(mesh_path, 70),
-            labels, default_idx, False)
+            self, "选择副本",
+            "原 mdf2：%s\n\n选一份挂到这个对象（同一原 mdf2 下共 %d 份）："
+            % (self._rb_short(base, 70) or "?", len(copies)),
+            labels, default, False)
         if not ok:
             return
-        dh, rel = items[labels.index(pick)]
-        addr, go = ent.get("addr"), ent.get("go")
+        i = labels.index(pick)
+        if i == len(copies):
+            c = self._rb_new_copy(root, doc, mh, dh)
+            if c is None:
+                return
+        else:
+            c = copies[i]
 
+        addr, go = ent.get("addr"), ent.get("go")
         try:
-            d = rb.material(go, "apply", mdf=rel, addr=addr, keep=True)
-        except rb.BridgeError as e:
-            self._rb_say("切换副本失败: %s" % e)
+            d = rb.material(go, "apply", mdf=c["rel"], addr=addr, keep=True)
+        except rb.BridgeError as ex:
+            self._rb_say("切换副本失败: %s" % ex)
             return
         ms = d.get("meshes") or []
         if d.get("err") or not ms or not ms[0].get("ok"):
@@ -4200,23 +4201,26 @@ class MaterialSystemPanel(QWidget):
 
         self._rb_edits.pop(_rb_addr_key(addr), None)   # 换了副本，旧副本的待存值作废
         ent["prev"] = dh
-        self._rb_iso_mdf = rel
+        ent["copy"] = c["name"]
+        self._rb_iso_mdf = c["rel"]
+        ps.upsert_copy(doc, mh, dh, c["name"], c["rel"], c["rev"])
+        ps.save_index(root, doc, log=self._rb_say)
         self._rb_set_item_check(addr, True)
         self._rb_sync_enabled()
         # apply 后引擎重建参数块要一点时间
         QTimer.singleShot(600, self._rb_update_mdf_label)
         QTimer.singleShot(600, self._rb_reread_current)
-        self._rb_say("已切换到编辑副本：%s" % rel)
+        self._rb_say("已切换到副本「%s」v%d：%s" % (c["name"], c["rev"], c["rel"]))
 
     # ---- 独立 mdf2 预览开关 --------------------------------------------
     # 勾选：把当前 mesh 的 mdf2 换成一份**内容相同、路径不同**的副本（clone_mdf2），
     #       之后调参作用于新加载的参数块；取消勾选换回原 mdf2 → 引擎重建参数块 = 重置。
     # 实测：同路径重载无效（引擎按路径缓存），必须换路径。
     def _rb_update_mdf_label(self):
-        """顶部只显示**当前行**对象的 mdf2。
+        """顶部只显示**当前行**对象的 mdf2 副本。
 
         预览中的行不调 get_Material（set_Material 后引擎要过一会儿才更新它的返回值，
-        刚挂上时读到的还是旧路径），直接按登记的 edit 路径显示。
+        刚挂上时读到的还是旧路径），直接按登记的 copies 显示。
         """
         lbl = getattr(self, "lbl_rb_mdf", None)
         if lbl is None:
@@ -4230,11 +4234,12 @@ class MaterialSystemPanel(QWidget):
         if prev and root:
             doc = ps.load_index(root)
             mh = ps.mesh_hash(ent.get("meshPath") or "")
-            reg = ps.get_mdf2(doc, mh, prev) or {}
-            ed = ps.norm_rel(reg.get("edit") or "")
-            if ed:
-                base = ps.norm_rel(reg.get("baseMdf2") or reg.get("originalMdf2") or "")
-                lbl.setText("%s   [预览中 · 原始: %s]" % (ed, base or "?"))
+            c = self._rb_copy_of(doc, mh, prev, ent)
+            if c:
+                e = ps.get_mdf2(doc, mh, prev) or {}
+                base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+                lbl.setText("%s · %s   [预览中 · v%d]"
+                            % (c["name"], base or "?", c["rev"]))
                 return
         p = None
         try:
@@ -4247,24 +4252,19 @@ class MaterialSystemPanel(QWidget):
             lbl.setText("当前 mdf2: ?")
             return
         cur = ps.norm_rel(p)
-        parts = cur[len(ps.TEMP_DIR) + 1:].split("/") if cur.lower().startswith(
-            ps.TEMP_DIR.lower() + "/") else []
-        if parts[:1] == ["edit"] and len(parts) >= 3:
-            lbl.setText("%s   [预览中 · mesh %s · mdf2 %s]" % (
-                cur, parts[1], parts[2].split("_p")[0]))
-        elif parts[:1] == ["orig"] and len(parts) >= 2:
-            lbl.setText("%s   [已重置 · mdf2 %s]" % (cur, parts[1].split("_p")[0]))
+        if cur.lower().startswith(ps.TEMP_DIR.lower() + "/"):
+            lbl.setText("%s   [预览中 · 未登记]" % cur)
         else:
-            lbl.setText("当前 mdf2: %s" % cur)
+            lbl.setText("未预览 · %s" % cur)
 
     # ---- 独立 mdf2 预览：勾选 / 取消流程 -------------------------------
-    # 设计（见 analysis/runtime_preview_plan.md §16）：
+    # 设计（见 analysis/runtime_preview_plan.md §27）：
     #   勾选 → /identity 拿 meshPath + mdf2Path → meshHash / mdf2Hash
     #        → 查 sessions.json（materialTemp/sessions.json）
-    #            无该模型        → 弹窗确认「首次编辑，复制当前 mdf2 作为工作副本」
-    #            有模型无该 mdf2 → 弹窗选择「新建 / 用该模型下别的副本」
-    #            有该 mdf2       → 直接复用（文件丢了就重建）
-    #        → create_edit 生成**全新时间戳路径**（避开引擎的路径缓存）
+    #            无该 mdf2          → 确认后建「默认」副本
+    #            已有副本           → 弹窗选一份 / 新建
+    #            当前挂的就是副本   → 直接沿用
+    #        → create_copy 生成 edit/<mh>/<dh>/<副本名>_v<rev>（避开引擎路径缓存）
     #        → /material apply(addr=) + keep=1
     #   取消 → create_orig 生成全新路径 → /material apply(keep=0) → 参数回到原始值
     #   轮询 /holds → dead 为真则清勾选 + 提示重选
@@ -4325,18 +4325,32 @@ class MaterialSystemPanel(QWidget):
     def _rb_lookup_by_path(idx_doc, rel):
         """按挂载路径反查 sessions.json 登记项。
 
-        mesh 索引会变（重启 / 变体切换都会），edit / orig 的路径却是唯一的，
+        mesh 索引会变（重启 / 变体切换都会），副本 / orig 的路径却是唯一的，
         所以「当前挂在哪个副本上」只能靠路径反查，不能靠 i=。
-        返回 {mh, dh, ent, kind: "edit"|"orig"} 或 None。
+        返回 {mh, dh, ent, kind: "edit"|"orig", copy} 或 None。
         """
-        low = (rel or "").lower()
+        low = ps.norm_rel(rel or "").lower()
+        if not low:
+            return None
         for mh, o in (idx_doc.get("objects") or {}).items():
             for dh, e in (o.get("mdfs") or {}).items():
-                for kind in ("edit", "orig"):
-                    v = ps.norm_rel(e.get(kind) or "")
-                    if v and v.lower() == low:
-                        return {"mh": mh, "dh": dh, "ent": e, "kind": kind}
+                orig = ps.norm_rel(e.get("orig") or "")
+                if orig and orig.lower() == low:
+                    return {"mh": mh, "dh": dh, "ent": e, "kind": "orig"}
+                for c in ps.list_copies(idx_doc, mh, dh):
+                    if c["rel"].lower() == low:
+                        return {"mh": mh, "dh": dh, "ent": e,
+                                "kind": "edit", "copy": c["name"]}
         return None
+
+    @staticmethod
+    def _rb_copy_of(idx_doc, mh, dh, ent):
+        """当前对象在用的副本登记项（按 ent["copy"]；找不到退回最近使用）。"""
+        c = ps.get_copy(idx_doc, mh, dh, name=ent.get("copy"))
+        if c is None:
+            e = ps.get_mdf2(idx_doc, mh, dh) or {}
+            c = ps.get_copy(idx_doc, mh, dh, rel=e.get("edit") or "")
+        return c
 
     def _rb_apply_iso(self, ent, rel):
         """把 mesh 挂到指定副本并开启每帧保持（被游戏抢走时自动抢回 + 重写参数）。"""
@@ -4354,40 +4368,73 @@ class MaterialSystemPanel(QWidget):
         self._rb_say("已挂载工作副本（keep=%s）: %s" % (d.get("keep"), ms[0].get("now") or rel))
 
     def _rb_ask_first(self, mesh_path, mdf_rel):
-        txt = ("该对象首次进入预览。\n\n"
+        txt = ("这份原 mdf2 首次进入预览。\n\n"
                "模型：%s\n原 mdf2：%s\n\n"
-               "将复制一份当前 mdf2 到 materialTemp/ 下作为工作副本，原文件不会改动；"
-               "之后所有调参只作用于这份副本。" % (mesh_path, mdf_rel))
+               "将复制一份到 materialTemp/edit/ 下作为「默认」副本，原文件不会改动；"
+               "之后所有调参只作用于副本，可随时另建副本做对比。" % (mesh_path, mdf_rel))
         return QMessageBox.question(self, "启用预览", txt,
                                     QMessageBox.Ok | QMessageBox.Cancel,
                                     QMessageBox.Ok) == QMessageBox.Ok
 
-    def _rb_ask_which(self, idx_doc, mh, dh, cur):
-        """该模型已有副本时让用户选。返回 (相对路径 | '__new__' | None)。"""
-        items = ["＋ 新建副本（复制当前 mdf2）"]
-        cands = []
-        for d2, e2 in (((ps.get_object(idx_doc, mh) or {}).get("mdfs")) or {}).items():
-            if d2 == dh:
-                continue
-            ed = e2.get("edit")
-            if not ed:
-                continue
-            items.append("用已有: %s  (%s)" % (d2, self._rb_short(ed)))
-            cands.append(ed)
-        if len(items) == 1:
-            return "__new__" if self._rb_ask_first("（该模型已有登记）", cur) else None
+    def _rb_ask_copy(self, idx_doc, mh, dh, copies):
+        """该原 mdf2 已有多个副本时让用户挑。返回副本登记项 | "__new__" | None。"""
+        e = ps.get_mdf2(idx_doc, mh, dh) or {}
+        base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+        last = ps.get_copy(idx_doc, mh, dh, rel=e.get("edit") or "")
+        labels = ["%s（v%d）%s" % (c["name"], c["rev"],
+                                  "  ← 上次" if last and c["name"] == last["name"] else "")
+                  for c in copies]
+        labels.append("＋ 新建副本…")
+        default = next((i for i, c in enumerate(copies)
+                        if last and c["name"] == last["name"]), 0)
         pick, ok = QInputDialog.getItem(
             self, "启用预览",
-            "该模型下已有其它 mdf2 的工作副本。\n"
-            "「新建」= 复制当前 mdf2；「用已有」= 直接把那份副本挂到当前对象。",
-            items, 0, False)
+            "原 mdf2：%s\n\n这份 mdf2 已有 %d 个副本。选一份挂到当前对象，或新建："
+            % (self._rb_short(base, 70) or "?", len(copies)),
+            labels, default, False)
         if not ok:
             return None
-        i = items.index(pick)
-        return "__new__" if i == 0 else cands[i - 1]
+        i = labels.index(pick)
+        return "__new__" if i == len(copies) else copies[i]
+
+    def _rb_new_copy(self, root, idx_doc, mh, dh):
+        """弹名字输入 → 基于原 mdf2 建新副本 → 写进登记（不 save_index）。"""
+        e = ps.get_mdf2(idx_doc, mh, dh) or {}
+        base = ps.norm_rel(e.get("baseMdf2") or e.get("originalMdf2") or "")
+        if not base:
+            self._rb_say("新建副本：登记项里没有原始 mdf2 路径")
+            return None
+        names = {c["name"] for c in ps.list_copies(idx_doc, mh, dh)}
+        default = "默认" if "默认" not in names else "副本%d" % (len(names) + 1)
+        while True:
+            name, ok = QInputDialog.getText(
+                self, "新建副本",
+                "原 mdf2：%s\n\n副本名（同一原 mdf2 下唯一）："
+                % (self._rb_short(base, 70) or "?"), text=default)
+            if not ok:
+                return None
+            err = ps.copy_name_error(name)
+            if err:
+                QMessageBox.warning(self, "副本名不可用", err)
+                continue
+            if name in names:
+                QMessageBox.warning(self, "副本名重复",
+                                    "该原 mdf2 下已有名为「%s」的副本。" % name)
+                continue
+            break
+        try:
+            info = ps.create_copy(root, mh, dh, base, name=name, log=self._rb_say)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("新建副本失败: %s" % ex)
+            QMessageBox.warning(self, "新建副本失败", str(ex))
+            return None
+        return ps.upsert_copy(idx_doc, mh, dh, info["name"], info["rel"], info["rev"])
 
     def _rb_iso_begin(self, root, ent):
-        """开启某对象的预览。返回该对象对应的 mdf2Hash（写入 ent["prev"]）。"""
+        """开启某对象的预览。返回该对象对应的 mdf2Hash（写入 ent["prev"]）。
+
+        已有副本时让用户挑一份或新建；首次则确认后建「默认」副本。
+        """
         ident = self._rb_find_identity(ent)
         if not ident:
             raise rb.BridgeError(
@@ -4401,82 +4448,90 @@ class MaterialSystemPanel(QWidget):
         go = ent.get("go")
         idx_doc = ps.load_index(root)
 
-        # ① 当前路径已在 sessions.json 里登记（edit 或 orig）→ 直接取登记信息。
-        #    只看路径不看 i=：索引会变，路径唯一。
+        # ① 当前路径已是登记副本 → 继续用它（换新路径会让引擎重载，调好的参数全丢）
         hit = self._rb_lookup_by_path(idx_doc, cur)
         if hit and hit["kind"] == "edit":
-            # 已经在预览中（比如切回之前选过的对象），继续用当前副本，
-            # 不要重新 clone —— 换新路径会让引擎重载 mdf2，调好的参数全丢。
             self._rb_apply_iso(ent, cur)
+            ent["copy"] = hit.get("copy")
             return hit["dh"]
 
         if hit:
             mh, dh = hit["mh"], hit["dh"]
             reg = hit["ent"]
             base = ps.norm_rel(reg.get("originalMdf2") or reg.get("baseMdf2") or cur)
-            obj = ps.get_object(idx_doc, mh)
             self._rb_say("已重置过（挂在 orig 副本上），从原始 mdf2 重新开始")
         else:
             if cur.lower().startswith(ps.TEMP_DIR.lower() + "/"):
-                # 挂在 materialTemp 下但 sessions.json 里没记录（手动清了登记 / 旧版流程）。
-                # 从路径反推身份，把当前副本「接管」为工作副本：它的文件内容仍等于原 mdf2
-                # （实时预览只改内存、不写盘），所以不重建、不丢当前状态。
+                # 挂在 materialTemp 下但登记丢了（手动清了 sessions.json）：
+                # 路径本身带身份，直接接管成副本，不重建、不丢当前状态。
                 parsed = ps.parse_temp_rel(cur)
-                if not parsed:
+                if not parsed or parsed.get("kind") != "edit":
                     raise rb.BridgeError(
                         "该对象挂在无法识别的临时副本上：\n%s\n\n请重启游戏后再试。" % cur)
                 mh, dh = ps.mesh_hash(mesh_path), parsed["dh"]
+                # 可能挂在某个副本的旧版本上（离线编译后登记已指向新 rev）：
+                # 不要用旧文件覆盖登记，直接切到登记的新版本。
+                known = ps.get_copy(idx_doc, mh, dh, name=parsed["name"])
+                if known and ps.exists_edit(root, known["rel"]):
+                    self._rb_say("当前挂的是副本「%s」旧版本（v%d），切到登记的 v%d"
+                                 % (known["name"], parsed["rev"], known["rev"]))
+                    self._rb_apply_iso(ent, known["rel"])
+                    ent["copy"] = known["name"]
+                    return dh
                 self._rb_say("接管未登记的副本（身份从路径反推）: mh=%s dh=%s" % (mh, dh))
                 self._rb_apply_iso(ent, cur)
                 ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
-                ps.upsert_mdf2(idx_doc, mh, dh, cur, cur, edit_rel=cur)
+                ps.upsert_mdf2(idx_doc, mh, dh, cur, cur)
+                ps.upsert_copy(idx_doc, mh, dh,
+                               parsed["name"], cur, parsed["rev"])
                 ps.save_index(root, idx_doc, log=self._rb_say)
+                ent["copy"] = parsed["name"]
                 return dh
             mh, dh = ps.mesh_hash(mesh_path), ps.mdf2_hash(cur)
             base = cur
-            obj = ps.get_object(idx_doc, mh)
-            reg = ps.get_mdf2(idx_doc, mh, dh) if obj else None
 
         self._rb_say("身份 mesh=%s / mdf2=%s" % (mh, dh))
         self._rb_say("  mesh = %s" % mesh_path)
         self._rb_say("  base = %s" % base)
 
-        edit = None
-        cand = (reg or {}).get("edit")
-        if cand and ps.exists_edit(root, cand):
-            edit = cand
-            self._rb_say("复用已有工作副本: %s" % cand)
-            # 如果这次是从**真实原 mdf2** 进来的，顺手把 base 矫正成它。
-            # 接管分支只能拿临时副本当 base（不可靠：那份文件被清掉就没法重置了）。
-            reg_base = ps.norm_rel((reg or {}).get("baseMdf2") or "")
-            if (not cur.lower().startswith(ps.TEMP_DIR.lower() + "/")
-                    and reg_base != cur):
-                self._rb_say("base 校正为原 mdf2: %s" % cur)
-                base = cur
-                ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=edit)
-                ps.save_index(root, idx_doc, log=self._rb_say)
-        elif cand:
-            self._rb_say("登记的副本已丢失，重新生成")
-
-        if edit is None:
-            if obj is not None:
-                pick = self._rb_ask_which(idx_doc, mh, dh, base)
-                if pick is None:
-                    raise RuntimeError("已取消")
-                if pick != "__new__":
-                    self._rb_apply_iso(ent, pick)
-                    ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
-                    ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=pick)
-                    ps.save_index(root, idx_doc, log=self._rb_say)
-                    return dh
-            elif not self._rb_ask_first(mesh_path, base):
-                raise RuntimeError("已取消")
-            edit = ps.create_edit(root, mh, dh, base, log=self._rb_say)
-            ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
-            ps.upsert_mdf2(idx_doc, mh, dh, base, base, edit_rel=edit)
+        # 从**真实原 mdf2** 进来的，base 以它为准（否则重置会回到临时副本）
+        reg = ps.get_mdf2(idx_doc, mh, dh) or {}
+        if (reg and not cur.lower().startswith(ps.TEMP_DIR.lower() + "/")
+                and ps.norm_rel(reg.get("baseMdf2") or "") != cur):
+            self._rb_say("base 校正为原 mdf2: %s" % cur)
+            base = cur
+            ps.upsert_mdf2(idx_doc, mh, dh, base, base)
             ps.save_index(root, idx_doc, log=self._rb_say)
 
-        self._rb_apply_iso(ent, edit)
+        # ② 该原 mdf2 已有副本 → 挑一份 / 新建；没有 → 问一次后建「默认」
+        copies = [c for c in ps.list_copies(idx_doc, mh, dh)
+                  if ps.exists_edit(root, c["rel"])]
+        if copies:
+            if len(copies) == 1:
+                c = copies[0]
+            else:
+                c = self._rb_ask_copy(idx_doc, mh, dh, copies)
+                if c is None:
+                    raise RuntimeError("已取消")
+                if c == "__new__":
+                    c = self._rb_new_copy(root, idx_doc, mh, dh)
+                    if c is None:
+                        raise RuntimeError("已取消")
+        else:
+            if not self._rb_ask_first(mesh_path, base):
+                raise RuntimeError("已取消")
+            info = ps.create_copy(root, mh, dh, base, name="默认", log=self._rb_say)
+            ps.upsert_mdf2(idx_doc, mh, dh, base, base)
+            c = ps.upsert_copy(idx_doc, mh, dh,
+                               info["name"], info["rel"], info["rev"])
+            ps.save_index(root, idx_doc, log=self._rb_say)
+
+        self._rb_apply_iso(ent, c["rel"])
+        ps.upsert_object(idx_doc, mh, mesh_path, go, ident.get("matCount") or 0)
+        ps.upsert_mdf2(idx_doc, mh, dh, base, base)
+        ps.upsert_copy(idx_doc, mh, dh, c["name"], c["rel"], c["rev"])
+        ps.save_index(root, idx_doc, log=self._rb_say)
+        ent["copy"] = c["name"]
         return dh
 
     def _rb_iso_end(self, root, ent):
@@ -4493,11 +4548,18 @@ class MaterialSystemPanel(QWidget):
         idx_doc = ps.load_index(root)
 
         hit = self._rb_lookup_by_path(idx_doc, cur)
-        if not hit or hit["kind"] != "edit":
-            raise rb.BridgeError("当前不在工作副本上（%s），无需取消" % cur)
-        mh_hit, dh_hit = hit["mh"], hit["dh"]
-        orig_target = ps.norm_rel(hit["ent"].get("originalMdf2")
-                                  or hit["ent"].get("baseMdf2") or "")
+        if hit and hit["kind"] == "edit":
+            mh_hit, dh_hit, reg = hit["mh"], hit["dh"], hit["ent"]
+        else:
+            # 可能挂在某个副本的旧版本上（离线编译后登记已指向新 rev）
+            parsed = ps.parse_temp_rel(cur)
+            mh_hit = ps.mesh_hash(ident.get("meshPath") or "")
+            dh_hit = parsed["dh"] if parsed and parsed.get("kind") == "edit" else ""
+            reg = ps.get_mdf2(idx_doc, mh_hit, dh_hit) if dh_hit else None
+            if not reg:
+                raise rb.BridgeError("当前不在工作副本上（%s），无需取消" % cur)
+        orig_target = ps.norm_rel(reg.get("originalMdf2")
+                                  or reg.get("baseMdf2") or "")
         if not orig_target:
             raise rb.BridgeError("登记项里没有原始 mdf2 路径，无法重置")
 
@@ -4511,7 +4573,7 @@ class MaterialSystemPanel(QWidget):
             # “看着取消了勾选、参数却没重置”。
             raise rb.BridgeError("重置失败：apply 没有命中对象（addr=%s）" % ent.get("addr"))
         ps.upsert_mdf2(idx_doc, mh_hit, dh_hit, orig_target, orig_target,
-                       orig_rel=orig, active=False)
+                       orig_rel=orig)
         ps.save_index(root, idx_doc, log=self._rb_say)
         self._rb_iso_mdf = None
         # 取消 = 放弃本会话的改动，写盘记录一并丢弃（否则下次保存会把旧值写回去）
@@ -4615,8 +4677,8 @@ class MaterialSystemPanel(QWidget):
         iso.addWidget(self.btn_rb_attrs)
         self.btn_rb_copy = QPushButton("选择副本…")
         self.btn_rb_copy.setToolTip(
-            "选择当前对象挂哪一份 mdf2 副本（编辑副本 / 已重置副本 / 原始 mdf2）。\n"
-            "只列该 mesh 已登记的副本；没有登记时先勾选对象新建。")
+            "选择/新建当前对象这份原 mdf2 下的编辑副本。\n"
+            "列表显示「副本名（版本）」，只看同一个原 mdf2；取消勾选才是回到原始状态。")
         self.btn_rb_copy.clicked.connect(self._rb_pick_copy)
         iso.addWidget(self.btn_rb_copy)
         v.addLayout(iso)
@@ -4682,8 +4744,8 @@ class MaterialSystemPanel(QWidget):
         hint = QLabel("勾选列表里某个对象 = 给它建一份 mdf2 工作副本（不改原文件）并实时改参；"
                       "取消勾选 = 挂回 orig 副本，参数重置（不用重启游戏）。"
                       "每行独立，可同时开多个；点行文字只是切换当前编辑对象。"
-                      "对象被游戏重载时会自动提示重选。"
-                      "工作副本按 meshHash / mdf2Hash 登记在 materialTemp/sessions.json。")
+                      "同一原 mdf2 可建多份具名副本（「选择副本…」切换/新建），"
+                      "存放在 materialTemp/edit/<meshHash>/<mdf2Hash>/<副本名>_v<rev>。")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
@@ -5581,7 +5643,7 @@ class MaterialSystemPanel(QWidget):
     # ---- 编译到预览目录 -------------------------------------------------
     # 产物进游戏缓存目录（目录由服务 /paths 给出，用户不用填游戏路径），并登记到
     # mmatlib 的「母材质库」；「实时预览」页换母材质时**只能用登记过的**。
-    # 文件名带时间戳：引擎按路径缓存资源，同路径改了内容不会重载。
+    # 文件名带版本号（<材质名>_r<rev>）：引擎按路径缓存资源，同路径改了内容不会重载。
     def compile_to_preview(self):
         """编译当前资产 → 写进服务给出的缓存目录 → 登记 → 清理旧产物。"""
         if not rb.alive(timeout=2.0):
@@ -5671,7 +5733,8 @@ class MaterialSystemPanel(QWidget):
     def _apply_compiled_material(self, root, old_item, item, logs):
         """编译出新版母材质后，把所有引用旧产物的预览副本自动切过去。
 
-        返回被更新的副本列表 ``[(old, new, [材质名])]``（没有则空）。
+        返回被更新的副本列表 ``[{mh, dh, name, old, new, rev, materials}]``
+        （没有则空）。
         """
         old_rel = ps.norm_rel((old_item or {}).get("rel") or "")
         new_rel = ps.norm_rel(item.get("rel") or "")
@@ -5691,8 +5754,12 @@ class MaterialSystemPanel(QWidget):
 
         # 先更新登记（无论是否在线，下次勾选都要拿到新路径）
         doc = ps.load_index(root)
-        for old_edit, new_edit, _names in changed:
-            ps.update_edit_paths(doc, old_edit, new_edit)
+        for rec in changed:
+            e = ps.get_mdf2(doc, rec["mh"], rec["dh"]) or {}
+            # 只有原本就是「最近使用」的那份才把 edit 跟着挪；其余副本保持原指向
+            was_cur = ps.norm_rel(e.get("edit") or "").lower() == rec["old"].lower()
+            ps.upsert_copy(doc, rec["mh"], rec["dh"], rec["name"],
+                           rec["new"], rec["rev"], current=was_cur)
         ps.save_index(root, doc, log=logs.append)
 
         if not self._rb_connected or not self._rb_link_ok:
@@ -5701,17 +5768,28 @@ class MaterialSystemPanel(QWidget):
             return changed
 
         moved = 0
-        for old_edit, new_edit, _names in changed:
-            for addr, go in self._rb_addrs_on(old_edit):
+        failed_old = set()
+        for rec in changed:
+            for addr, go in self._rb_addrs_on(rec["old"]):
                 try:
-                    d = rb.material(go, "apply", mdf=new_edit, addr=addr, keep=True)
+                    d = rb.material(go, "apply", mdf=rec["new"], addr=addr, keep=True)
                     ms = d.get("meshes") or []
                     if d.get("err") or not ms or not ms[0].get("ok"):
                         logs.append("切换失败 %s: %s" % (go, d.get("err") or "?"))
+                        failed_old.add(rec["old"])
                     else:
                         moved += 1
                 except rb.BridgeError as e:
                     logs.append("切换失败 %s: %s" % (go, e))
+                    failed_old.add(rec["old"])
+        # 旧副本已无任何 hold 引用才删（否则游戏下次重载会读不到文件）
+        for rec in changed:
+            if rec["old"] in failed_old:
+                continue
+            try:
+                os.remove(ps.rel_to_abs(root, rec["old"]))
+            except OSError:
+                pass
         logs.append("已自动切换 %d 个对象到新母材质" % moved)
         if moved:
             QTimer.singleShot(600, self._rb_reread_current)
