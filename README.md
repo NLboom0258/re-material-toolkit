@@ -75,7 +75,8 @@ material_toolkit/         底层库 + CLI
   presets/v01100004/      版本预设(骨架/标准银行/描述符等)
   functions/              内置自定义函数库(噪声等;每函数一文件)
   pass_templates/         pass HLSL 模板
-  bin/                    d3dcompiler_47.dll(随仓) / D3D_Shaders.exe + 翻译器(发布包/自编)
+  bin/                    d3dcompiler_47.dll / texconv.dll + licenses/(随仓);
+                          D3D_Shaders.exe + 翻译器(发布包/自编)
 material_studio/          GUI(Material Studio)
 third_party/D3D_Shaders/  改版 3Dmigoto 汇编器源码(仅仓库;GPL-3.0)
 ```
