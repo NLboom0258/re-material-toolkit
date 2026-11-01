@@ -23,7 +23,9 @@ import hashlib
 import os
 import json
 import re
+import shutil
 import sys
+import tempfile
 import time
 from collections import Counter, namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +73,7 @@ from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
 from material_toolkit.lib import tex_file as texlib  # noqa: E402
+from material_toolkit.lib import texconv as texcv  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
 from material_toolkit.lib import mdf2 as mdf2lib  # noqa: E402
@@ -7913,6 +7916,79 @@ class DdsImportDialog(QDialog):
         super().accept()
 
 
+class ImageImportDialog(QDialog):
+    """导入 PNG/TGA/JPG：选目标格式 + 是否生成 mip。
+
+    texconv 先转 DX10 DDS，再由 tex_file 转 DMC5 .tex（Legacy v11）。
+    格式不按槽名自动猜：自定义材质槽名不固定，由用户按贴图用途选。
+    """
+
+    FORMATS = (
+        ("BC7_UNORM", "BC7 线性（推荐，质量最好）"),
+        ("BC7_UNORM_SRGB", "BC7 sRGB（颜色贴图）"),
+        ("BC1_UNORM", "BC1 线性（体积小，无 / 1bit alpha）"),
+        ("BC1_UNORM_SRGB", "BC1 sRGB（颜色贴图，体积小）"),
+        ("BC3_UNORM", "BC3 线性（带 alpha）"),
+        ("BC3_UNORM_SRGB", "BC3 sRGB（颜色 + alpha）"),
+        ("BC5_UNORM", "BC5 线性（双通道法线）"),
+        ("BC4_UNORM", "BC4 线性（单通道）"),
+        ("R8G8B8A8_UNORM", "RGBA8 线性（无压缩，体积大）"),
+        ("R8G8B8A8_UNORM_SRGB", "RGBA8 sRGB（无压缩，体积大）"),
+    )
+
+    def __init__(self, parent, filename, prefill=""):
+        super().__init__(parent)
+        self.setWindowTitle("导入图片")
+        self.resize(700, 400)
+        self.name = ""
+        self.fmt = "BC7_UNORM"
+        self.mips = True
+
+        v = QVBoxLayout(self)
+        info = QLabel(
+            "文件：%s\n"
+            "将用 texconv 压缩成 DDS，再转成 DMC5 .tex（Legacy v11）。\n"
+            "颜色贴图（BaseColorMap / MatCap）选 sRGB；法线/掩码选线性。\n"
+            "BC 压缩要求宽高 ≥4 且为 4 的倍数；不满足会在转换后拒绝。" % filename)
+        info.setWordWrap(True)
+        v.addWidget(info)
+
+        form = QFormLayout()
+        self.ed_name = QLineEdit(prefill)
+        self.ed_name.setPlaceholderText("ASCII，最多 48 字符；同名 = 同一张贴图")
+        form.addRow("名称", self.ed_name)
+        self.cmb_fmt = NoWheelComboBox()
+        for fmt, label in self.FORMATS:
+            self.cmb_fmt.addItem("%s — %s" % (fmt, label), fmt)
+        form.addRow("目标格式", self.cmb_fmt)
+        self.cb_mips = QCheckBox("生成完整 mip 链（推荐）")
+        self.cb_mips.setChecked(True)
+        form.addRow("", self.cb_mips)
+        v.addLayout(form)
+
+        tip = QLabel("转换在本地完成；2048 大图可能需要几秒。")
+        tip.setStyleSheet("color:#666")
+        v.addWidget(tip)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("导入")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def _ok(self):
+        name = self.ed_name.text().strip()
+        err = ps.texture_name_error(name)
+        if err:
+            QMessageBox.warning(self, "导入图片", err)
+            return
+        self.name = name
+        self.fmt = self.cmb_fmt.currentData()
+        self.mips = self.cb_mips.isChecked()
+        super().accept()
+
+
 class TextureEditDialog(QDialog):
     """当前材质的贴图槽编辑（只改 path，不改槽名）。
 
@@ -7991,12 +8067,18 @@ class TextureEditDialog(QDialog):
     def _import(self, r):
         _s, le = self._rows[r]
         p, _ = QFileDialog.getOpenFileName(
-            self, "导入贴图（复制到 materialTemp/tex）", "",
-            "贴图 (*.tex *.tex.* *.dds);;RE 贴图 (*.tex *.tex.*);;DDS (*.dds);;所有文件 (*)")
+            self, "导入贴图（tex / dds / png 等，复制到 materialTemp/tex）", "",
+            "贴图 (*.tex *.tex.* *.dds *.png *.tga *.jpg *.jpeg *.bmp *.tif *.tiff);;"
+            "RE 贴图 (*.tex *.tex.*);;DDS (*.dds);;"
+            "图片 (*.png *.tga *.jpg *.jpeg *.bmp *.tif *.tiff);;所有文件 (*)")
         if not p:
             return
-        if p.lower().endswith(".dds"):
+        low = p.lower()
+        if low.endswith(".dds"):
             self._import_dds(p, le)
+            return
+        if low.endswith((".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")):
+            self._import_image(p, le)
             return
         base = os.path.basename(p)
         i = base.lower().find(".tex")
@@ -8037,6 +8119,42 @@ class TextureEditDialog(QDialog):
         except Exception as ex:  # noqa: BLE001
             QMessageBox.warning(self, "导入 DDS", str(ex))
             return
+        le.setText(rel)
+
+    def _import_image(self, path, le):
+        """PNG/TGA/JPG → texconv → DX10 DDS → .tex（Legacy v11）。"""
+        if not texcv.available():
+            QMessageBox.warning(
+                self, "导入图片",
+                "缺少 texconv.dll：\n%s\n\n"
+                "把它放到上述路径后再试（MIT 许可，随工具分发）。"
+                % texcv.dll_path())
+            return
+        base = os.path.basename(path)
+        prefill = "".join(c for c in os.path.splitext(base)[0]
+                          if 32 <= ord(c) <= 126).strip()[:48]
+        dlg = ImageImportDialog(self, base, prefill=prefill)
+        if not dlg.exec():
+            return
+        tmp = tempfile.mkdtemp(prefix="mtex_")
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            dds_path = texcv.convert_to_dds(path, dlg.fmt, tmp, mips=dlg.mips)
+            dds = texlib.read_dds(dds_path)
+            errs, _warns = texlib.validate_dds(dds)
+            if errs:
+                raise RuntimeError("\n".join(errs))
+            data = texlib.to_tex_bytes(dds)
+            rel = ps.import_texture_bytes(
+                self._root, data, self._mh, self._dh, dlg.name,
+                suffix=".%d" % texlib.DMC5_TEX_VERSION)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "导入图片", str(ex))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            shutil.rmtree(tmp, ignore_errors=True)
         le.setText(rel)
 
     def _restore(self, r):

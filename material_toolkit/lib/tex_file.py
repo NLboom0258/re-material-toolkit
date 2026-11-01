@@ -82,6 +82,20 @@ def fmt_name(fmt):
     return info[0] if info else ("DXGI_%d" % fmt)
 
 
+def fmt_from_name(name):
+    """DXGI 名称（如 ``BC7_UNORM_SRGB``）→ 数值；未知名称抛 TexError。"""
+    want = (name or "").strip().upper()
+    for fmt, info in _FMT_INFO.items():
+        if info[0].upper() == want:
+            return fmt
+    raise TexError("不支持的 DXGI 格式名：%s" % name)
+
+
+def format_names():
+    """所有支持的 DXGI 名称（供 UI 下拉框）。"""
+    return [info[0] for info in _FMT_INFO.values()]
+
+
 def fmt_label(fmt):
     """``BC7_UNORM_SRGB (99)`` 形式，方便 UI/日志。"""
     return "%s (%d)" % (fmt_name(fmt), fmt)

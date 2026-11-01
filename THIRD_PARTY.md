@@ -36,7 +36,16 @@
   **版本级预设**,用于生成 mmtr。它们**不是**游戏原始资产文件,但**派生自游戏数据**。
 - 说明:随包提供是为保证工具"开箱可用";此数据可按结构重新统计生成,属可替换项。
 
-## 5. 免责声明
+## 5. texconv.dll —— Texconv-Custom-DLL(MIT)
+
+- 位置:`material_toolkit/bin/texconv.dll`(随仓库与发布包);同目录 `THIRD_PARTY_LICENSES.txt`。
+- 来源:https://github.com/matyalatte/Texconv-Custom-DLL —— 把 Microsoft DirectXTex 的 texconv 封装成跨平台 DLL 的项目。
+- 许可:该项目代码为 **MIT**;内置 DirectXTex / DirectX-Headers / DirectXMath 等(MIT)。
+  **分发二进制时必须保留 `THIRD_PARTY_LICENSES.txt`**(已随包放在同目录)。
+- 用途:把 PNG/TGA/JPG 等图片压缩为 DDS(BC1/BC3/BC5/BC7/RGBA8),再由 `tex_file` 转成 DMC5 `.tex`。
+- 缺失该 DLL 时,仅“导入图片”不可用;导入现成 `.tex`/`.dds` 不受影响。
+
+## 6. 免责声明
 
 - 本项目与 Capcom / RE Engine 官方**无任何关联**,非官方、非授权工具。
 - 本项目**不包含**任何游戏原始资产(游戏内的 `.mmtr` / `.mdf2` 等)。
