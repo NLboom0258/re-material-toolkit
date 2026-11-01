@@ -4845,6 +4845,8 @@ class MaterialSystemPanel(QWidget):
             return
         e = ps.get_mdf2(doc, mh, dh) or {}
         default_rel = ps.norm_rel(e.get("originalMdf2") or e.get("baseMdf2") or "")
+        if not default_rel:
+            self._rb_say("⚠ 导出：登记项缺少原 mdf2 路径，请在对话框里手动填写目标路径")
         dlg = ExportDialog(self, info, default_rel,
                            getattr(self, "_rb_export_dir", ""))
         if not dlg.exec():
@@ -5340,7 +5342,13 @@ class MaterialSystemPanel(QWidget):
         if hit:
             mh, dh = hit["mh"], hit["dh"]
             reg = hit["ent"]
-            base = ps.norm_rel(reg.get("originalMdf2") or reg.get("baseMdf2") or cur)
+            base = ps.norm_rel(reg.get("originalMdf2") or reg.get("baseMdf2") or "")
+            if not base:
+                # 登记损坏（sessions.json 被手改/旧数据）才会到这里：明确报警，
+                # 否则“重置”会把当前副本当成基准，看起来正常但回不到原版。
+                self._rb_say("⚠ 登记项缺少原 mdf2 路径（sessions.json 异常）；"
+                             "重置将无法回到真正的原始 mdf2，请从原始 mdf2 重新勾选一次")
+                base = cur
             self._rb_say("已重置过（挂在 orig 副本上），从原始 mdf2 重新开始")
         else:
             if cur.lower().startswith(ps.TEMP_DIR.lower() + "/"):
