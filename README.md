@@ -21,6 +21,8 @@
   (`PositionWS / NormalWS / TangentWS / BitangentSign / UV0 / UV1`),即法线、切线、UV 都能改。
 - **深度族**:近距渐隐 / 防穿模(`discard`)。
 - **GUI(Material Studio)**:多标签编辑 + 编辑器内查找(Ctrl+F)+ 实时编译校验;CLI 供脚本/批处理。
+- **实时预览(REF 桥)**:勾选游戏内对象 → 命名 mdf2 工作副本 → 实时调参 / 换母材质 / 贴图槽编辑;
+  贴图支持导入 `.tex`、`.dds` 和 PNG/TGA/JPG(texconv 压缩);当前副本可导出为 mod 目录/zip。
 
 ## 快速开始
 
@@ -29,8 +31,8 @@
 1. 到 **Releases** 下载 `re-material-toolkit-<版本>.zip`,解压。
 2. 安装 Python 依赖:`pip install -r requirements.txt`(需要 Python 3.10+)。
 3. 双击 `run.bat`(或 `python run.py`)启动 GUI。
-   - 发布包已内置 `material_toolkit/bin/` 下的 `D3D_Shaders.exe`、`d3dcompiler_47.dll`,
-     以及可选的 `hlsl_blend_dxbc_translator.exe`。
+   - 发布包已内置 `material_toolkit/bin/` 下的 `D3D_Shaders.exe`、`d3dcompiler_47.dll`、
+     `texconv.dll`(图片导入用),以及可选的 `hlsl_blend_dxbc_translator.exe`。
 
 ### 方式 B:从源码运行(仓库)
 
@@ -38,7 +40,7 @@
 2. **准备 `D3D_Shaders.exe`**(汇编器):本仓库只含其**源码**(`third_party/D3D_Shaders/`),
    需自行编译;或直接取发布包里的 exe。编译后用 MSBuild 产出 `Release|x64` 的 `D3D_Shaders.exe`,
    放到 `material_toolkit/bin/`(或用环境变量 `D3D_SHADERS_EXE` 指定路径)。
-   - `d3dcompiler_47.dll` 已随仓库(`material_toolkit/bin/`),无需另行准备。
+   - `d3dcompiler_47.dll` / `texconv.dll` 已随仓库(`material_toolkit/bin/`),无需另行准备。
 3. `python run.py` 启动 GUI。
 
 > 只 clone 仓库、不编译 exe 时:除"汇编/反汇编(D3D_Shaders)"外的多数功能(结构检视、
@@ -48,7 +50,7 @@
 
 - **Windows**(依赖 `D3DCompile`/`D3DReflect` 与 D3D_Shaders)。
 - Python **3.10+**;`PySide6`(见 `requirements.txt`)。
-- `d3dcompiler_47.dll`(随仓)、`D3D_Shaders.exe`(发布包内置 / 自行编译);可选混合翻译器(发布包内置)。
+- `d3dcompiler_47.dll`(随仓)、`texconv.dll`(随仓,MIT)、`D3D_Shaders.exe`(发布包内置 / 自行编译);可选混合翻译器(发布包内置)。
 
 ## 可选的"混合翻译器"
 

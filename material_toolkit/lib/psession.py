@@ -290,6 +290,29 @@ def managed_texture_exists(game_root, tex_rel):
     return False
 
 
+def tex_abs(game_root, tex_rel):
+    """管理区贴图的**物理路径**（兼容 ``.tex`` / ``.tex.<ver>``）；找不到返回 None。"""
+    rel = norm_rel(tex_rel)
+    low = rel.lower()
+    if not low.startswith(TEMP_DIR.lower() + "/"):
+        return None
+    p = os.path.join(temp_root(game_root), rel[len(TEMP_DIR) + 1:].replace("/", os.sep))
+    if os.path.isfile(p):
+        return p
+    d, fn = os.path.split(p)
+    if not os.path.isdir(d):
+        return None
+    stem = fn[:-4] if fn.lower().endswith(".tex") else fn
+    hits = []
+    for n in os.listdir(d):
+        nl = n.lower()
+        if nl == fn.lower():
+            return os.path.join(d, n)
+        if nl.startswith(stem.lower() + ".") and nl.rsplit(".", 1)[-1].isdigit():
+            hits.append(os.path.join(d, n))
+    return sorted(hits)[-1] if hits else None
+
+
 def delete_unused_texture_revs(game_root, mh, dh, name, log=None):
     """删除该管理区里该名字的旧 rev 文件（只删已无副本引用的）。"""
     doc = load_index(game_root)

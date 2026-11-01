@@ -74,6 +74,7 @@ from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
 from material_toolkit.lib import tex_file as texlib  # noqa: E402
 from material_toolkit.lib import texconv as texcv  # noqa: E402
+from material_toolkit.lib import exporter as exp  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
 from material_toolkit.lib import mdf2 as mdf2lib  # noqa: E402
@@ -92,7 +93,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMenu, QMessageBox,
-    QPlainTextEdit,
+    QPlainTextEdit, QToolButton,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTabBar, QTabWidget, QTableWidget, QTableWidgetItem,
     QTextEdit, QTreeWidget,
@@ -3402,8 +3403,8 @@ class MaterialSystemPanel(QWidget):
     def _rb_set_ops_enabled(self, on):
         """断开时禁用整块操作区（列表 / 参数表 / 按钮）。"""
         for name in ("lst_rb", "cmb_rb_mat", "ed_rb_filter", "btn_rb_refresh",
-                     "btn_rb_save", "btn_rb_attrs", "btn_rb_tex", "btn_rb_texm",
-                     "btn_rb_copy", "btn_rb_manage", "btn_rb_mmat"):
+                     "btn_rb_save", "btn_rb_attrs", "btn_rb_tex", "btn_rb_copy",
+                     "btn_rb_mgmt", "btn_rb_exp"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(on)
@@ -4833,6 +4834,95 @@ class MaterialSystemPanel(QWidget):
         QTimer.singleShot(600, self._rb_update_mdf_label)
         QTimer.singleShot(600, self._rb_reread_current)
 
+    def _rb_export_mod(self):
+        """当前副本 → mod 目录结构（mdf2 + 依赖的 mmtr/贴图，可选 zip）。"""
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            self._rb_say("导出：先勾选要导出的对象（需要工作副本）")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("导出：游戏根目录未就绪（连接服务后自动获取）")
+            return
+        doc = ps.load_index(root)
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent["prev"]
+        c = self._rb_copy_of(doc, mh, dh, ent)
+        if not c:
+            self._rb_say("导出：找不到当前对象的副本登记")
+            return
+        try:
+            info = exp.collect(root, c["rel"])
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("导出：%s" % ex)
+            QMessageBox.warning(self, "导出", str(ex))
+            return
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        default_rel = ps.norm_rel(e.get("originalMdf2") or e.get("baseMdf2") or "")
+        dlg = ExportDialog(self, info, default_rel,
+                           getattr(self, "_rb_export_dir", ""))
+        if not dlg.exec():
+            return
+        self._rb_export_dir = dlg.out_dir
+        try:
+            r = exp.export(root, c["rel"], dlg.out_dir, dlg.mdf2_rel,
+                           include_mmtr=dlg.include_mmtr, include_tex=dlg.include_tex,
+                           make_zip=dlg.make_zip, log=self._rb_say)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("导出失败：%s" % ex)
+            QMessageBox.warning(self, "导出", str(ex))
+            return
+        total = sum(f["size"] for f in r["files"])
+        msg = "已导出 %d 个文件（%.1f MB）到：\n%s" % (
+            len(r["files"]), total / 1048576.0, r["out_dir"])
+        if r["zip"]:
+            msg += "\n\nzip：%s" % r["zip"]
+        self._rb_say(msg.replace("\n", "  "))
+        QMessageBox.information(self, "导出", msg)
+
+    def _rb_export_mdf2(self):
+        """只导出当前副本的 mdf2 单文件（不含依赖）。"""
+        ent = self._rb_cur_ent()
+        if ent is None or not ent.get("prev"):
+            self._rb_say("导出：先勾选要导出的对象（需要工作副本）")
+            return
+        root = self._rb_root()
+        if not root:
+            self._rb_say("导出：游戏根目录未就绪（连接服务后自动获取）")
+            return
+        doc = ps.load_index(root)
+        mh = ps.mesh_hash(ent.get("meshPath") or "")
+        dh = ent["prev"]
+        c = self._rb_copy_of(doc, mh, dh, ent)
+        if not c:
+            self._rb_say("导出：找不到当前对象的副本登记")
+            return
+        src = ps.rel_to_abs(root, c["rel"])
+        e = ps.get_mdf2(doc, mh, dh) or {}
+        base = os.path.basename(ps.norm_rel(e.get("originalMdf2") or e.get("baseMdf2") or ""))
+        if not base:
+            base = "%s_v%d.mdf2" % (c["name"], c["rev"])
+        default = os.path.join(getattr(self, "_rb_export_dir", "") or os.path.expanduser("~"),
+                               base + ps.MDF2_EXT)
+        p, _ = QFileDialog.getSaveFileName(self, "导出 mdf2", default,
+                                           "mdf2 (*.mdf2.10);;所有文件 (*)")
+        if not p:
+            return
+        low = p.lower()
+        if low.endswith(".mdf2"):
+            p += ps.MDF2_EXT
+        elif not low.endswith(".mdf2" + ps.MDF2_EXT):
+            p += ".mdf2" + ps.MDF2_EXT
+        try:
+            os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+            shutil.copy2(src, p)
+        except Exception as ex:  # noqa: BLE001
+            self._rb_say("导出 mdf2 失败：%s" % ex)
+            QMessageBox.warning(self, "导出 mdf2", str(ex))
+            return
+        self._rb_export_dir = os.path.dirname(p)
+        self._rb_say("已导出 mdf2：%s" % p)
+
     def _rb_manage_copy(self):
         """管理当前 mesh 的副本：重命名 / 删除（都只对未使用副本）。
 
@@ -5514,31 +5604,32 @@ class MaterialSystemPanel(QWidget):
             "新贴图首次加载在游戏暂停时同样会延迟（恢复后生效）。")
         self.btn_rb_tex.clicked.connect(self._rb_edit_textures)
         iso.addWidget(self.btn_rb_tex)
-        self.btn_rb_texm = QPushButton("管理贴图…")
-        self.btn_rb_texm.setToolTip(
-            "当前 mesh + 原 mdf2 管理区的导入贴图：删除 / 重命名。\n"
-            "重命名会联动同管理区的所有副本（改名 + 重指 + 生成新副本）。\n"
-            "删除只允许对未被任何副本引用的名字。")
-        self.btn_rb_texm.clicked.connect(self._rb_manage_textures)
-        iso.addWidget(self.btn_rb_texm)
         self.btn_rb_copy = QPushButton("选择副本…")
         self.btn_rb_copy.setToolTip(
             "选择/新建当前 mesh 可用的副本（跨该 mesh 用到的所有原 mdf2）。\n"
             "每行显示「副本名（版本）· 原 mdf2 路径」；取消勾选才是回到原始状态。")
         self.btn_rb_copy.clicked.connect(self._rb_pick_copy)
         iso.addWidget(self.btn_rb_copy)
-        self.btn_rb_manage = QPushButton("管理副本…")
-        self.btn_rb_manage.setToolTip(
-            "重命名 / 删除当前 mesh 下的副本（不可恢复）。\n"
-            "标「使用中」的副本（本工具挂着 / 游戏仍保持）不能操作。")
-        self.btn_rb_manage.clicked.connect(self._rb_manage_copy)
-        iso.addWidget(self.btn_rb_manage)
-        self.btn_rb_mmat = QPushButton("管理母材质…")
-        self.btn_rb_mmat.setToolTip(
-            "列出工具编译的全部母材质产物（含旧版本），删除未被副本引用的。\n"
-            "删除「当前登记」的版本会同时从材质库移除（之后可重新编译登记）。")
-        self.btn_rb_mmat.clicked.connect(self._rb_manage_materials)
-        iso.addWidget(self.btn_rb_mmat)
+        # 管理类收进下拉菜单，给导出腾位置
+        self.btn_rb_mgmt = QToolButton()
+        self.btn_rb_mgmt.setText("管理")
+        self.btn_rb_mgmt.setPopupMode(QToolButton.InstantPopup)
+        self.btn_rb_mgmt.setToolTip("管理副本 / 贴图 / 母材质（删除都在这里，不可恢复）")
+        mg = QMenu(self.btn_rb_mgmt)
+        mg.addAction("管理副本…", self._rb_manage_copy)
+        mg.addAction("管理贴图…", self._rb_manage_textures)
+        mg.addAction("管理母材质…", self._rb_manage_materials)
+        self.btn_rb_mgmt.setMenu(mg)
+        iso.addWidget(self.btn_rb_mgmt)
+        self.btn_rb_exp = QToolButton()
+        self.btn_rb_exp.setText("导出")
+        self.btn_rb_exp.setPopupMode(QToolButton.InstantPopup)
+        self.btn_rb_exp.setToolTip("把当前副本导出为 mod 结构（mdf2 + 依赖的 mmtr/贴图）")
+        ex = QMenu(self.btn_rb_exp)
+        ex.addAction("导出 mod 包…", self._rb_export_mod)
+        ex.addAction("导出 mdf2…", self._rb_export_mdf2)
+        self.btn_rb_exp.setMenu(ex)
+        iso.addWidget(self.btn_rb_exp)
         v.addLayout(iso)
 
         f = QHBoxLayout()
@@ -7986,6 +8077,122 @@ class ImageImportDialog(QDialog):
         self.name = name
         self.fmt = self.cmb_fmt.currentData()
         self.mips = self.cb_mips.isChecked()
+        super().accept()
+
+
+class ExportDialog(QDialog):
+    """导出当前副本为 mod 结构（natives/<subdir> + materialTemp 依赖）。
+
+    info 来自 ``exporter.collect``；本对话框只收集参数，写盘由调用方做。
+    """
+
+    def __init__(self, parent, info, default_mdf2_rel, default_out=""):
+        super().__init__(parent)
+        self.setWindowTitle("导出 mod 包")
+        self.resize(900, 560)
+        self.out_dir = default_out
+        self.mdf2_rel = default_mdf2_rel
+        self.include_mmtr = bool(info["mmtr"])
+        self.include_tex = bool(info["tex"])
+        self.make_zip = False
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "导出为 mod 目录结构（相对输出目录）：\n"
+            "  natives/%s/<mdf2 路径>.10\n"
+            "  natives/%s/materialTemp/mmtr/…\n"
+            "  natives/%s/materialTemp/tex/…"
+            % (ps.NATIVES_SUBDIR, ps.NATIVES_SUBDIR, ps.NATIVES_SUBDIR)))
+
+        form = QFormLayout()
+        row = QHBoxLayout()
+        self.ed_out = QLineEdit(default_out)
+        self.ed_out.setPlaceholderText("选择一个空目录（或已有 mod 目录）")
+        row.addWidget(self.ed_out, 1)
+        b = QPushButton("浏览…")
+        b.clicked.connect(self._browse)
+        row.addWidget(b)
+        form.addRow("输出目录", row)
+        self.ed_mdf2 = QLineEdit(default_mdf2_rel)
+        self.ed_mdf2.setPlaceholderText(
+            "相对 natives/%s 的路径，如 character/player/x.mdf2" % ps.NATIVES_SUBDIR)
+        form.addRow("mdf2 相对路径", self.ed_mdf2)
+        v.addLayout(form)
+
+        opts = QHBoxLayout()
+        self.cb_mmtr = QCheckBox("包含母材质（%d）" % len(info["mmtr"]))
+        self.cb_mmtr.setChecked(self.include_mmtr)
+        self.cb_mmtr.setEnabled(bool(info["mmtr"]))
+        self.cb_tex = QCheckBox("包含导入贴图（%d）" % len(info["tex"]))
+        self.cb_tex.setChecked(self.include_tex)
+        self.cb_tex.setEnabled(bool(info["tex"]))
+        self.cb_zip = QCheckBox("同时生成 zip")
+        for w in (self.cb_mmtr, self.cb_tex, self.cb_zip):
+            opts.addWidget(w)
+        opts.addStretch(1)
+        v.addLayout(opts)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["类型", "导出路径（相对 natives）", "大小"])
+        self.tree.setColumnWidth(0, 70)
+        self.tree.setColumnWidth(1, 600)
+        self.tree.setColumnWidth(2, 100)
+        self.tree.setAlternatingRowColors(True)
+        v.addWidget(self.tree, 1)
+
+        def add(kind, rel, size, bad=False):
+            it = QTreeWidgetItem([kind, rel, _fmt_bytes(size)])
+            if bad:
+                for c in range(3):
+                    it.setForeground(c, QColor("#b00020"))
+            self.tree.addTopLevelItem(it)
+
+        add("mdf2", "natives/%s/%s%s" % (
+            ps.NATIVES_SUBDIR, exp.norm_mdf2_rel(default_mdf2_rel), ps.MDF2_EXT),
+            os.path.getsize(info["mdf2_abs"]) if os.path.isfile(info["mdf2_abs"]) else 0)
+        for x in info["mmtr"]:
+            add("mmtr", "natives/%s/%s" % (ps.NATIVES_SUBDIR, x["rel_out"]),
+                os.path.getsize(x["path"]))
+        for x in info["tex"]:
+            add("tex", "natives/%s/%s" % (ps.NATIVES_SUBDIR, x["rel_out"]),
+                os.path.getsize(x["path"]))
+        for m in info["missing"]:
+            add(m["kind"], "%s（材质 %s）" % (m["rel"], m["mat"]), 0, bad=True)
+        if info["missing"]:
+            lab = QLabel("⚠ 有 %d 个依赖缺失，导出会失败；先修好这些槽位/文件。"
+                         % len(info["missing"]))
+            lab.setStyleSheet("color:#b00020")
+            v.addWidget(lab)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("导出")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        if info["missing"]:
+            bb.button(QDialogButtonBox.Ok).setEnabled(False)
+        v.addWidget(bb)
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出目录", self.ed_out.text())
+        if d:
+            self.ed_out.setText(d)
+
+    def _ok(self):
+        out = self.ed_out.text().strip()
+        if not out:
+            QMessageBox.warning(self, "导出", "先选择输出目录")
+            return
+        try:
+            rel = exp.norm_mdf2_rel(self.ed_mdf2.text())
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "导出", str(ex))
+            return
+        self.out_dir = out
+        self.mdf2_rel = rel
+        self.include_mmtr = self.cb_mmtr.isChecked()
+        self.include_tex = self.cb_tex.isChecked()
+        self.make_zip = self.cb_zip.isChecked()
         super().accept()
 
 
