@@ -1566,17 +1566,6 @@ class MmtrPanel(QWidget):
         self.refresh_variant()
         self._emit_title()
 
-    def open_mmtr(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "打开 mmtr/SDF", "",
-            "mmtr/SDF (*.mmtr.* *.sdf.*);;mmtr (*.mmtr.*);;SDF (*.sdf.*);;所有文件 (*)")
-        if not p:
-            return
-        if self._container is not None:
-            self._container.open_path(p)      # 容器接管: 每个文件一个新标签页
-        else:
-            self.load_path(p)
-
     def export_mmtr(self):
         if self.data is None:
             return
@@ -3297,9 +3286,6 @@ class MaterialSystemPanel(QWidget):
             stage=_stage, struct_name=_sn, recv=_rc,
             all_params=mimp.all_params(self.asset.inputs), pass_name=pass_name)
         return iface, ka, (rep or {}).get("minput")
-
-    def _effective_iface(self):
-        return self._effective_inputs()[0]
 
     def _funcs_text(self, pass_name, stage):
         """该 pass 要注入的自定义函数定义文本(依赖在前; 分阶段校验, 不通过并抛错)。"""
@@ -8147,8 +8133,11 @@ class ExportDialog(QDialog):
                     it.setForeground(c, QColor("#b00020"))
             self.tree.addTopLevelItem(it)
 
-        add("mdf2", "natives/%s/%s%s" % (
-            ps.NATIVES_SUBDIR, exp.norm_mdf2_rel(default_mdf2_rel), ps.MDF2_EXT),
+        try:
+            _mdf2_out = exp.norm_mdf2_rel(default_mdf2_rel) + ps.MDF2_EXT
+        except ValueError:
+            _mdf2_out = "（未填写）"     # 登记里没有原 mdf2 路径：让用户自己填
+        add("mdf2", "natives/%s/%s" % (ps.NATIVES_SUBDIR, _mdf2_out),
             os.path.getsize(info["mdf2_abs"]) if os.path.isfile(info["mdf2_abs"]) else 0)
         for x in info["mmtr"]:
             add("mmtr", "natives/%s/%s" % (ps.NATIVES_SUBDIR, x["rel_out"]),

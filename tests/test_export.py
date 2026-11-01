@@ -66,6 +66,16 @@ def main():
         "natives/x64/materialTemp/tex/%s/%s/Test_v1.tex.11" % (mh, dh),
     }, names
 
+    # 复用输出目录：目录里已有的旧文件不能进 zip
+    stale = os.path.join(base, "character", "stale.mdf2.10")
+    with open(stale, "wb") as f:
+        f.write(b"OLD")
+    r2 = exporter.export(root, rel_edit, out, "character/x.mdf2",
+                         make_zip=True, zip_name="MyMod2")
+    with zipfile.ZipFile(r2["zip"]) as z:
+        names2 = set(z.namelist())
+    assert "natives/x64/character/stale.mdf2.10" not in names2, names2
+
     # 缺失依赖：删掉贴图后 collect/export 应报错
     os.remove(os.path.join(td, "Test_v1.tex.11"))
     info2 = exporter.collect(root, rel_edit)
@@ -80,6 +90,13 @@ def main():
     assert exporter.norm_mdf2_rel("character/x.mdf2.10") == "character/x.mdf2"
     assert exporter.norm_mdf2_rel("character/x") == "character/x.mdf2"
     assert exporter.norm_mdf2_rel("natives/x64/character/x.mdf2") == "character/x.mdf2"
+    for bad in ("../evil/x.mdf2", "a/../../b.mdf2", "/abs/x.mdf2",
+                "C:/tmp/x.mdf2", ".", ".."):
+        try:
+            exporter.norm_mdf2_rel(bad)
+            raise AssertionError("应当拒绝：%s" % bad)
+        except ValueError:
+            pass
 
     shutil.rmtree(root, ignore_errors=True)
     print("test_export: OK")

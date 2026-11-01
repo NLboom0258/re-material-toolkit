@@ -25,10 +25,20 @@ NATIVES = "natives"
 
 
 def norm_mdf2_rel(rel):
-    """用户填的 mdf2 相对路径 → ``character/.../x.mdf2``（无版本后缀）。"""
-    s = ps.norm_rel(rel or "")
+    """用户填的 mdf2 相对路径 → ``character/.../x.mdf2``（无版本后缀）。
+
+    只接受 ``natives/<subdir>`` 下的相对路径：拒绝空、``..``、绝对路径
+    （否则导出会写到输出目录之外）。
+    """
+    raw = str(rel or "").strip()
+    if raw.startswith(("/", "\\")) or ":" in raw:
+        raise ValueError("mdf2 相对路径必须是相对 natives 的路径：%s" % raw)
+    s = ps.norm_rel(raw)
     if not s:
         raise ValueError("mdf2 相对路径为空")
+    parts = [x for x in s.split("/") if x]
+    if not parts or any(x in (".", "..") for x in parts):
+        raise ValueError("mdf2 相对路径不能包含 . / ..：%s" % s)
     low = s.lower()
     if low.endswith(ps.MDF2_EXT):
         s = s[: -len(ps.MDF2_EXT)]
@@ -138,11 +148,15 @@ def export(game_root, edit_rel, out_dir, mdf2_rel, include_mmtr=True,
         if not nm.lower().endswith(".zip"):
             nm += ".zip"
         zip_path = os.path.join(out_dir, nm)
+        # 只打包本次导出的文件：复用输出目录时，不能把以前导出的旧内容一起塞进来
+        # （旧 mdf2/旧贴图进了包会被游戏加载，等于改了别的东西）。
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for d, _dirs, fs in os.walk(os.path.join(out_dir, NATIVES)):
-                for name in fs:
-                    p = os.path.join(d, name)
-                    z.write(p, os.path.relpath(p, out_dir).replace("\\", "/"))
+            for f in files:
+                p = f["path"]
+                if not os.path.isfile(p):
+                    continue
+                z.write(p, "%s/%s/%s" % (NATIVES, ps.NATIVES_SUBDIR,
+                                         f["rel"].replace("\\", "/")))
         if log:
             log("已生成 %s" % zip_path)
 
