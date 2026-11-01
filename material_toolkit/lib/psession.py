@@ -212,6 +212,27 @@ def import_texture(game_root, src_abs, mh, dh, name):
     return "%s/%s/%s/%s/%s.tex" % (TEMP_DIR, TEX_DIR, mh, dh, stem)
 
 
+def import_texture_bytes(game_root, data, mh, dh, name, suffix=""):
+    """把**已转换好的** .tex 字节写进该管理区（``<name>_v<rev>.tex<suffix>``）。
+
+    给 DDS → tex 转换用；``suffix`` 是资源版本后缀（DMC5 = ``.11``），
+    写进 mdf2 的逻辑路径不带它。同名再次导入 → rev+1。
+    """
+    err = texture_name_error(name)
+    if err:
+        raise ValueError(err)
+    if not data:
+        raise ValueError("贴图数据为空")
+    rev = next_tex_rev(game_root, mh, dh, name)
+    stem = "%s_v%d" % (name, rev)
+    dst_dir = tex_area_dir(game_root, mh, dh)
+    os.makedirs(dst_dir, exist_ok=True)
+    with open(os.path.join(dst_dir, stem + ".tex" + suffix), "wb") as f:
+        f.write(data)
+    return "%s/%s/%s/%s/%s.tex" % (TEMP_DIR, TEX_DIR, mh, dh, stem)
+
+
+
 def parse_tex_rel(rel):
     """``materialTemp/tex/<mh>/<dh>/<name>_v<rev>.tex`` → dict；不匹配返回 None。"""
     s = norm_rel(rel)

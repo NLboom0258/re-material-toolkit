@@ -70,6 +70,7 @@ from material_toolkit.lib import material_inputs_model as mimp  # noqa: E402
 from material_toolkit.lib import custom_functions as cfun  # noqa: E402
 from material_toolkit.lib import material_instance as minst  # noqa: E402
 from material_toolkit.lib import rbridge as rb  # noqa: E402
+from material_toolkit.lib import tex_file as texlib  # noqa: E402
 from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
 from material_toolkit.lib import mdf2 as mdf2lib  # noqa: E402
@@ -7837,6 +7838,81 @@ class TexturePickerDialog(QDialog):
         return it.text() if it else ""
 
 
+class DdsImportDialog(QDialog):
+    """导入 DDS：显示源信息 + 命名 + 颜色空间（保持 / 线性 / sRGB）。
+
+    DDS 的 DXGI 格式已带/不带 sRGB 标记；这里只改标记（不重编码数据），
+    由用户自己决定，不按槽名自动猜（自定义材质的槽名并不固定）。
+    结果：``name`` + ``srgb``（None=保持，True/False=切换）。
+    """
+
+    def __init__(self, parent, filename, dds, prefill=""):
+        super().__init__(parent)
+        self.setWindowTitle("导入 DDS")
+        self.resize(620, 360)
+        self.name = ""
+        self.srgb = None
+        fmt = dds["dxgi_format"]
+        errs, warns = texlib.validate_dds(dds)
+
+        v = QVBoxLayout(self)
+        info = QLabel(
+            "文件：%s\n尺寸：%d × %d，mip %d 级\n格式：%s（%s）"
+            % (filename, dds["width"], dds["height"], dds["mip_count"],
+               texlib.fmt_label(fmt),
+               "sRGB" if texlib.is_srgb(fmt) else "线性"))
+        v.addWidget(info)
+
+        form = QFormLayout()
+        self.ed_name = QLineEdit(prefill)
+        self.ed_name.setPlaceholderText("ASCII，最多 48 字符；同名 = 同一张贴图")
+        form.addRow("名称", self.ed_name)
+        self.cmb_space = NoWheelComboBox()
+        self.cmb_space.addItem("保持源格式（%s）" % texlib.fmt_name(fmt), None)
+        if texlib.has_srgb_variant(fmt):
+            want_srgb = not texlib.is_srgb(fmt)
+            other = texlib.with_srgb(fmt, want_srgb)
+            self.cmb_space.addItem(
+                "按 %s 导入（%s）" % ("sRGB" if want_srgb else "线性",
+                                     texlib.fmt_name(other)), want_srgb)
+        self.cmb_space.setToolTip(
+            "只改 .tex 里的 DXGI 格式标记，不重新编码像素数据。\n"
+            "颜色贴图（BaseColorMap / MatCap）一般用 sRGB；法线/掩码用线性。\n"
+            "BC4/BC5/BC6H 没有 sRGB 变体，只能保持源格式。")
+        form.addRow("颜色空间", self.cmb_space)
+        v.addLayout(form)
+
+        if warns:
+            w = QLabel("⚠ " + "\n⚠ ".join(warns))
+            w.setWordWrap(True)
+            w.setStyleSheet("color:#b26a00")
+            v.addWidget(w)
+        if errs:
+            e = QLabel("✖ " + "\n✖ ".join(errs))
+            e.setWordWrap(True)
+            e.setStyleSheet("color:#b00020")
+            v.addWidget(e)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("导入")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        if errs:
+            bb.button(QDialogButtonBox.Ok).setEnabled(False)
+        v.addWidget(bb)
+
+    def _ok(self):
+        name = self.ed_name.text().strip()
+        err = ps.texture_name_error(name)
+        if err:
+            QMessageBox.warning(self, "导入 DDS", err)
+            return
+        self.name = name
+        self.srgb = self.cmb_space.currentData()
+        super().accept()
+
+
 class TextureEditDialog(QDialog):
     """当前材质的贴图槽编辑（只改 path，不改槽名）。
 
@@ -7915,9 +7991,12 @@ class TextureEditDialog(QDialog):
     def _import(self, r):
         _s, le = self._rows[r]
         p, _ = QFileDialog.getOpenFileName(
-            self, "导入 .tex（复制到 materialTemp/tex）", "",
-            "RE 贴图 (*.tex *.tex.*);;所有文件 (*)")
+            self, "导入贴图（复制到 materialTemp/tex）", "",
+            "贴图 (*.tex *.tex.* *.dds);;RE 贴图 (*.tex *.tex.*);;DDS (*.dds);;所有文件 (*)")
         if not p:
+            return
+        if p.lower().endswith(".dds"):
+            self._import_dds(p, le)
             return
         base = os.path.basename(p)
         i = base.lower().find(".tex")
@@ -7933,6 +8012,30 @@ class TextureEditDialog(QDialog):
                                     name.strip())
         except Exception as ex:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(ex))
+            return
+        le.setText(rel)
+
+    def _import_dds(self, path, le):
+        """DDS → .tex（Legacy v11）→ 管理区；颜色空间由用户在对话框里选。"""
+        try:
+            dds = texlib.read_dds(path)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "导入 DDS", str(ex))
+            return
+        base = os.path.basename(path)
+        prefill = "".join(c for c in os.path.splitext(base)[0]
+                          if 32 <= ord(c) <= 126).strip()[:48]
+        dlg = DdsImportDialog(self, base, dds, prefill=prefill)
+        if not dlg.exec():
+            return
+        try:
+            data = texlib.to_tex_bytes(dds, version=texlib.DMC5_TEX_VERSION,
+                                       srgb=dlg.srgb)
+            rel = ps.import_texture_bytes(
+                self._root, data, self._mh, self._dh, dlg.name,
+                suffix=".%d" % texlib.DMC5_TEX_VERSION)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "导入 DDS", str(ex))
             return
         le.setText(rel)
 
