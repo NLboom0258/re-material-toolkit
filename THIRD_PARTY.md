@@ -38,10 +38,10 @@
 
 ## 5. texconv.dll —— Texconv-Custom-DLL(MIT)
 
-- 位置:`material_toolkit/bin/texconv.dll`(随仓库与发布包);同目录 `THIRD_PARTY_LICENSES.txt`。
+- 位置:`material_toolkit/bin/texconv.dll`(随仓库与发布包);许可文本在 `material_toolkit/bin/licenses/texconv-THIRD_PARTY_LICENSES.txt`。
 - 来源:https://github.com/matyalatte/Texconv-Custom-DLL —— 把 Microsoft DirectXTex 的 texconv 封装成跨平台 DLL 的项目。
 - 许可:该项目代码为 **MIT**;内置 DirectXTex / DirectX-Headers / DirectXMath 等(MIT)。
-  **分发二进制时必须保留 `THIRD_PARTY_LICENSES.txt`**(已随包放在同目录)。
+  **分发二进制时必须保留 `licenses/texconv-THIRD_PARTY_LICENSES.txt`**(已随包)。
 - 用途:把 PNG/TGA/JPG 等图片压缩为 DDS(BC1/BC3/BC5/BC7/RGBA8),再由 `tex_file` 转成 DMC5 `.tex`。
 - 缺失该 DLL 时,仅“导入图片”不可用;导入现成 `.tex`/`.dds` 不受影响。
 

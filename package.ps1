@@ -13,6 +13,8 @@
     package.ps1, .gitignore, .git*.
   Binaries go to material_toolkit/bin/:
     - d3dcompiler_47.dll           (already committed in the repo)
+    - texconv.dll                  (already committed in the repo; MIT, see bin/licenses/)
+    - licenses/texconv-THIRD_PARTY_LICENSES.txt  (must ship with texconv.dll)
     - D3D_Shaders.exe              (via -D3DShadersExe)
     - hlsl_blend_dxbc_translator.exe  (via -TranslatorExe)
 .NOTES
@@ -95,6 +97,20 @@ if (Test-Path $dll) {
     Copy-Item -LiteralPath $dll -Destination $bin -Force
 } else {
     Write-Warning "missing d3dcompiler_47.dll in repo material_toolkit/bin/."
+}
+
+$texconv = Join-Path $tkSrc "bin\texconv.dll"
+if (Test-Path $texconv) {
+    Copy-Item -LiteralPath $texconv -Destination $bin -Force
+} else {
+    Write-Warning "missing texconv.dll in repo material_toolkit/bin/."
+}
+
+$licDir = Join-Path $tkSrc "bin\licenses"
+if (Test-Path $licDir) {
+    Copy-Tree $licDir (Join-Path $bin "licenses")
+} else {
+    Write-Warning "missing bin/licenses (texconv THIRD_PARTY_LICENSES)."
 }
 
 if ($D3DShadersExe -and (Test-Path -LiteralPath $D3DShadersExe)) {

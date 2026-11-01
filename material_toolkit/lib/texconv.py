@@ -2,7 +2,8 @@
 """texconv.dll（matyalatte/Texconv-Custom-DLL）封装：图片 → DX10 DDS。
 
 DLL 位置：``material_toolkit/bin/texconv.dll``（与 d3dcompiler_47.dll 同目录，
-随仓库/发布包分发；MIT，见 ``bin/THIRD_PARTY_LICENSES.txt`` 与 ``THIRD_PARTY.md``）。
+随仓库/发布包分发；MIT，见 ``bin/licenses/texconv-THIRD_PARTY_LICENSES.txt``
+与 ``THIRD_PARTY.md``）。
 
 C API（与 ReMeshEditor / Modding-Toolkit 用法一致）::
 
