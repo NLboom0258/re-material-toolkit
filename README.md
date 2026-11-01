@@ -46,6 +46,15 @@
 > 只 clone 仓库、不编译 exe 时:除"汇编/反汇编(D3D_Shaders)"外的多数功能(结构检视、
 > HLSL 编译/校验、生成)仍可用;需要汇编功能时再补 exe。
 
+## 实时预览(可选,需要单独的 REF 插件)
+
+「实时预览」页通过一个 REFramework C# 插件与游戏通信(默认端口 8899)。该插件**不在本发布包内**,
+在 Releases 里另下一个 `mmtr_bridge-<版本>.zip`,用 Fluffy Mod Manager 安装(或解压到游戏根)。
+
+前置条件:REFramework **夜间构建 + C# API**——游戏根目录需有
+`reframework/plugins/REFramework.NET.dll` 与 `reframework/plugins/managed/dependencies/`。
+缺 API 时插件不会被加载,工具仍可离线编辑 mdf2/mmtr,只是"连接"不会成功。
+
 ## 依赖
 
 - **Windows**(依赖 `D3DCompile`/`D3DReflect` 与 D3D_Shaders)。
