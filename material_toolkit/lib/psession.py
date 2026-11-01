@@ -98,18 +98,6 @@ def temp_root(game_root):
     return os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR, TEMP_DIR)
 
 
-def rel_to_natives(game_root, abs_path):
-    """绝对路径 → ``materialTemp/...`` 形式的相对路径（给 /material apply 用）。"""
-    nat = os.path.join(os.path.abspath(game_root), "natives", NATIVES_SUBDIR)
-    try:
-        rel = os.path.relpath(abs_path, nat)
-    except ValueError:
-        return None
-    if rel.startswith(".."):
-        return None
-    return rel.replace("\\", "/")
-
-
 def list_managed_textures(game_root, mh, dh):
     """该 (mesh, 原 mdf2) 独立管理区里的导入贴图 → 逻辑路径（同名只保留最高 rev）。
 
@@ -905,24 +893,6 @@ def rel_to_abs(game_root, rel):
 
 
 # ---------------------------------------------------------------- 参数写盘
-
-def read_params(game_root, rel_edit, material=None):
-    """读 mdf2 副本里的参数值 → ``{材质名: {参数名: [float...]}}``。
-
-    注意这是**文件里**的值，不是引擎内存里的当前值（后者要用
-    ``/probe?what=params``）。给 material 时只返回该材质。
-    """
-    src = rel_to_abs(game_root, rel_edit)
-    if not os.path.exists(src):
-        raise RuntimeError("mdf2 副本不存在：%s" % src)
-    doc = mdf2lib.Mdf2.load(src)
-    out = {}
-    for mat in doc.materials:
-        if material and mat.name != material:
-            continue
-        out[mat.name] = {pr.name: list(pr.values) for pr in mat.properties}
-    return out
-
 
 def save_params(game_root, rel_edit, changes, log=None):
     """把 changes **原地**写进同一副本的**新版本路径**，返回

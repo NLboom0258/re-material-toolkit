@@ -89,28 +89,10 @@ def ping(port=None, timeout=5.0):
     return _get("/ping", port=port, timeout=timeout)
 
 
-def api_dump(port=None):
-    """反射出 REFramework.NET 的公开 API（调试用）。"""
-    return _get("/api", port=port)
-
-
 def probe(what, go="", limit=0, port=None, timeout=DEFAULT_TIMEOUT):
     """通用探测入口：what = materials / params / methods / obj ..."""
     return _get("/probe", {"what": what, "go": go, "limit": limit or None},
                 port=port, timeout=timeout)
-
-
-def list_meshes(go="", limit=60, port=None):
-    """列出带材质的 mesh。
-
-    返回 [{i, go, matCount, mats[]}] —— i 是组件索引，go 是 GameObject 名。
-    同一个 go 可能出现多条（一个模型被拆成多个 mesh 组件），调用方自行分组。
-    """
-    d = probe("materials", go=go, limit=limit, port=port)
-    lst = d.get("list") or {}
-    if lst.get("err"):
-        raise BridgeError(lst["err"])
-    return lst.get("meshes") or []
 
 
 def identity(go="", limit=40, names=False, port=None):

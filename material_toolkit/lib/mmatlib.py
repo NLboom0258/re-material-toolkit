@@ -249,18 +249,6 @@ def get_material(game_root, asset_name, doc=None):
     return None
 
 
-def item_by_rel(game_root, logic_path, doc=None):
-    """按 mmtr 逻辑路径反查登记项（mdf2 里存的是路径）。"""
-    low = ps.norm_rel(logic_path or "").lower()
-    if not low:
-        return None
-    doc = doc or load(game_root)
-    for it in (doc.get("materials") or {}).values():
-        if ps.norm_rel(it.get("rel") or "").lower() == low:
-            return it
-    return None
-
-
 def mmtr_from_item(game_root, item):
     """读登记项对应的 mmtr 字节（不存在返回 None）。"""
     if not item:

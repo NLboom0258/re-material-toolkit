@@ -414,13 +414,3 @@ def repoint_edits(game_root, old_mmtr, new_mmtr, new_bytes, log=None,
                 log("自动更新副本: %s → %s（%s）"
                     % (rel, new["rel"], ", ".join(names)))
     return out
-
-
-def write_params(game_root, edit_rel, changes, log=None):
-    """只把参数值写回（不换母材质、不动 flags），产出新路径。
-
-    changes = {"Leg": {"MatCapColor": [5.0, 0.0, 0.0]}, ...}
-    等价于 `apply_attrs` 只传 params，单独开一个入口是为了让调用方语义清楚。
-    """
-    wrapped = {m: {"params": p} for m, p in (changes or {}).items()}
-    return apply_attrs(game_root, edit_rel, wrapped, log=log)

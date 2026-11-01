@@ -91,11 +91,6 @@ def fmt_from_name(name):
     raise TexError("不支持的 DXGI 格式名：%s" % name)
 
 
-def format_names():
-    """所有支持的 DXGI 名称（供 UI 下拉框）。"""
-    return [info[0] for info in _FMT_INFO.values()]
-
-
 def fmt_label(fmt):
     """``BC7_UNORM_SRGB (99)`` 形式，方便 UI/日志。"""
     return "%s (%d)" % (fmt_name(fmt), fmt)
@@ -284,7 +279,7 @@ def write_tex_from_dds(dds_path, out_path, version=DMC5_TEX_VERSION, srgb=None):
     return out_path
 
 
-# ---------------------------------------------------------------- .tex 读取（测试/以后导出）
+# ---------------------------------------------------------------- .tex 读取（测试用）
 
 def parse_tex(data):
     """解析 Legacy .tex → 与 ``parse_dds`` 同形（只支持单 image、2D）。"""
@@ -327,7 +322,7 @@ def read_tex(path):
         return parse_tex(f.read())
 
 
-# ---------------------------------------------------------------- DDS 写出（测试/以后导出）
+# ---------------------------------------------------------------- DDS 写出（测试用）
 
 def to_dds_bytes(dds):
     """把 ``parse_dds`` / ``parse_tex`` 的结果写成 DX10 DDS 字节（单 image 2D）。"""
