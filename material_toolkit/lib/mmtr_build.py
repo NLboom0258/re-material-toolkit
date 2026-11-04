@@ -57,6 +57,47 @@ ROLE_FIELDS = {"PS": (0x00,), "VS": (-0x28, -0x20), "CS": (0x08,)}
 REC_OFF_PS_SIZE = 0x9C
 REC_OFF_VS_SIZE = (0x88, 0x8C)   # +0x88(inputLayout)/+0x8c(createVertexShader) 共用同一 VS 大小
 
+# ---------------------------------------------------------------- 基础程序记录(真实表头 5 条)
+# 真实记录表从 0x10 开始、步长 0x108; 前 5 条是基础程序
+# (PreTransformStaticCS / PreTransformSkinningCS / PreTransformStaticWithNormCS /
+#  PreTransformSkinningWithNormCS / ShadowStatic)。它们**不在**上面的 REC_LO 变体窗口里:
+# 生成时由预设 pt.bin 整段拷入, 只重定位指针。
+BASE_REC_LO, BASE_REC_N, BASE_REC_SIZE = 0x10, 5, 0x108
+# 每个 stage 的 (指针偏移, 大小偏移), 相对记录基址; 顶点有两份指针/两份大小。
+BASE_STAGE_FIELDS = ((0x08, 0xB8), (0x10, 0xBC), (0x18, 0xC0),
+                     (0x20, 0xC4), (0x28, 0xC8), (0x30, 0xCC), (0x38, 0xD0))
+
+
+def normalize_base_records(buf):
+    """前 5 条基础记录的 stage 指针/大小必须成对(要么都有, 要么都为 0)。
+
+    pt.bin 重定位时, 找不到对应 blob 的指针会被写成 0, 但大小字段原样保留 ——
+    于是出现“有大小、没指针”的记录。游戏能容忍(这些是默认/回退记录), 但任何做
+    结构校验的工具都会拒读(REasy: "has incomplete vertex pointer/size")。
+    这里把不成对的一并清零, 保证文件自洽。
+
+    返回 ``(新 buf, [(记录下标, stage 标识)])``。
+    """
+    out = bytearray(buf)
+    fixed = []
+    for i in range(BASE_REC_N):
+        o = BASE_REC_LO + i * BASE_REC_SIZE
+        vp = (_u32(out, o + 0x08), _u32(out, o + 0x10))
+        vs = (_u32(out, o + 0xB8), _u32(out, o + 0xBC))
+        if (not all(vp) or not all(vs)) and (any(vp) or any(vs)):
+            for po in (0x08, 0x10):
+                struct.pack_into("<Q", out, o + po, 0)
+            for so in (0xB8, 0xBC):
+                struct.pack_into("<I", out, o + so, 0)
+            fixed.append((i, "vertex"))
+        for po, so in BASE_STAGE_FIELDS[2:]:
+            ptr, size = _u32(out, o + po), _u32(out, o + so)
+            if (ptr == 0) != (size == 0):
+                struct.pack_into("<Q", out, o + po, 0)
+                struct.pack_into("<I", out, o + so, 0)
+                fixed.append((i, "stage@0x%02x" % po))
+    return bytes(out), fixed
+
 # 绑定指针(cbuffer/sampler/纹理 的描述符+池)与计数 字段 —— 跨"布局"重指时需从 donor 同步
 BINDING_FIELDS = (0x38, 0x40, 0x48, 0x50, 0x58, 0x60)
 COUNT_FIELDS = (0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xC4, 0xC8, 0xCC)

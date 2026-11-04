@@ -347,7 +347,8 @@ def main():
               f"({len(data)} bytes, PS {rep['ps_size']}B, blobs={rep['n_blobs']}, "
               f"组={rep['groups']}, 槽={rep['records']})")
         print(f"  接口贴图={rep['iface_tex'] or '无'}  "
-              f"PT 未解析={len(rep['pt_miss'])} 未映射={len(rep['pt_nomap'])}")
+              f"PT 未解析={len(rep['pt_miss'])} 未映射={len(rep['pt_nomap'])}"
+              + (f"  基础记录修正={len(rep.get('base_fixed') or [])}" if rep.get("base_fixed") else ""))
         _selfcheck_mmtr(data)
     elif cmd == "mat-inputs":
         if "--json" in a:

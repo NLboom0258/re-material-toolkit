@@ -23,7 +23,7 @@ try:
     from . import rdef as R
     from . import mmtr_tail as T
     from . import vs_gen as VG
-    from .mmtr_build import SKELETON_HI, REC_LO, REC_SIZE
+    from .mmtr_build import SKELETON_HI, REC_LO, REC_SIZE, normalize_base_records
     from .hashes import ascii_hash
 except ImportError:  # 允许脚本直接 import
     import os
@@ -37,7 +37,7 @@ except ImportError:  # 允许脚本直接 import
     import rdef as R
     import mmtr_tail as T
     import vs_gen as VG
-    from mmtr_build import SKELETON_HI, REC_LO, REC_SIZE
+    from mmtr_build import SKELETON_HI, REC_LO, REC_SIZE, normalize_base_records
     from hashes import ascii_hash
 
 _UAV_TYPES = (4, 6, 8, 9, 10, 11)   # 不含 7(BYTEADDRESS=SRV)
@@ -865,6 +865,11 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
     # 8) 容器头
     struct.pack_into("<I", head, 0x08, blob_start)
     struct.pack_into("<I", head, 0x10, str_base + str_rel[info.get("str10") or ""])
+
+    # 8a) 前 5 条基础记录的 stage 指针/大小归一化:
+    #     pt.bin 重定位找不到 blob 时只把指针写 0, 大小字段会留下 → "有大小没指针",
+    #     游戏能跑, 但第三方工具(REasy 等)会拒读。详见 mmtr_build.normalize_base_records。
+    head, base_fixed = normalize_base_records(head)
     out = bytes(head) + tail + bytes(blob)
 
     # 8b) 输入边界校验: 我们的 PS 的 ISGN 必须 ⊆ 各材质槽对应 VS 的 OSGN
@@ -893,7 +898,7 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
         "size": len(out), "blob_start": blob_start, "n_blobs": len(off_of),
         "ps_size": len(ps_blob), "records": len(slots),
         "groups": len(order), "str10": info.get("str10"),
-        "pt_miss": pt_miss, "pt_nomap": pt_nomap,
+        "pt_miss": pt_miss, "pt_nomap": pt_nomap, "base_fixed": base_fixed,
         "boundary": boundary, "boundary_pairs": len(_seen),
         "tex_regs": tex_regs, "tex_gap": tex_gap,
         "vs_gen": vs_stat["gen"], "vs_bank": vs_stat["bank"],
