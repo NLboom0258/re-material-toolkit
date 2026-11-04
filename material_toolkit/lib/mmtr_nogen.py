@@ -795,28 +795,35 @@ def build(material_src, pass_name="Deferred", template="deferred_bare", iface=No
             struct.pack_into("<I", head, base + 0x50, pool_base + smp_rel[k] if g["smp"] else 0)
             struct.pack_into("<I", head, base + 0x60, pool_base + tex_rel[k] if g["tex"] else 0)
             struct.pack_into("<I", head, base + 0x70, pool_base + t4_rel[k] if g["t4"] else 0)
+            distinct = (len(g["cb"]) & 0xFF, len(g["smp"]) & 0xFF,
+                        len(g["tex"]) & 0xFF, len(g["t4"]) & 0xFF, 0)
+        else:
+            distinct = (0, 0, 0, 0, 0)
         struct.pack_into("<I", head, base + 0x80, 0)
         nrel = str_rel.get(_variant_name(r))
         struct.pack_into("<I", head, base + 0xD8, (str_base + nrel) if nrel is not None else 0)
-        # 计数(binding 口径)
-        vbo = T.derive_group(s["vs"], None) if s["vs"] else {"cb": [], "smp": [], "tex": []}
-        pbo = T.derive_group(None, s["ps"]) if s["ps"] else {"cb": [], "smp": [], "tex": []}
-        g = groups[k] if k is not None else {"cb": [], "smp": [], "tex": [], "t4": []}
-        a8, nb_ps = len(vbo["cb"]), len(pbo["cb"])
-        nsmp = len(g["smp"])
-        b4, b8 = len(vbo["tex"]), len(pbo["tex"])
-        c6 = len(g["cb"])
-        struct.pack_into("<I", head, base + 0xA8, a8)
-        cur = _u32(head, base + 0xAC)
-        struct.pack_into("<I", head, base + 0xAC, (cur & 0xFFFF0000) | (nb_ps & 0xFFFF))
-        struct.pack_into("<I", head, base + 0xB0, nsmp << 16)
-        struct.pack_into("<I", head, base + 0xB4, b4)
-        struct.pack_into("<I", head, base + 0xB8, b8)
-        struct.pack_into("<I", head, base + 0xA4, a8 + nb_ps + nsmp + b4 + b8)
-        struct.pack_into("<I", head, base + 0xC4, (nsmp << 24) | (c6 << 16))
-        head[base + 0xCC] = len(g["tex"]) & 0xFF
-        head[base + 0xCD] = len(g["t4"]) & 0xFF
-        head[base + 0xCE] = 0
+        # 去重计数(紧随 per-stage 计数区之后): +0xC6 cb / +0xC7 smp / +0xCC srv /
+        # +0xCD uav / +0xCE optional —— 与下面扫描的条数必须是同一来源。
+        head[base + 0xC6], head[base + 0xC7] = distinct[0], distinct[1]
+        head[base + 0xCC], head[base + 0xCD] = distinct[2], distinct[3]
+        head[base + 0xCE] = distinct[4]
+        # per-stage 计数(+0xA8..+0xC5 = 5类×6 stage)直接统计本记录实际指向的描述符
+        # stage 掩码 —— 掩码才是唯一真相。早期把 sampler 一律记到 PS、且漏算 UAV,
+        # 会出现“描述符说 VS 有、计数说没有”/总数对不上的自相矛盾文件(REasy 拒读)。
+        counts = []
+        for kind, dfo in enumerate((0x38, 0x48, 0x58, 0x68, 0x78)):
+            dptr, n = _u32(head, base + dfo), distinct[kind]
+            cnt = [0] * 6
+            if dptr and n and SKELETON_HI <= dptr and dptr + n * 8 <= blob_start:
+                p = dptr - SKELETON_HI
+                for j in range(n):
+                    mask = tail[p + j * 8 + 6]
+                    for st in range(6):
+                        if mask & (1 << st):
+                            cnt[st] += 1
+            counts.extend(cnt)
+        head[base + 0xA8:base + 0xC6] = bytes(counts)
+        struct.pack_into("<I", head, base + 0xA4, sum(counts))
 
     # 7) 程序表(PT): 复制预设 + 重定位指针(blob 按内容映射; desc/池/表 按相对偏移)
     pt = bytearray(P.pt())
