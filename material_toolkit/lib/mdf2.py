@@ -618,7 +618,10 @@ class Mdf2:
         cur_prop_data = 0
         for mat in self.materials:
             mat.prop_data_offset = data_off_base + cur_prop_data
-            mat.prop_block_size = layout_prop_offsets(mat.properties)
+            # 参数块大小按 16 字节对齐 —— 必须与 shader 的 UserMaterial cbuffer 大小一致
+            # (cbuffer 大小总是 16 的倍数; vanilla mdf2 也是如此)。留成紧凑值(如 76)
+            # 会让 REasy 等按 ABI 校验的工具判定 "MDF allocates 76, MMTR declares 80"。
+            mat.prop_block_size = (layout_prop_offsets(mat.properties) + 15) & ~15
             cur_prop_data += mat.prop_block_size
 
         # 组装
