@@ -125,14 +125,18 @@ def patch_param_floats(data: bytearray, mat, changes: dict, strict=True):
 
 
 # 材质着色类型(MaterialShadingType; 权威 = 逆向 DMC5 exe 的 via.render.MaterialShadingType)。
-# ⚠ DMC5 实际只有 11 项(下表); 社区工具(MDF-Manager/RE-Mesh-Editor)列的是"跨游戏并集":
-#   在 PrimitiveMesh(6) 之后多插了 PrimitiveSolidMesh/SpeedTree/GUI/GUIMeshTransparent/
-#   RenderTarget/PostProcess/Primitive*Material/SpineMaterial/ReflectiveTransparent 等
-#   => 对 DMC5 值 >=7 会标错名(DMC5: 7=Water / 8=GUIMesh / 9=ExpensiveTransparent / 10=Forward)。
+# 值取自 exe 的枚举注册代码(RVA 0x2C5EEC0..0x2C5F07A: 每个成员 = `mov r8d, <值>` +
+# `lea rdx, <名字>`) —— 共 12 项, GUI 在 8。
+# ⚠ 早期版本漏了 GUI: 名字池 0x460AE80 里没有独立的 "GUI" 字面量(被链接器合并到
+#   0x45F2B3C), 只按池内顺序推断就会从 8 起整体错位一格(旧表: 8=GUIMesh /
+#   9=ExpensiveTransparent / 10=Forward) ⇒ DMC5 的 `*TransparentEX` master(眼睛/头发)
+#   在 mdf2 里写的 10 是 **ExpensiveTransparent**; 11(Forward) 没有任何 mdf2 使用。
+# 社区工具(MDF-Manager)的 `ShadingType` 是跨游戏并集(Water=8/SpeedTree=9/GUI=10/
+#   GUIMesh=11/GUIMeshTransparent=12/ExpensiveTransparent=13/Forward=14), 不能用于 DMC5。
 SHADING_TYPES = [
     ("Standard", 0), ("Decal", 1), ("DecalWithMetallic", 2), ("DecalNRMR", 3),
-    ("Transparent", 4), ("Distortion", 5), ("PrimitiveMesh", 6),
-    ("Water", 7), ("GUIMesh", 8), ("ExpensiveTransparent", 9), ("Forward", 10),
+    ("Transparent", 4), ("Distortion", 5), ("PrimitiveMesh", 6), ("Water", 7),
+    ("GUI", 8), ("GUIMesh", 9), ("ExpensiveTransparent", 10), ("Forward", 11),
 ]
 SHADING_TYPE_VALUES = dict(SHADING_TYPES)
 
