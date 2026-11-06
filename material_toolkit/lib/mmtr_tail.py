@@ -20,13 +20,16 @@ import struct
 
 try:
     from .hashes import ascii_hash
+    from . import game_profile as _GP
 except ImportError:  # 允许脚本直接 import
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from hashes import ascii_hash
+    import game_profile as _GP
 
 SKELETON_HI = 0x46350
+# DMC5 专用: 骨架/尾段布局按 version 0x01100004 固化; 新游戏(如 MHWS)不要复用本模块。
 
 
 def _u32(b, o):
@@ -95,7 +98,9 @@ class TailModel:
         t = cls()
         blob_start = _u32(data, 8)
         t.blob_start = blob_start
-        rec_lo, rec_n, rec_size = 0x568, (0x46240 - 0x568) // 264, 264
+        # DMC5 旧的 264B 偏移窗口(见 game_profile.SDF_VIEW); 条数 = rows*cols - skip。
+        rec_lo, rec_size = _GP.SDF_VIEW.base, _GP.SDF_VIEW.stride
+        rec_n = _GP.DMC5.n_records - _GP.SDF_VIEW.skip
 
         # 锚点(记录里的绝对指针): +0x40=cbuffer 表条目; +0x38/+0x48/+0x58=描述符数组
         cb_anchor, desc_anchor = [], []

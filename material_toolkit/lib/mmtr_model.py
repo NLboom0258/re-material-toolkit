@@ -32,19 +32,22 @@ import struct
 try:
     from .binding import blob_list, discover_groups, _u32, _u64, _str
     from .mmtr import Mmtr
+    from . import game_profile as _GP
 except ImportError:  # 允许脚本直接 import
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from binding import blob_list, discover_groups, _u32, _u64, _str
     from mmtr import Mmtr
+    import game_profile as _GP
 
 HEADER_MAGIC = b"SDF\0"
 
-# 固定骨架(version 0x01100004)
-PRE_LO, PRE_N, PRE_SIZE = 0x14, 5, 264          # 程序表: [0x14, 0x53C)
-REC_LO, REC_SIZE = 0x568, 264                   # 变体记录基址 / 步长
-REC_HDR_ROWS, REC_HDR_COLS = 0x04, 0x06         # 头部 rows/cols 字段偏移(u16)
-REC_SKIP = 5                                    # 跳过的前 5 条(= PRE_N)
+# 固定骨架(version 0x01100004; DMC5 旧 264B 偏移窗口, 来源 = game_profile.SDF_VIEW)
+_V = _GP.SDF_VIEW
+PRE_LO, PRE_N, PRE_SIZE = 0x14, _V.skip, _V.stride   # 程序表: [0x14, 0x53C)
+REC_LO, REC_SIZE = _V.base, _V.stride                # 变体记录基址 / 步长
+REC_HDR_ROWS, REC_HDR_COLS = 0x04, 0x06              # 头部 rows/cols 字段偏移(u16)
+REC_SKIP = _V.skip                                   # 跳过的前 5 条(= PRE_N)
 # 变体记录区(实测逆清, 2026-10-08):
 #   基址 REC_LO=0x568(= 0x40 + 5*264; 跳过头部 5 条“基础程序”), 步长 264;
 #   条数 = rows*cols - 5。对 mmtr: 4*272-5 = 1083(与原硬编码一致);

@@ -9,10 +9,12 @@ import struct
 
 try:
     from .binding import blob_list
+    from . import game_profile as GP
 except ImportError:
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from binding import blob_list
+    import game_profile as GP
 
 # 阶段 token: 高16位=类型(ASCII 大类; VS/PS 为特殊码), 低16位=版本(0x0500=SM5.0 / 0x0501=SM5.1)。
 _STAGE_TYPE = {0xFFFE: "VS", 0xFFFF: "PS", 0x4753: "GS",
@@ -112,15 +114,16 @@ def type_label(nbytes):
     return {1: "float", 2: "float2", 3: "float3"}.get(n, f"{n}*float")
 
 
-# ---- 程序记录自洽性校验(DMC5/RE Engine 0x108 记录) ----
-# 真实表: 基址 0x10、步长 0x108; 记录内: +0xD4=总 stage 绑定数,
-# +0xD8..0xF5 = 5类(CB/SMP/SRV/UAV/OPT)×6 stage 的计数;
-# +0x68/+0x78/+0x88/+0x98/+0xA8 = 各类绑定描述符表; +0xF6/+0xF7/+0xFC/+0xFD/+0xFE = 各类表条数。
-REC_LO_REAL, REC_SIZE_REAL = 0x10, 0x108
-DESC_PTR_FIELDS = (0x68, 0x78, 0x88, 0x98, 0xA8)
-DESC_COUNT_FIELDS = (0xF6, 0xF7, 0xFC, 0xFD, 0xFE)
-_COUNT_HI = 0xD8 + 30
-_RESOURCE_KIND_NAMES = ("CB", "SMP", "SRV", "UAV", "OPT")
+# ---- 程序记录自洽性校验 ----
+# 真实表布局见 game_profile: 基址/步长/条数按游戏取(DMC5 0x10/0x108/1088,
+# MHWS 0x10/0x110/2395), 记录内字段偏移两者一致:
+#   +0xD4 = 总 stage 绑定数; +0xD8..0xF5 = 5 类(CB/SMP/SRV/UAV/OPT)×6 stage 计数;
+#   +0x68/0x78/0x88/0x98/0xA8 = 各描述符表, +0xF6/0xF7/0xFC/0xFD/0xFE = 各类条数。
+# 下面两个常量保留为 DMC5 默认(兼容旧调用), 实际以 profile 为准。
+REC_LO_REAL, REC_SIZE_REAL = GP.DMC5.rec_base, GP.DMC5.rec_stride
+DESC_PTR_FIELDS = tuple(d.desc_off for d in GP.DMC5.desc_tables)
+DESC_COUNT_FIELDS = tuple(d.count_off for d in GP.DMC5.desc_tables)
+_RESOURCE_KIND_NAMES = tuple(d.label for d in GP.DMC5.desc_tables)
 
 
 def _u64(d, o):
@@ -135,30 +138,33 @@ def _record_name(d, rec, blob_start):
     return d[off:end].decode("latin1", "replace") if end >= 0 else ""
 
 
-def stage_count_mismatches(data):
+def stage_count_mismatches(data, view=None):
     """校验 per-stage 计数是否与描述符 stage 掩码一致(第三方工具/引擎的硬约束)。
 
+    view: `game_profile.MmtrView`; None = 按版本后缀/表形状自动识别
+          (DMC5 / MHWS 已登记, 新版本走步长启发式)。
     返回 [(记录下标, 类别, 程序名, 实际计数, 记录声明)]; 空列表 = 自洽。
     类别 "*" 表示总数(+0xD4)与 30 个计数字节之和不符。
     """
     if len(data) < 16 or data[:4] != b"SDF\x00":
         raise ValueError("not an SDF/mmtr file")
-    n = struct.unpack_from("<H", data, 4)[0] * struct.unpack_from("<H", data, 6)[0]
+    view = view or GP.resolve(data)
     blob_start = _u32(data, 8)   # 写入侧是 <I(高 4 字节保留为 0)
-    table_end = REC_LO_REAL + n * REC_SIZE_REAL
+    table_end = view.table_end
+    hi = view.count_matrix_off + view.count_matrix_len
     bad = []
-    for i in range(n):
-        rec = REC_LO_REAL + i * REC_SIZE_REAL
-        if rec + REC_SIZE_REAL > blob_start:
+    for i in range(view.n_records):
+        rec = view.rec_base + i * view.rec_stride
+        if rec + view.rec_stride > blob_start:
             break
-        counts = data[rec + 0xD8:rec + _COUNT_HI]
+        counts = data[rec + view.count_matrix_off:rec + hi]
         name = _record_name(data, rec, blob_start)
-        total = _u32(data, rec + 0xD4)
+        total = _u32(data, rec + view.count_total_off)
         if total != sum(counts):
             bad.append((i, "*", name, (), (total, sum(counts))))
-        for kind, (dfo, cfo) in enumerate(zip(DESC_PTR_FIELDS, DESC_COUNT_FIELDS)):
+        for kind, d in enumerate(view.desc_tables):
             # 描述符表指针是 u32(与写入侧/rec_field 一致); 低 4 字节之外不能当指针高低位拼。
-            ptr, cnt = _u32(data, rec + dfo), data[rec + cfo]
+            ptr, cnt = _u32(data, rec + d.desc_off), data[rec + d.count_off]
             if not ptr or not cnt:
                 continue
             if not (table_end <= ptr < blob_start) or ptr + cnt * 8 > blob_start:
@@ -171,5 +177,5 @@ def stage_count_mismatches(data):
                         actual[st] += 1
             want = list(counts[kind * 6:(kind + 1) * 6])
             if actual != want:
-                bad.append((i, _RESOURCE_KIND_NAMES[kind], name, tuple(actual), tuple(want)))
+                bad.append((i, d.label, name, tuple(actual), tuple(want)))
     return bad

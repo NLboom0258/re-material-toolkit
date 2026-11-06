@@ -19,10 +19,12 @@ import struct
 
 try:
     from .hashes import ascii_hash
+    from . import game_profile as _GP
 except ImportError:  # 允许脚本直接 import
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from hashes import ascii_hash
+    import game_profile as _GP
 
 TYPE_TEX2D = 0x02
 TYPE_RAW = 0x80
@@ -61,8 +63,9 @@ def blob_offsets(data):
 #   VS(-0x20)/HS(-0x18)/DS(-0x10)/GS(-0x08)/PS(+0x00)/CS(+0x08); 大小字段见 analysis/mmtr_record_fields.md。
 _PROG_SLOTS = ((-0x20, 0x8C), (-0x18, 0x90), (-0x10, 0x94),
                (-0x08, 0x98), (0x00, 0x9C), (0x08, 0xA0))
-# 变体记录区(与 mmtr_model 同约定): 基址 0x568 / 步长 264 / 条数 rows*cols-5。
-_REC_LO, _REC_SIZE, _REC_SKIP = 0x568, 264, 5
+# 变体记录区(与 mmtr_model 同约定, DMC5 旧的 264B 偏移窗口):
+# 基址 0x568 / 步长 264 / 条数 rows*cols-5。布局来源 = game_profile.SDF_VIEW。
+_REC_LO, _REC_SIZE, _REC_SKIP = _GP.SDF_VIEW.base, _GP.SDF_VIEW.stride, _GP.SDF_VIEW.skip
 
 
 def _record_bases(data):
