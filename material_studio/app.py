@@ -50,7 +50,7 @@ from material_toolkit.lib.mmtr_info import (  # noqa: E402
 from material_toolkit.lib import game_profile as GP  # noqa: E402
 from material_toolkit.lib import mmtr_scan as SCAN  # noqa: E402
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
-    extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
+    extract_blob, disassemble_dxbc, disassemble_dxil, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler,
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
@@ -2355,6 +2355,16 @@ class MmtrReadOnlyPanel(QWidget):
         blob_page = QWidget()
         bv = QVBoxLayout(blob_page)
         bv.setContentsMargins(0, 0, 0, 0)
+        rowb = QHBoxLayout()
+        self.btn_blob_info = QPushButton("容器信息")
+        self.btn_blob_dis = QPushButton("反汇编(DXIL)")
+        self.btn_blob_dis.setToolTip(
+            "用 Windows SDK 的 dxc -dumpbin 输出反汇编文本（只读；"
+            "DXIL 无可用汇编器，不能写回）。可用环境变量 DXC_EXE 指定 dxc.exe")
+        rowb.addWidget(self.btn_blob_info)
+        rowb.addWidget(self.btn_blob_dis)
+        rowb.addStretch(1)
+        bv.addLayout(rowb)
         bv.addWidget(self.txt_blob, 1)
         self.tabs.addTab(blob_page, "Blob(shader)")
 
@@ -2369,6 +2379,8 @@ class MmtrReadOnlyPanel(QWidget):
         lay.addWidget(split, 1)
 
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_blob_detail())
+        self.btn_blob_info.clicked.connect(lambda *_: self.refresh_blob_detail())
+        self.btn_blob_dis.clicked.connect(self.disasm_blob)
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
@@ -2513,6 +2525,22 @@ class MmtrReadOnlyPanel(QWidget):
             lines.append("  %04X  %s  %s" % (i, chunk.hex(" "),
                                              "".join(chr(c) if 32 <= c < 127 else "." for c in chunk)))
         self.txt_blob.setPlainText("\n".join(lines))
+
+    def disasm_blob(self):
+        """反汇编选中的 DXIL blob（dxc -dumpbin；只读，不能写回）。"""
+        idx = self.cur_blob()
+        if idx is None or not (0 <= idx < len(self.blobs)):
+            return
+        off, size = self.blobs[idx]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            text = disassemble_dxil(self.data[off:off + size])
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "反汇编(DXIL)", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.txt_blob.setPlainText(text)
 
     def refresh_pool(self):
         vocab = SCAN.name_vocabulary(self.data, self.view, self.records)

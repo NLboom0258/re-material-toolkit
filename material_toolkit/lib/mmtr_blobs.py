@@ -269,6 +269,54 @@ def find_assembler():
         "发布包已内置该 exe; 从源码构建见 README「获取 D3D_Shaders.exe」。")
 
 
+def find_dxc():
+    """定位 dxc.exe（Windows SDK 10 自带；用于 **DXIL 反汇编（只读）**）。
+
+    DXIL(SM6) 没有可用的汇编器（无 D3DAssemble 等价物），所以这里只做
+    `dxc -dumpbin`：输出 LLVM IR + 签名/资源表文本，供查看分析，不能写回。
+    可用环境变量 DXC_EXE 指定。
+    """
+    env = os.environ.get("DXC_EXE")
+    cands = [env] if env else []
+    w = shutil.which("dxc")
+    if w:
+        cands.append(w)
+    kits = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    base = os.path.join(kits, "Windows Kits", "10", "bin")
+    if os.path.isdir(base):
+        for ver in sorted(os.listdir(base), reverse=True):
+            p = os.path.join(base, ver, "x64", "dxc.exe")
+            if os.path.isfile(p):
+                cands.append(p)
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    raise FileNotFoundError(
+        "未找到 dxc.exe（Windows SDK 10 自带）。可安装 SDK 或用环境变量 DXC_EXE 指定。")
+
+
+def disassemble_dxil(blob, timeout=60):
+    """用一个 DXBC/DXIL 容器（或裸 DXIL bitcode）调 `dxc -dumpbin` -> 反汇编文本。
+
+    仅用于查看/分析（DXIL 不可汇编回去）；失败时抛 RuntimeError(带 dxc 的输出)。
+    """
+    dxc = find_dxc()
+    fd, path = tempfile.mkstemp(prefix="mmtr_dxil_", suffix=".dxil")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(bytes(blob))
+        p = subprocess.run([dxc, "-dumpbin", path], capture_output=True, timeout=timeout)
+        if p.returncode != 0:
+            err = (p.stderr or p.stdout or b"").decode("utf-8", "replace")
+            raise RuntimeError(err.strip() or "dxc -dumpbin 失败")
+        return p.stdout.decode("utf-8", "replace")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def _run_exe(exe, args, workdir):
     p = subprocess.run([exe] + args, cwd=workdir, capture_output=True,
                        text=True, timeout=600)
