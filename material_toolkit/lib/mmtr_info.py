@@ -141,10 +141,11 @@ def stage_count_mismatches(data):
     返回 [(记录下标, 类别, 程序名, 实际计数, 记录声明)]; 空列表 = 自洽。
     类别 "*" 表示总数(+0xD4)与 30 个计数字节之和不符。
     """
-    if len(data) < 4 or data[:4] != b"SDF\x00":
+    if len(data) < 16 or data[:4] != b"SDF\x00":
         raise ValueError("not an SDF/mmtr file")
     n = struct.unpack_from("<H", data, 4)[0] * struct.unpack_from("<H", data, 6)[0]
-    blob_start = _u64(data, 8)
+    blob_start = _u32(data, 8)   # 写入侧是 <I(高 4 字节保留为 0)
+    table_end = REC_LO_REAL + n * REC_SIZE_REAL
     bad = []
     for i in range(n):
         rec = REC_LO_REAL + i * REC_SIZE_REAL
@@ -156,8 +157,11 @@ def stage_count_mismatches(data):
         if total != sum(counts):
             bad.append((i, "*", name, (), (total, sum(counts))))
         for kind, (dfo, cfo) in enumerate(zip(DESC_PTR_FIELDS, DESC_COUNT_FIELDS)):
-            ptr, cnt = _u64(data, rec + dfo), data[rec + cfo]
-            if not ptr or not cnt or ptr + cnt * 8 > len(data):
+            # 描述符表指针是 u32(与写入侧/rec_field 一致); 低 4 字节之外不能当指针高低位拼。
+            ptr, cnt = _u32(data, rec + dfo), data[rec + cfo]
+            if not ptr or not cnt:
+                continue
+            if not (table_end <= ptr < blob_start) or ptr + cnt * 8 > blob_start:
                 continue
             actual = [0] * 6
             for j in range(cnt):
