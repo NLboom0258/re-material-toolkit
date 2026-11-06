@@ -2329,18 +2329,16 @@ class MmtrReadOnlyPanel(QWidget):
         btn_copy.clicked.connect(self.export_copy)
         hb.addWidget(btn_copy)
 
-        self.tree_rec = QTreeWidget()
-        self.tree_rec.setHeaderLabels(["#", "技术名", "程序", "CB/SMP/SRV", "PS 字节"])
+        self.tree_blob = QTreeWidget()
+        self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_bind = QTreeWidget()
         self.tree_bind.setHeaderLabels(["类 / 资源名", "类型", "阶段", "槽位"])
         self.tree_group = QTreeWidget()
-        self.tree_group.setHeaderLabels(["表", "描述符", "名称池", "条数"])
+        self.tree_group.setHeaderLabels(["记录 / 表", "描述符", "名称池", "条数"])
         self.tree_pool = QTreeWidget()
         self.tree_pool.setHeaderLabels(["SRV 名", "引用记录数"])
         self.tree_tech = QTreeWidget()
-        self.tree_tech.setHeaderLabels(["技术名", "记录数", "示例记录"])
-        self.tree_blob = QTreeWidget()
-        self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "引用记录", "容器"])
+        self.tree_tech.setHeaderLabels(["pass / 技术 / 程序", "程序 (PS·VS·CS)", "目标"])
         self.txt_blob = QPlainTextEdit()
         self.txt_blob.setReadOnly(True)
         self.txt_blob.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -2357,12 +2355,11 @@ class MmtrReadOnlyPanel(QWidget):
         blob_page = QWidget()
         bv = QVBoxLayout(blob_page)
         bv.setContentsMargins(0, 0, 0, 0)
-        bv.addWidget(self.tree_blob)
         bv.addWidget(self.txt_blob, 1)
         self.tabs.addTab(blob_page, "Blob(shader)")
 
         split = QSplitter(Qt.Horizontal)
-        split.addWidget(self.tree_rec)
+        split.addWidget(self.tree_blob)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
@@ -2371,7 +2368,6 @@ class MmtrReadOnlyPanel(QWidget):
         lay.addLayout(hb)
         lay.addWidget(split, 1)
 
-        self.tree_rec.currentItemChanged.connect(lambda *_: self.refresh_record_detail())
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_blob_detail())
 
     # ---- 打开 / 导出 ----
@@ -2394,10 +2390,10 @@ class MmtrReadOnlyPanel(QWidget):
         self.blobs = SCAN.blob_list(self.data, view, self.records)
         self.usage = SCAN.blob_usage(self.data, view, self.records)
         self.refresh_info()
-        self.refresh_records()
         self.refresh_blobs()
         self.refresh_pool()
         self.refresh_tech()
+        self.refresh_blob_detail()
         self._emit_title()
 
     def export_copy(self):
@@ -2424,82 +2420,86 @@ class MmtrReadOnlyPanel(QWidget):
             "blob 编辑同样暂不可用：内置汇编器只支持 SM5.0，而这里的\n"
             "DXIL 是 SM6+，且每个 blob 后还跟 8 字节运行时缓存键。")
 
-    def refresh_records(self):
-        keep = self.cur_record()
-        self.tree_rec.clear()
-        for e in self.records:
-            progs = []
-            for key, lab in (("vs", "VS"), ("ps", "PS"), ("cs", "CS")):
-                ptr, size = e["stages"].get(key, (0, 0))
-                if ptr:
-                    progs.append("%s:%d" % (lab, size))
-            c = e["desc_counts"]
-            it = QTreeWidgetItem([
-                str(e["index"]), e["name"] or "(空)",
-                " ".join(progs) or "-",
-                "%d/%d/%d" % (c["cb"], c["smp"], c["srv"]),
-                str(e["stages"]["ps"][1] or "")])
-            it.setData(0, Qt.UserRole, e["index"])
-            self.tree_rec.addTopLevelItem(it)
-        fit_columns(self.tree_rec, [0, 1, 2, 3, 4], pad=12, min_w=40, max_w=320)
-        n = self.tree_rec.topLevelItemCount()
-        if n:
-            row = keep if isinstance(keep, int) and 0 <= keep < n else 0
-            self.tree_rec.setCurrentItem(self.tree_rec.topLevelItem(row))
+    def _blob_ref_records(self, off):
+        """blob -> 引用它的记录下标（去重、保序）。"""
+        seen = []
+        for r, _k in self.usage.get(off, []):
+            if r not in seen:
+                seen.append(r)
+        return seen
 
-    def cur_record(self):
-        it = self.tree_rec.currentItem()
-        return it.data(0, Qt.UserRole) if it else None
+    def _record_group_sig(self, e):
+        """记录的 5 张绑定表签名（desc, pool），用来数“组”。"""
+        out = []
+        for d in self.view.desc_tables:
+            out.append((struct.unpack_from("<I", self.data, e["off"] + d.desc_off)[0],
+                        struct.unpack_from("<I", self.data, e["off"] + d.pool_off)[0]))
+        return tuple(out)
 
     def cur_blob(self):
         it = self.tree_blob.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
-    def refresh_record_detail(self):
-        idx = self.cur_record()
-        self.tree_bind.clear()
-        self.tree_group.clear()
-        if idx is None or not (0 <= idx < len(self.records)):
-            return
-        e = self.records[idx]
-        for d in self.view.desc_tables:
-            rows = SCAN.bindings(self.data, self.view, e["off"], d.key)
-            top = QTreeWidgetItem(["%s (%d)" % (d.label, len(rows)), "", "", ""])
-            self.tree_bind.addTopLevelItem(top)
-            for b in rows:
-                top.addChild(QTreeWidgetItem([
-                    b["name"], SCAN.type_label(b["type"]),
-                    SCAN.stage_label(b["stage"]), "%d" % b["slot"]]))
-            top.setExpanded(True)
-            self.tree_group.addTopLevelItem(QTreeWidgetItem([
-                d.label,
-                "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.desc_off)[0],
-                "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.pool_off)[0],
-                "%d" % len(rows)]))
-        fit_columns(self.tree_bind, [0, 1, 2, 3], pad=18, min_w=60, max_w=420)
-        fit_columns(self.tree_group, [0, 1, 2, 3], pad=18, min_w=60, max_w=220)
-
     def refresh_blobs(self):
+        """左栏 = blob 列表（与 DMC5 面板同构：只显示程序类型/大小/组/SRV）。"""
+        keep = self.cur_blob()
+        self._blob_at = {off: i for i, (off, _s) in enumerate(self.blobs)}
         self.tree_blob.clear()
         for i, (off, size) in enumerate(self.blobs):
             usage = self.usage.get(off, [])
             stages = sorted({k.upper() for _r, k in usage})
-            chunks = [c[0] for c in SCAN.blob_chunks(self.data, off, size)]
+            refs = self._blob_ref_records(off)
+            groups = {self._record_group_sig(self.records[r]) for r in refs}
+            srv = max((self.records[r]["desc_counts"]["srv"] for r in refs), default=0)
             it = QTreeWidgetItem([str(i), "+".join(stages) or "-", str(size),
-                                  str(len({r for r, _k in usage})),
-                                  "DXIL" if "DXIL" in chunks else "DXBC"])
+                                  str(len(groups)), str(srv)])
             it.setData(0, Qt.UserRole, i)
             self.tree_blob.addTopLevelItem(it)
         fit_columns(self.tree_blob, [0, 1, 2, 3, 4], pad=12, min_w=40, max_w=200)
-        if self.tree_blob.topLevelItemCount():
-            self.tree_blob.setCurrentItem(self.tree_blob.topLevelItem(0))
+        n = self.tree_blob.topLevelItemCount()
+        if n:
+            row = keep if isinstance(keep, int) and 0 <= keep < n else 0
+            self.tree_blob.setCurrentItem(self.tree_blob.topLevelItem(row))
 
     def refresh_blob_detail(self):
+        """选中 blob：列出引用它的记录组（绑定表）+ 容器 chunk/hex。"""
         idx = self.cur_blob()
+        self.tree_bind.clear()
+        self.tree_group.clear()
         if idx is None or not (0 <= idx < len(self.blobs)):
             self.txt_blob.clear()
             return
         off, size = self.blobs[idx]
+        refs = self._blob_ref_records(off)
+        seen = set()
+        for r in refs:
+            e = self.records[r]
+            sig = self._record_group_sig(e)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            top = QTreeWidgetItem(["%s #%d" % (e["name"] or "(未命名)", r),
+                                   "描述符/池", "", ""])
+            for d in self.view.desc_tables:
+                rows = SCAN.bindings(self.data, self.view, e["off"], d.key)
+                sub = QTreeWidgetItem(["%s (%d)" % (d.label, len(rows)), "", "", ""])
+                top.addChild(sub)
+                for b in rows:
+                    sub.addChild(QTreeWidgetItem([
+                        b["name"], SCAN.type_label(b["type"]),
+                        SCAN.stage_label(b["stage"]), "%d" % b["slot"]]))
+                self.tree_group.addTopLevelItem(QTreeWidgetItem([
+                    "%s #%d / %s" % (e["name"] or "(未命名)", r, d.label),
+                    "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.desc_off)[0],
+                    "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.pool_off)[0],
+                    "%d" % len(rows)]))
+            top.setExpanded(True)
+            self.tree_bind.addTopLevelItem(top)
+            if len(seen) >= 8:      # 同一 blob 可被几十个记录共用，这里只列首几个不同组
+                break
+        fit_columns(self.tree_bind, [0, 1, 2, 3], pad=18, min_w=60, max_w=420)
+        fit_columns(self.tree_group, [0, 1, 2, 3], pad=18, min_w=60, max_w=260)
+
         lines = ["blob %d  off=0x%X  size=%d" % (idx, off, size),
                  "引用: " + ", ".join("#%d/%s" % (r, k.upper())
                                      for r, k in self.usage.get(off, [])[:12])]
@@ -2521,17 +2521,42 @@ class MmtrReadOnlyPanel(QWidget):
             self.tree_pool.addTopLevelItem(QTreeWidgetItem([name, str(n)]))
         fit_columns(self.tree_pool, [0, 1], pad=18, min_w=80, max_w=460)
 
+    @staticmethod
+    def _pass_family(name):
+        """记录名 -> pass 家族（只用前缀规则；未知归「其它」）。"""
+        rules = ("PreTransform", "Meshlet", "GBuffer", "Foward", "Forward", "Fwd",
+                 "Deferred", "SpeedTree", "ZPrePass", "Shadow", "Pick",
+                 "Water", "VFX", "GUI", "Depth", "Trans", "Emissive")
+        for p in rules:
+            if (name or "").startswith(p):
+                return "Forward" if p == "Foward" else p
+        return "其它"
+
     def refresh_tech(self):
-        groups = {}
+        """变体页（与 DMC5 同构）：pass -> 技术名 -> 目标行（PS/VS/… 的 blob 下标）。"""
+        fams = {}
         for e in self.records:
             if e["has_program"]:
-                groups.setdefault(e["name"] or "(未命名)", []).append(e["index"])
+                fams.setdefault(self._pass_family(e["name"]), {}).setdefault(
+                    e["name"] or "(未命名)", []).append(e)
         self.tree_tech.clear()
-        for name, idxs in sorted(groups.items()):
-            head = QTreeWidgetItem([name, str(len(idxs)),
-                                    ",".join("#%d" % i for i in idxs[:6])])
-            self.tree_tech.addTopLevelItem(head)
-        fit_columns(self.tree_tech, [0, 1, 2], pad=18, min_w=80, max_w=520)
+        for fam, techs in sorted(fams.items()):
+            fitem = QTreeWidgetItem(["pass: %s" % fam, "%d 技术" % len(techs), ""])
+            for tech, es in sorted(techs.items()):
+                titem = QTreeWidgetItem([tech, "%d 目标" % len(es), ""])
+                for t, e in enumerate(es):
+                    progs = []
+                    for key, lab in (("ps", "PS"), ("vs", "VS"), ("cs", "CS"),
+                                     ("hs", "HS"), ("ds", "DS"), ("gs", "GS")):
+                        ptr = e["stages"][key][0]
+                        if ptr:
+                            progs.append("%s=%s" % (lab, self._blob_at.get(ptr, "?")))
+                    titem.addChild(QTreeWidgetItem(["target %d" % t,
+                                                    " ".join(progs) or "-", ""]))
+                fitem.addChild(titem)
+            self.tree_tech.addTopLevelItem(fitem)
+        self.tree_tech.expandToDepth(1)
+        fit_columns(self.tree_tech, [0, 1, 2], pad=18, min_w=90, max_w=560)
 
 
 class Mdf2Panel(QWidget):
