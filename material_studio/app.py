@@ -40,8 +40,8 @@ from material_toolkit.lib.binding import (  # noqa: E402
     rename_name_global,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
-    Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
-    encode_material_flags, shading_type_value,
+    Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES, FLAG_B_FIELDS,
+    encode_material_flags, shading_type_value, shading_types,
 )
 from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from material_toolkit.lib.mmtr_info import (  # noqa: E402
@@ -2548,6 +2548,8 @@ class Mdf2Panel(QWidget):
         self.obj = None
         self.path = None
         self._container = container
+        self._readonly = False      # mdf2.45 等：可看不可改（写入尚未适配）
+        self._raw = None            # 原文件字节（只读时导出原件）
 
         hb = QHBoxLayout()
         self.btn_open = QPushButton("打开 mdf2")
@@ -2633,6 +2635,10 @@ class Mdf2Panel(QWidget):
             grid.addWidget(sp, r, 1)
             r += 1
         mv.addWidget(gb)
+        self.lbl_flags_b = QLabel("")
+        self.lbl_flags_b.setWordWrap(True)
+        self.lbl_flags_b.setStyleSheet("color:#888;")
+        mv.addWidget(self.lbl_flags_b)
         mv.addStretch(1)
         self.cmb_shading.currentTextChanged.connect(self._apply_shading)
 
@@ -2655,6 +2661,11 @@ class Mdf2Panel(QWidget):
         lay.addLayout(hb)
         lay.addWidget(split, 1)
 
+        self.lbl_mode = QLabel("")
+        self.lbl_mode.setStyleSheet("color:#c08a2e;")
+        self.lbl_mode.setWordWrap(True)
+        lay.addWidget(self.lbl_mode)
+
         self.btn_open.clicked.connect(self.open_mdf2)
         self.btn_set.clicked.connect(self.set_texture)
         self.btn_exp.clicked.connect(self.export_mdf2)
@@ -2672,8 +2683,12 @@ class Mdf2Panel(QWidget):
         self.title_changed.emit(self.doc_title())
 
     def load_path(self, path):
+        with open(path, "rb") as f:
+            self._raw = f.read()
         self.obj = Mdf2.load(path)
         self.path = path
+        self._readonly = self.obj.game_version != 10
+        self._apply_mode()
         self.refresh_mats()
         self._emit_title()
 
@@ -2690,8 +2705,46 @@ class Mdf2Panel(QWidget):
         """把本面板重置为一个空的 mdf2(DMC5, version 10)。"""
         self.obj = Mdf2.new(10)
         self.path = None
+        self._readonly = False
+        self._raw = None
+        self._apply_mode()
         self.refresh_mats()
         self._emit_title()
+
+    def _apply_mode(self):
+        """按 mdf2 版本/游戏切换只读态与着色类型名表（mdf2.45 = MHWS）。"""
+        ro = self._readonly
+        game = (self.obj.game if self.obj else "DMC5") or ""
+        names = [n for n, _ in shading_types(game)]
+        if not names:
+            # 未登记的游戏/版本：用 0xN 占位，避免拿 DMC5 的表误标
+            vals = sorted({m.shader_type for m in (self.obj.materials if self.obj else [])})
+            names = [f"0x{v:x}" for v in vals] or ["0x0"]
+        self.cmb_shading.blockSignals(True)
+        self.cmb_shading.clear()
+        self.cmb_shading.addItems(names)
+        self.cmb_shading.blockSignals(False)
+        self.cmb_shading.setEnabled(not ro)
+        self.btn_set.setEnabled(not ro)
+        self.btn_exp.setText("导出原件" if ro else "导出 mdf2")
+        self.ed_mmtr.setReadOnly(ro)
+        for cb in self.flag_checks.values():
+            cb.setEnabled(not ro)
+        for sp in self.flag_spins.values():
+            sp.setEnabled(not ro)
+        trig = (QAbstractItemView.NoEditTriggers if ro
+                else QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        for tree in (self.tree_mat, self.tree_tex, self.tree_param):
+            tree.setEditTriggers(trig)
+        self.tree_param.setDragEnabled(not ro)
+        self.tree_param.setAcceptDrops(not ro)
+        if ro:
+            self.lbl_mode.setText(
+                "只读：mdf2.%d（%s）。写入/编辑尚未适配，导出 = 原样写出；"
+                "着色类型名表与 flags 按该游戏解析。"
+                % (self.obj.game_version, game or "未登记游戏"))
+        else:
+            self.lbl_mode.setText("")
 
     def refresh_mats(self):
         keep = self.cur_mat()
@@ -2750,7 +2803,7 @@ class Mdf2Panel(QWidget):
         m = self._cur_material()
         if m is None:
             return
-        relayout_offsets(m)   # 让 offset 显示与实际导出一致(新参数不再显示 0)
+        relayout_offsets(m) if not self._readonly else None   # 只读保留原 offset
         names = [n for n, _ in PARAM_TYPES]
         # 类型列宽度按**当前材质实际用到的类型**算（不是全部类型的最长名，
         # 否则材质里只有 float 时也会按 float4x4 留出很宽的列）
@@ -2833,6 +2886,8 @@ class Mdf2Panel(QWidget):
         return f"{base}_{i}"
 
     def add_material_gui(self):
+        if self._readonly:
+            return
         if self.obj is None:
             QMessageBox.warning(self, "提示", "请先打开/新建一个 mdf2")
             return
@@ -2854,6 +2909,8 @@ class Mdf2Panel(QWidget):
                 break
 
     def delete_material_gui(self, name):
+        if self._readonly:
+            return
         if self.obj is None or not name:
             return
         ok = QMessageBox.question(self, "删除材质", f"确定删除材质 {name!r}?")
@@ -2882,8 +2939,15 @@ class Mdf2Panel(QWidget):
             sp.blockSignals(True)
             sp.setValue(int(d.get(name, 0)))
             sp.blockSignals(False)
+        if m.mdf_version >= 31:
+            extra = ["%s=%s" % (n, d.get(n)) for n, _b, _w, _s in FLAG_B_FIELDS]
+            self.lbl_flags_b.setText("flagsB: " + "  ".join(extra))
+        else:
+            self.lbl_flags_b.setText("")
 
     def _apply_shading(self, name):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -2893,12 +2957,16 @@ class Mdf2Panel(QWidget):
 
     def _apply_mmtr_path(self):
         """MasterMaterial 编辑: 写回材质引用的 mmtr 路径(导出时进字符串表)。"""
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
         m.mmtr_path = self.ed_mmtr.text().strip()
 
     def _apply_flag(self, name, val):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -2907,6 +2975,8 @@ class Mdf2Panel(QWidget):
         m.flags = encode_material_flags(d)
 
     def set_texture(self):
+        if self._readonly:
+            return
         if self.obj is None:
             QMessageBox.warning(self, "提示", "请先打开一个 mdf2")
             return
@@ -2928,6 +2998,13 @@ class Mdf2Panel(QWidget):
 
     def export_mdf2(self):
         if self.obj is None:
+            return
+        if self._readonly:
+            p = _get_save_path(self, "导出 mdf2 原件", self.path or "out.mdf2.45",
+                               "mdf2 (*.mdf2.*);;所有文件 (*)")
+            if p and self._raw is not None:
+                open(p, "wb").write(self._raw)
+                QMessageBox.information(self, "导出", f"已原样写出 {len(self._raw)} 字节:\n{p}")
             return
         p = _get_save_path(self, "导出 mdf2", self.path or "out.mdf2.10",
                            "mdf2 (*.mdf2.10);;所有文件 (*)")
@@ -2968,6 +3045,8 @@ class Mdf2Panel(QWidget):
         return acts
 
     def add_param(self):
+        if self._readonly:
+            return
         if self.obj is None:
             QMessageBox.warning(self, "提示", "请先打开一个 mdf2")
             return
@@ -2991,6 +3070,8 @@ class Mdf2Panel(QWidget):
         self.refresh_detail()
 
     def set_param_type(self, name):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -3013,6 +3094,8 @@ class Mdf2Panel(QWidget):
         QTimer.singleShot(0, lambda: self._apply_param_type(name, new_ty))
 
     def _apply_param_type(self, name, new_ty):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -3028,6 +3111,8 @@ class Mdf2Panel(QWidget):
 
     def _commit_param_rename(self, key, text):
         """内联改名提交: key=("param", 旧名)。"""
+        if self._readonly:
+            return
         if not key or key[0] != "param" or not text or text == key[1]:
             return
         m = self._cur_material()
@@ -3045,6 +3130,8 @@ class Mdf2Panel(QWidget):
         self.refresh_detail()
 
     def delete_param(self, name):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -3059,6 +3146,8 @@ class Mdf2Panel(QWidget):
 
     def _commit_tex_rename(self, key, text):
         """贴图槽 type 内联改名提交: key=("tex", 旧 type)。"""
+        if self._readonly:
+            return
         if not key or key[0] != "tex" or not text or text == key[1]:
             return
         m = self._cur_material()
@@ -3075,6 +3164,8 @@ class Mdf2Panel(QWidget):
         self.refresh_tex()
 
     def _commit_tex_path(self, ty, path):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return
@@ -3083,6 +3174,8 @@ class Mdf2Panel(QWidget):
             tb.texture_path = path
 
     def delete_tex(self, ty):
+        if self._readonly:
+            return
         m = self._cur_material()
         if m is None:
             return

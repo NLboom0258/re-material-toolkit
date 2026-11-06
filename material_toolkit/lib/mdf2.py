@@ -140,16 +140,50 @@ SHADING_TYPES = [
 ]
 SHADING_TYPE_VALUES = dict(SHADING_TYPES)
 
+# MHWS(1808168797 对应的 mdf2.45)：41 项。值取自 REasy 的 mhws_enums.json
+# (resources/data/enums/via.render.MaterialShadingType)，并用解包语料的分布核对过
+# 常见值：0 Standard / 1 Decal / 6 Transparent / 16 ExpensiveTransparent /
+# 17 Forward / 25 ShellFurMaterial（角色的毛皮材质）。未逐项逆向 exe。
+_MHWS_SHADING_TYPES = [
+    ("Standard", 0), ("Decal", 1), ("DecalStencil", 2), ("SeparateAlphaDecal", 3),
+    ("DecalWithMetallic", 4), ("DecalNRMR", 5), ("Transparent", 6),
+    ("TransparentStencil", 7), ("Distortion", 8), ("PrimitiveMesh", 9),
+    ("PrimitiveSolidMesh", 10), ("Water", 11), ("SpeedTree", 12), ("GUI", 13),
+    ("GUIMesh", 14), ("GUIMeshTransparent", 15), ("ExpensiveTransparent", 16),
+    ("Forward", 17), ("RenderTarget", 18), ("PostProcess", 19),
+    ("PrimitiveMaterial", 20), ("PrimitiveSolidMaterial", 21),
+    ("PrimitiveSolidMaterialExpensive", 22), ("SpineMaterial", 23),
+    ("VolumetricFog", 24), ("ShellFurMaterial", 25), ("VolumeDecal", 26),
+    ("AlembicMesh", 27), ("AlembicMeshForward", 28), ("AlembicMeshTransparent", 29),
+    ("MarchingCubes", 30), ("MarchingCubesForward", 31),
+    ("MarchingCubesTransparent", 32), ("Strands", 33), ("Eyeball", 34),
+    ("EyeballPostProcess", 35), ("NFXTransparent", 36), ("Cloudscape2", 37),
+    ("CloudscapeReserved", 38), ("VolumeSolidMaterial", 39),
+    ("VolumeDecalMetallic", 40),
+]
 
-def shading_type_name(v: int) -> str:
-    for n, val in SHADING_TYPES:
+SHADING_TYPE_TABLES = {"DMC5": SHADING_TYPES, "MHWS": _MHWS_SHADING_TYPES}
+# mdf2 的 game_version(文件名后缀) -> 游戏名；未登记返回 ""（不猜）。
+MDF_GAME_BY_VERSION = {10: "DMC5", 45: "MHWS"}
+
+
+def game_for_mdf_version(version):
+    return MDF_GAME_BY_VERSION.get(int(version), "")
+
+
+def shading_types(game="DMC5"):
+    return SHADING_TYPE_TABLES.get(game, [])
+
+
+def shading_type_name(v: int, game="DMC5"):
+    for n, val in shading_types(game):
         if val == v:
             return n
     return f"0x{v:x}"
 
 
-def shading_type_value(name: str):
-    return SHADING_TYPE_VALUES.get(name)
+def shading_type_value(name: str, game="DMC5"):
+    return dict(shading_types(game)).get(name)
 
 
 # 材质 flags(4B) 位布局(LSB 在前; 参考 RE-Mesh-Editor 的 MDFFlags)。
@@ -192,6 +226,42 @@ def encode_material_flags(d: dict) -> int:
     for name, width, bit in FLAG_BIT_OFFSETS:
         val = int(d.get(name, 0)) & ((1 << width) - 1)
         out |= val << bit
+    return out
+
+
+# mdf2 >= 31 的 material_flags 是 **8 字节**(低 32 位仍是上面的 v21 布局，高 32 位是
+# 新命名的位)。名字/位取自 REasy mdf_file.py 的 _FLAG_LAYOUTS(31, ...)，并在
+# MHWS mdf2.45 语料上核对过。TransparentPriorityBias 为有符号 8 位。
+FLAG_B_FIELDS = [
+    ("TransparentDistortionEnable", 32, 1, False),
+    ("AlphaUsed", 33, 1, False),
+    ("BakeTextureUseSecondaryUV", 34, 1, False),
+    ("ForwardPrepassEnabled", 35, 1, False),
+    ("ForcedAlphaTestEnableShadow", 36, 1, False),
+    ("TessellationZPrepassDisable", 37, 1, False),
+    ("DitheredLodTransitionEnable", 38, 1, False),
+    ("TransparentPriorityBias", 40, 8, True),
+]
+
+
+def decode_flags(v: int, version: int = 10) -> dict:
+    """按 mdf2 版本解 flags：<31 为 u32；>=31 为 u64(低 32 位同名，高 32 位见 FLAG_B_FIELDS)。"""
+    out = decode_material_flags(v & 0xFFFFFFFF)
+    if version >= 31:
+        for name, bit, width, signed in FLAG_B_FIELDS:
+            val = (int(v) >> bit) & ((1 << width) - 1)
+            if signed and val >= (1 << (width - 1)):
+                val -= 1 << width
+            out[name] = bool(val) if width == 1 else val
+    return out
+
+
+def encode_flags(d: dict, version: int = 10) -> int:
+    out = encode_material_flags(d)
+    if version >= 31:
+        for name, bit, width, signed in FLAG_B_FIELDS:
+            val = int(d.get(name, 0)) & ((1 << width) - 1)
+            out |= val << bit
     return out
 
 
@@ -262,6 +332,10 @@ class Material:
         self.texture_count = 0
         self.shader_type = 0
         self.flags = 0
+        self.flags_width = 4          # mdf2 >= 31 为 8 字节
+        self.shader_lod_num = 0       # mdf2 >= 31
+        self.mdf_version = 10
+        self.game = "DMC5"
         self.prop_headers_offset = 0
         self.tex_headers_offset = 0
         self.prop_data_offset = 0
@@ -351,23 +425,23 @@ class Material:
         return False
 
     # ---- 域模型: 材质级属性(着色类型 / flags) ----
-    def shading_type_name(self):
-        return shading_type_name(self.shader_type)
+    def shading_type_name(self, game=None):
+        return shading_type_name(self.shader_type, game or self.game or "")
 
     def set_shading_type(self, name):
-        v = shading_type_value(name)
+        v = shading_type_value(name, self.game or "")
         if v is None:
             raise ValueError(f"unknown shading type {name!r}")
         self.shader_type = v
         return self
 
-    def flags_dict(self):
-        """{flag 名: bool 或 整数(TessFactor/PhongFactor)}。"""
-        return decode_material_flags(self.flags & 0xFFFFFFFF)
+    def flags_dict(self, version=None):
+        """按 mdf2 版本解 flags（>=31 为 8 字节，含 flagsB 新增位）。"""
+        return decode_flags(self.flags, self.mdf_version if version is None else version)
 
     def set_flags_dict(self, d):
-        """按 {flag 名: 值} 回写 flags 位。"""
-        self.flags = encode_material_flags(d)
+        """按 {flag 名: 值} 回写 flags 位（按本材质的 mdf2 版本）。"""
+        self.flags = encode_flags(d, self.mdf_version)
         return self
 
 
@@ -379,6 +453,11 @@ class Mdf2:
         self.game_version = 0   # 游戏/资产版本(来自文件名后缀,决定记录尺寸)
         self.material_flags = 0
         self.materials = []
+
+    @property
+    def game(self):
+        """按 game_version 推断游戏名（未登记返回 ""）。"""
+        return game_for_mdf_version(self.game_version)
 
     @classmethod
     def load(cls, path: str, game_version: int = None) -> "Mdf2":
@@ -400,6 +479,8 @@ class Mdf2:
         pos = 16
         for _ in range(count):
             mat = Material()
+            mat.mdf_version = ver
+            mat.game = game_for_mdf_version(ver)
             mat.name_offset = _u64(data, pos); pos += 8
             mat.name_hash = _u32(data, pos); pos += 4
             mat.prop_block_size = _i32(data, pos); pos += 4
@@ -411,11 +492,13 @@ class Mdf2:
                 pos += 4  # bakeTextureArraySize
             mat.shader_type = _i32(data, pos); pos += 4
             if ver >= 31:
-                pos += 12  # flags + flagsB + shaderLODNum
+                mat.flags = _u64(data, pos); pos += 8      # v31+: 8 字节(低 32 位同 v21)
+                mat.flags_width = 8
+                if ver >= 51:
+                    pos += 8  # v51 unknown u64(在 shaderLODNum 之前)
+                mat.shader_lod_num = _u32(data, pos); pos += 4
             else:
                 mat.flags = _i32(data, pos); pos += 4
-            if ver >= 51:
-                pos += 8  # ver51UnknOffset
             mat.prop_headers_offset = _u64(data, pos); pos += 8
             mat.tex_headers_offset = _u64(data, pos); pos += 8
             if ver >= 19:
