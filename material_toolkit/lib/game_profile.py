@@ -136,6 +136,7 @@ class MmtrProfile:
     compact_declaration_count_off: int = 0xF8
     compute_group_size_off: int = 0x100   # 0x110 记录: 0x108（多插一个保留 qword）
     primitive_topology_off: int = 0x106   # 0x110 记录: 0x10E
+    blob_trailer: int = 0                 # 每个 blob 后的尾部字节数（MHWS=8，实测）
     stages: tuple = _STAGES
     desc_tables: tuple = _DESC_TABLES
     sdf_view: SdfView | None = None   # 旧 264B 窗口（仅 DMC5）
@@ -233,6 +234,8 @@ MHWS = MmtrProfile(
     # 0x110 记录在 0x100 多插一个保留 qword：计算组尺寸与图元拓扑都后移 8。
     compute_group_size_off=0x108,
     primitive_topology_off=0x10E,
+    # 每个 DXBC 容器后跟 8 字节（实测；REasy 的 runtime_cache_keys 同一机制）。
+    blob_trailer=8,
 )
 
 PROFILES = (DMC5, MHWS)

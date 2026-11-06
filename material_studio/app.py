@@ -24,6 +24,7 @@ import os
 import json
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -46,6 +47,8 @@ from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from material_toolkit.lib.mmtr_info import (  # noqa: E402
     blob_count, blob_group_counts, blob_info, type_label,
 )
+from material_toolkit.lib import game_profile as GP  # noqa: E402
+from material_toolkit.lib import mmtr_scan as SCAN  # noqa: E402
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler,
@@ -2294,6 +2297,241 @@ class MmtrPanel(QWidget):
         self._compile_errors = errors
         self._compile_log = log
         self._refresh_diags()
+
+
+class MmtrReadOnlyPanel(QWidget):
+    """非 DMC5 布局的 mmtr 只读页（MHWS 0x110 等）。
+
+    数据全部走 game_profile 的真实记录表（配合 lib/mmtr_scan.py）：
+    左栏按记录列出（名字 / 程序 / 绑定计数），右栏 6 个页签与 DMC5 面板同名。
+    DXIL(SM6) 没有 RDEF，且内置汇编器只支持 SM5.0 ⇒ 不提供反汇编与编辑，
+    「材质参数」页给出未解析说明；导出 = 原样写出（不修改内容）。
+    """
+
+    title_changed = Signal(str)
+
+    def __init__(self, container=None):
+        super().__init__()
+        self.data = None
+        self.path = None
+        self.view = None
+        self.records = []
+        self.blobs = []
+        self.usage = {}
+        self._container = container
+
+        hb = QHBoxLayout()
+        self.lbl_info = QLabel("(未打开)")
+        self.lbl_info.setWordWrap(True)
+        hb.addWidget(self.lbl_info, 1)
+        btn_copy = QPushButton("导出副本")
+        btn_copy.setToolTip("把当前 mmtr 原样写出一份（只读页不修改内容）")
+        btn_copy.clicked.connect(self.export_copy)
+        hb.addWidget(btn_copy)
+
+        self.tree_rec = QTreeWidget()
+        self.tree_rec.setHeaderLabels(["#", "技术名", "程序", "CB/SMP/SRV", "PS 字节"])
+        self.tree_bind = QTreeWidget()
+        self.tree_bind.setHeaderLabels(["类 / 资源名", "类型", "阶段", "槽位"])
+        self.tree_group = QTreeWidget()
+        self.tree_group.setHeaderLabels(["表", "描述符", "名称池", "条数"])
+        self.tree_pool = QTreeWidget()
+        self.tree_pool.setHeaderLabels(["SRV 名", "引用记录数"])
+        self.tree_tech = QTreeWidget()
+        self.tree_tech.setHeaderLabels(["技术名", "记录数", "示例记录"])
+        self.tree_blob = QTreeWidget()
+        self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "引用记录", "容器"])
+        self.txt_blob = QPlainTextEdit()
+        self.txt_blob.setReadOnly(True)
+        self.txt_blob.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.lbl_param = QLabel()
+        self.lbl_param.setWordWrap(True)
+        self.lbl_param.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.tree_bind, "资源绑定")
+        self.tabs.addTab(self.tree_group, "组")
+        self.tabs.addTab(self.tree_pool, "资源名池")
+        self.tabs.addTab(self.lbl_param, "材质参数")
+        self.tabs.addTab(self.tree_tech, "变体")
+        blob_page = QWidget()
+        bv = QVBoxLayout(blob_page)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.addWidget(self.tree_blob)
+        bv.addWidget(self.txt_blob, 1)
+        self.tabs.addTab(blob_page, "Blob(shader)")
+
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(self.tree_rec)
+        split.addWidget(self.tabs)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(hb)
+        lay.addWidget(split, 1)
+
+        self.tree_rec.currentItemChanged.connect(lambda *_: self.refresh_record_detail())
+        self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_blob_detail())
+
+    # ---- 打开 / 导出 ----
+    def doc_title(self):
+        return os.path.basename(self.path) if self.path else "(未打开)"
+
+    def _emit_title(self):
+        self.title_changed.emit(self.doc_title())
+
+    def load_path(self, path):
+        data = open(path, "rb").read()
+        view = GP.resolve(data, SCAN.version_from_path(path))
+        self.load_data(data, path, view)
+
+    def load_data(self, data, path, view):
+        self.data = bytes(data)
+        self.path = path
+        self.view = view
+        self.records = SCAN.record_entries(self.data, view)
+        self.blobs = SCAN.blob_list(self.data, view, self.records)
+        self.usage = SCAN.blob_usage(self.data, view, self.records)
+        self.refresh_info()
+        self.refresh_records()
+        self.refresh_blobs()
+        self.refresh_pool()
+        self.refresh_tech()
+        self._emit_title()
+
+    def export_copy(self):
+        if self.data is None:
+            return
+        p = _get_save_path(self, "导出 mmtr 副本", self.path or "out.mmtr",
+                           "mmtr/SDF (*.mmtr.* *.sdf.*);;所有文件 (*)")
+        if p:
+            open(p, "wb").write(self.data)
+            QMessageBox.information(self, "导出", f"已写出 {len(self.data)} 字节:\n{p}")
+
+    # ---- 视图 ----
+    def refresh_info(self):
+        v = self.view
+        used = sum(1 for e in self.records if e["has_program"])
+        ver = SCAN.version_from_path(self.path)
+        self.lbl_info.setText(
+            "%s · 版本 %s · 记录 %d（有程序 %d）· blob %d · 步长 0x%X · 表 %d×%d"
+            % (v.profile.game, ver or "?", v.n_records, used, len(self.blobs),
+               v.rec_stride, v.shape.rows, v.shape.cols))
+        self.lbl_param.setText(
+            "DXIL(SM6) 构建没有 RDEF 反射数据；本工具的材质参数页依赖 RDEF 的\n"
+            "UserMaterial cbuffer，所以暂不解析（不影响记录/绑定/blob 查看）。\n\n"
+            "blob 编辑同样暂不可用：内置汇编器只支持 SM5.0，而这里的\n"
+            "DXIL 是 SM6+，且每个 blob 后还跟 8 字节运行时缓存键。")
+
+    def refresh_records(self):
+        keep = self.cur_record()
+        self.tree_rec.clear()
+        for e in self.records:
+            progs = []
+            for key, lab in (("vs", "VS"), ("ps", "PS"), ("cs", "CS")):
+                ptr, size = e["stages"].get(key, (0, 0))
+                if ptr:
+                    progs.append("%s:%d" % (lab, size))
+            c = e["desc_counts"]
+            it = QTreeWidgetItem([
+                str(e["index"]), e["name"] or "(空)",
+                " ".join(progs) or "-",
+                "%d/%d/%d" % (c["cb"], c["smp"], c["srv"]),
+                str(e["stages"]["ps"][1] or "")])
+            it.setData(0, Qt.UserRole, e["index"])
+            self.tree_rec.addTopLevelItem(it)
+        fit_columns(self.tree_rec, [0, 1, 2, 3, 4], pad=12, min_w=40, max_w=320)
+        n = self.tree_rec.topLevelItemCount()
+        if n:
+            row = keep if isinstance(keep, int) and 0 <= keep < n else 0
+            self.tree_rec.setCurrentItem(self.tree_rec.topLevelItem(row))
+
+    def cur_record(self):
+        it = self.tree_rec.currentItem()
+        return it.data(0, Qt.UserRole) if it else None
+
+    def cur_blob(self):
+        it = self.tree_blob.currentItem()
+        return it.data(0, Qt.UserRole) if it else None
+
+    def refresh_record_detail(self):
+        idx = self.cur_record()
+        self.tree_bind.clear()
+        self.tree_group.clear()
+        if idx is None or not (0 <= idx < len(self.records)):
+            return
+        e = self.records[idx]
+        for d in self.view.desc_tables:
+            rows = SCAN.bindings(self.data, self.view, e["off"], d.key)
+            top = QTreeWidgetItem(["%s (%d)" % (d.label, len(rows)), "", "", ""])
+            self.tree_bind.addTopLevelItem(top)
+            for b in rows:
+                top.addChild(QTreeWidgetItem([
+                    b["name"], SCAN.type_label(b["type"]),
+                    SCAN.stage_label(b["stage"]), "%d" % b["slot"]]))
+            top.setExpanded(True)
+            self.tree_group.addTopLevelItem(QTreeWidgetItem([
+                d.label,
+                "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.desc_off)[0],
+                "0x%X" % struct.unpack_from("<I", self.data, e["off"] + d.pool_off)[0],
+                "%d" % len(rows)]))
+        fit_columns(self.tree_bind, [0, 1, 2, 3], pad=18, min_w=60, max_w=420)
+        fit_columns(self.tree_group, [0, 1, 2, 3], pad=18, min_w=60, max_w=220)
+
+    def refresh_blobs(self):
+        self.tree_blob.clear()
+        for i, (off, size) in enumerate(self.blobs):
+            usage = self.usage.get(off, [])
+            stages = sorted({k.upper() for _r, k in usage})
+            chunks = [c[0] for c in SCAN.blob_chunks(self.data, off, size)]
+            it = QTreeWidgetItem([str(i), "+".join(stages) or "-", str(size),
+                                  str(len({r for r, _k in usage})),
+                                  "DXIL" if "DXIL" in chunks else "DXBC"])
+            it.setData(0, Qt.UserRole, i)
+            self.tree_blob.addTopLevelItem(it)
+        fit_columns(self.tree_blob, [0, 1, 2, 3, 4], pad=12, min_w=40, max_w=200)
+        if self.tree_blob.topLevelItemCount():
+            self.tree_blob.setCurrentItem(self.tree_blob.topLevelItem(0))
+
+    def refresh_blob_detail(self):
+        idx = self.cur_blob()
+        if idx is None or not (0 <= idx < len(self.blobs)):
+            self.txt_blob.clear()
+            return
+        off, size = self.blobs[idx]
+        lines = ["blob %d  off=0x%X  size=%d" % (idx, off, size),
+                 "引用: " + ", ".join("#%d/%s" % (r, k.upper())
+                                     for r, k in self.usage.get(off, [])[:12])]
+        chunks = SCAN.blob_chunks(self.data, off, size)
+        lines.append("容器: " + ("DXBC" if self.data[off:off + 4] == b"DXBC" else "?"))
+        for fourcc, rel, csize in chunks:
+            lines.append("  %-4s  +0x%06X  %d" % (fourcc, rel, csize))
+        head = self.data[off:off + 64]
+        for i in range(0, len(head), 16):
+            chunk = head[i:i + 16]
+            lines.append("  %04X  %s  %s" % (i, chunk.hex(" "),
+                                             "".join(chr(c) if 32 <= c < 127 else "." for c in chunk)))
+        self.txt_blob.setPlainText("\n".join(lines))
+
+    def refresh_pool(self):
+        vocab = SCAN.name_vocabulary(self.data, self.view, self.records)
+        self.tree_pool.clear()
+        for name, n in sorted(vocab.items(), key=lambda kv: (-kv[1], kv[0])):
+            self.tree_pool.addTopLevelItem(QTreeWidgetItem([name, str(n)]))
+        fit_columns(self.tree_pool, [0, 1], pad=18, min_w=80, max_w=460)
+
+    def refresh_tech(self):
+        groups = {}
+        for e in self.records:
+            if e["has_program"]:
+                groups.setdefault(e["name"] or "(未命名)", []).append(e["index"])
+        self.tree_tech.clear()
+        for name, idxs in sorted(groups.items()):
+            head = QTreeWidgetItem([name, str(len(idxs)),
+                                    ",".join("#%d" % i for i in idxs[:6])])
+            self.tree_tech.addTopLevelItem(head)
+        fit_columns(self.tree_tech, [0, 1, 2], pad=18, min_w=80, max_w=520)
 
 
 class Mdf2Panel(QWidget):
@@ -7189,10 +7427,23 @@ class MmtrTabs(QTabWidget):
         self._ensure_placeholder()
 
     def open_path(self, path):
-        """打开一个 mmtr 文件并新增标签页。"""
+        """打开一个 mmtr 文件并新增标签页。
+
+        非 DMC5 布局（如 MHWS 0x110）走只读页：真实记录表 + game_profile，
+        DXIL 不提供反汇编/编辑；DMC5/SDF 仍用原来的编辑页。
+        """
         self._drop_placeholder()
-        panel = MmtrPanel(container=self)
-        panel.load_path(path)
+        data = open(path, "rb").read()
+        try:
+            view = GP.resolve(data, SCAN.version_from_path(path))
+        except ValueError:
+            view = None
+        if view is not None and view.profile.sdf_view is None:
+            panel = MmtrReadOnlyPanel(container=self)
+            panel.load_data(data, path, view)
+        else:
+            panel = MmtrPanel(container=self)
+            panel.load_data(data, path=path)      # 复用已读入的 bytes
         return self._add_panel(panel)
 
     def open_dialog(self):
@@ -7204,7 +7455,7 @@ class MmtrTabs(QTabWidget):
 
     def current_panel(self):
         w = self.currentWidget()
-        return w if isinstance(w, MmtrPanel) else None
+        return w if isinstance(w, (MmtrPanel, MmtrReadOnlyPanel)) else None
 
     def _add_panel(self, panel):
         panel.title_changed.connect(lambda _t, p=panel: self._on_title(p))
