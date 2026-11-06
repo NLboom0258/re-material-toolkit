@@ -63,7 +63,9 @@ REC_OFF_VS_SIZE = (0x88, 0x8C)   # +0x88(inputLayout)/+0x8c(createVertexShader) 
 #  PreTransformSkinningWithNormCS / ShadowStatic)。它们**不在**上面的 REC_LO 变体窗口里:
 # 生成时由预设 pt.bin 整段拷入, 只重定位指针。
 BASE_REC_LO, BASE_REC_N, BASE_REC_SIZE = 0x10, 5, 0x108
-# 每个 stage 的 (指针偏移, 大小偏移), 相对记录基址; 顶点有两份指针/两份大小。
+# 每个程序槽的 (指针偏移, 大小偏移), 相对记录基址。
+# 0x08/0xB8 = 输入签名, 0x10/0xBC = VS(顶点程序); 实测全样本两者恒等
+# (213,872 条记录的指针与大小逐条相等), 所以下面按“任何一对不成对就清掉”处理。
 BASE_STAGE_FIELDS = ((0x08, 0xB8), (0x10, 0xBC), (0x18, 0xC0),
                      (0x20, 0xC4), (0x28, 0xC8), (0x30, 0xCC), (0x38, 0xD0))
 

@@ -10,11 +10,21 @@
     240906211       MHWS   0x10      0x110     5×479 / 5×542 / 5×918 / 5×10 / 5×84 …
     250206176       MHWS   0x10      0x110     4×463 / 4×486 / 4×914 / 4×10 / 4×908 …
 
-字段偏移三者一致（实测 + 校验器 0 不一致）：
+字段偏移三者一致（实测 + 校验器 0 不一致；并与 REasy 的 SDF profile 交叉核对，
+`PROGRAM_LAYOUT_0X108` / `PROGRAM_LAYOUT_0X110` 与本模块完全对应）：
 
-    记录: +0x00 名字(u64)  7 个程序槽(VS×2/HS/DS/GS/PS/CS) 指针+大小
+    记录: +0x00 名字(u64)
+          +0x08/+0xB8 输入签名   +0x10/+0xBC VS   +0x18/+0xC0 HS
+          +0x20/+0xC4 DS         +0x28/+0xC8 GS   +0x30/+0xCC PS   +0x38/+0xD0 CS
+          +0x40 输入布局   +0x48/+0x50/+0x58 渲染状态   +0x60 紧凑声明
           +0x68/0x78/0x88/0x98/0xA8  5 类描述符表(CB/SMP/SRV/UAV/OPT)
           +0xD4 总数; +0xD8..0xF5 5×6 per-stage 计数; +0xF6/0xF7/0xFC/0xFD/0xFE 表条数
+          +0x100 计算组尺寸(*0x110 记录位移到 +0x108*); +0x106 图元拓扑(*0x110: +0x10E*)
+
+新游戏的登记参考（未逐字节验证，仅作调研起点）：RE2/RE3/RE8/MHRISE/DD2(legacy) 用 0x108；
+RE9/PRAGMATA/DD2(新版)/ONIMUSHA 用 0x110 且 **header_layout=per-target**（头部 +0x04 起是
+每 target 一个 u16 计数再 padding，而非本模块假设的 rows+cols）—— 接入这些游戏前要先把
+header 解析也做成 profile 字段。
 
 所以本模块把「版本 → 布局」登记成 profile；「形状」由 `TableShape` 从文件头读取，
 两者组合成 `MmtrView`（调用方真正用的对象，带 n_records / table_end / record_offsets）。
@@ -94,10 +104,10 @@ _DESC_TABLES = (
     DescTable("opt", "OPT", 0xA8, 0xB0, 0xFE),
 )
 
-# 7 个程序槽：顶点有两份（静态 / 蒙皮变体），其余各一份
+# 7 个程序槽：输入签名 + 6 个 D3D 阶段（顶点程序在 0x10；0x08 是输入签名）
 _STAGES = (
-    StageSlot("vs0", "VS", 0x08, 0xB8),
-    StageSlot("vs1", "VS(2)", 0x10, 0xBC),
+    StageSlot("sig", "InputSig", 0x08, 0xB8),
+    StageSlot("vs", "VS", 0x10, 0xBC),
     StageSlot("hs", "HS", 0x18, 0xC0),
     StageSlot("ds", "DS", 0x20, 0xC4),
     StageSlot("gs", "GS", 0x28, 0xC8),
@@ -117,6 +127,15 @@ class MmtrProfile:
     count_total_off: int = 0xD4
     count_matrix_off: int = 0xD8
     count_matrix_len: int = 30       # 5 类资源 × 6 stage
+    # 渲染状态/输入布局等辅助指针（B2 记录详情页用；与 REasy 的 PROGRAM_LAYOUT_0X108 对齐）
+    input_layout_off: int = 0x40
+    rasterizer_state_off: int = 0x48
+    blend_state_off: int = 0x50
+    depth_stencil_state_off: int = 0x58
+    compact_declaration_off: int = 0x60
+    compact_declaration_count_off: int = 0xF8
+    compute_group_size_off: int = 0x100   # 0x110 记录: 0x108（多插一个保留 qword）
+    primitive_topology_off: int = 0x106   # 0x110 记录: 0x10E
     stages: tuple = _STAGES
     desc_tables: tuple = _DESC_TABLES
     sdf_view: SdfView | None = None   # 旧 264B 窗口（仅 DMC5）
@@ -211,6 +230,9 @@ MHWS = MmtrProfile(
     versions=(240906211, 250206176),
     rec_stride=0x110,
     sdf_view=None,
+    # 0x110 记录在 0x100 多插一个保留 qword：计算组尺寸与图元拓扑都后移 8。
+    compute_group_size_off=0x108,
+    primitive_topology_off=0x10E,
 )
 
 PROFILES = (DMC5, MHWS)
