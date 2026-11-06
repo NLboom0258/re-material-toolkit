@@ -334,7 +334,10 @@ def record_group(data, slot, tail=None):
                 if (k // 16) + q < len(t.pool_entries)]
 
     c6 = (img.rec_field(slot, 0xC4) >> 16) & 0xFF
-    nsmp = img.rec_field(slot, 0xB0) >> 16
+    # sampler 条数取“去重计数”字节 +0xC7, 而不是 per-stage 的 PS 槽(+0xB2):
+    # 自 0.1.6 起 nogen 按描述符 stage 掩码写 30 个计数字节, 仅 VS 使用的 sampler
+    # 只落在 +0xAE、+0xB2 为 0; 旧写入路径恰好把总数塞进 +0xB2, 两种都要兼容。
+    nsmp = (img.rec_field(slot, 0xC4) >> 24) & 0xFF
     ntex = img.buf[REC_LO + slot * REC_SIZE + 0xCC]
     return {"cb": names(img.rec_field(slot, 0x40), c6, True),
             "smp": names(img.rec_field(slot, 0x50), nsmp, False),
@@ -381,7 +384,7 @@ def check_desc(data):
         vm, pm = _bind_info_map(vs), _bind_info_map(ps)
         grp = derive_group(vs, ps)
         c6 = (img.rec_field(slot, 0xC4) >> 16) & 0xFF
-        nsmp = img.rec_field(slot, 0xB0) >> 16
+        nsmp = (img.rec_field(slot, 0xC4) >> 24) & 0xFF
         ntex = img.buf[REC_LO + slot * REC_SIZE + 0xCC]
         for kind, dptr, cnt in (("cb", img.rec_field(slot, 0x38), c6),
                                 ("smp", img.rec_field(slot, 0x48), nsmp),
@@ -519,7 +522,7 @@ def rebuild_canonical(data):
         if not (cbt or smpt or text):
             continue
         c6 = (u32(base + 0xC4) >> 16) & 0xFF
-        nsmp = u32(base + 0xB0) >> 16
+        nsmp = (u32(base + 0xC4) >> 24) & 0xFF
         ntex = data[base + 0xCC]
         key = (cbt, smpt, text, nsmp, ntex, c6)
         if key not in groups:
