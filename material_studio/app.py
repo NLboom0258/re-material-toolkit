@@ -2320,6 +2320,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.blobs = []
         self.usage = {}
         self._psv_names = {}      # blob off -> dxc 补来的资源名（懒加载）
+        self._dxc_ok = None       # None=未试, False=本机无 dxc（不再重试）
         self._container = container
 
         hb = QHBoxLayout()
@@ -2587,7 +2588,10 @@ class MmtrReadOnlyPanel(QWidget):
         psv = parse_psv0(self.data[off:off + size])
         if not psv or not psv["resources"]:
             return
-        names = self._psv_names.get(off) or []
+        names = self._psv_names.get(off)
+        if names is None and self._dxc_ok is not False:
+            names = self._auto_resource_names(off, size)
+        names = names or []
         top = QTreeWidgetItem(["PSV0 · shader 资源声明 (%d)" % psv["count"], "", "", ""])
         for i, r in enumerate(psv["resources"]):
             nm = names[i]["name"] if i < len(names) else "(无名字)"
@@ -2600,6 +2604,21 @@ class MmtrReadOnlyPanel(QWidget):
                                           "space%d" % r["space"], slot]))
         top.setExpanded(True)
         self.tree_bind.addTopLevelItem(top)
+
+    def _auto_resource_names(self, off, size):
+        """自动用 dxc 补名字（有就补，没有就记住并停止重试）。
+
+        PSV0/ILDN/STAT 里都没有资源名（实测），名字只在 DXIL 元数据里，
+        只能由 dxc -dumpbin 解出；单个 blob 约 0.1s，所以按 blob 缓存。
+        """
+        try:
+            rows = psv0_names_from_dxc(self.data[off:off + size])
+        except Exception:  # noqa: BLE001
+            self._dxc_ok = False
+            return []
+        self._dxc_ok = True
+        self._psv_names[off] = rows
+        return rows
 
     def fill_resource_names(self):
         """用 dxc 的 Resource Bindings 表给当前 blob 的 PSV0 补资源名。"""
@@ -2616,6 +2635,7 @@ class MmtrReadOnlyPanel(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
         self._psv_names[off] = rows
+        self._dxc_ok = True
         self.refresh_blob_detail()
 
     def disasm_blob(self):
