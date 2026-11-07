@@ -449,10 +449,16 @@ def blob_signatures(blob):
 #   payload + 0x00..0x40   头部（+0x20 = signature vectors 打包, +0x38 = 资源数,
 #                          +0x3C = 条目步长）
 #   payload + 0x40         资源表：每条 6×u32 =
-#                          [f0(未定), f1(未定/首条 RawBuffer=1), id/register,
-#                           lower_bound, kind, space]
-# lower_bound = 0xFFFFFFFF 表示无界（bindless 的 RawBuffer）。
-# 名字不在 PSV0 里（dxc 的名字来自 DXIL 元数据），需要 dxc/RDAT 兜底。
+#                          [rtype, space, lower_bound, upper_bound,
+#                           kind, flags]
+# 实测校核（base_otomo / speedtree 的 60+ 个 blob，与 dxc 表逐项对应）：
+#   * space 在 **第 2 个** u32（`s0,space32` 的 sampler 就是 32）；
+#   * lower/upper 是**闭区间**（单元素时两者相等），upper=0xFFFFFFFF 表示无界
+#     （bindless：`t0,space1unbounded` 那种）；
+#   * kind 是 DXIL::ResourceKind（见 RESOURCE_KIND_NAMES）；
+#   * rtype 是 PSV 的资源大类（1=Sampler 2=CBuffer 3=Texture 4=Raw
+#     5=Structured 7=UAV-raw …），仅作辅助显示，未逐值验证。
+# 名字不在 PSV0 里（dxc 的名字来自 DXIL 元数据），见 psv0_names_from_dxc。
 PSV0_HEADER = 0x40
 
 # DXIL::ResourceKind
@@ -469,8 +475,10 @@ RESOURCE_KIND_NAMES = {
 def parse_psv0(blob):
     """解析 PSV0 资源表 -> {count, stride, sig, resources}；没有 PSV0 返回 None。
 
-    每条资源：{index, id, lower, kind, kind_name, space, f0, f1}
-    （id = HLSL register；lower = 绑定区间起点，0xFFFFFFFF 表示无界）。
+    每条资源：{index, rtype, space, id, lower, upper, unbounded, kind,
+              kind_name, flags}
+    （id/lower 是同一个“寄存器即区间起点”；upper 是闭区间终点，
+      0xFFFFFFFF = 无界，即 bindless）。
     """
     for tag, off, size in dxbc_chunks(blob):
         if tag != "PSV0":
@@ -489,12 +497,14 @@ def parse_psv0(blob):
         out = []
         for i in range(count):
             base = payload + PSV0_HEADER + i * stride
-            f0, f1, rid, lower, kind, space = struct.unpack_from("<6I", blob, base)
+            rtype, space, lower, upper, kind, flags = struct.unpack_from("<6I", blob, base)
             out.append({
-                "index": i, "f0": f0, "f1": f1, "id": rid, "lower": lower,
+                "index": i, "rtype": rtype, "space": space,
+                "id": lower, "lower": lower, "upper": upper,
+                "unbounded": upper == 0xFFFFFFFF,
                 "kind": kind,
                 "kind_name": RESOURCE_KIND_NAMES.get(kind, "kind%d" % kind),
-                "space": space,
+                "flags": flags,
             })
         return {"count": count, "stride": stride, "sig": sig, "resources": out}
     return None
@@ -503,8 +513,13 @@ def parse_psv0(blob):
 def psv0_names_from_dxc(blob):
     """用 dxc -dumpbin 的 Resource Bindings 表取资源名（PSV0 本身不含名字）。
 
-    返回按 dxc 资源顺序的 [{name,type,dim,bind,count}]；解析失败返回 []。
+    返回按 dxc 资源顺序的 [{name,type,dim,bind,count,unbounded}]；解析失败返回 []。
     仅用于显示，不参与二进制解析。
+
+    ⚠ 无界（bindless）行没有独立的 Count 列：bind 直接写成
+      `t0,space1unbounded`，整行只有 6 列（普通行 7 列）。旧实现要求
+      “7 列且最后一列是数字”，于是每条 bindless 都被丢掉，看起来像
+      “PSV0 有、DXIL 没列名字”——其实名字一直在表里。
     """
     try:
         text = disassemble_dxil(blob)
@@ -524,12 +539,22 @@ def psv0_names_from_dxc(blob):
             keep = False
             continue
         parts = line[1:].split()
-        if len(parts) < 7 or parts[0] == "Name" or parts[1].startswith("-"):
+        if len(parts) < 6 or parts[0] == "Name" or parts[1].startswith("-"):
             continue
-        if not parts[-1].isdigit():
+        if parts[1] not in ("cbuffer", "sampler", "texture", "UAV", "tbuffer"):
+            continue
+        ident = parts[4]                      # CB0 / S1 / T3 / U0
+        if not re.fullmatch(r"[A-Z]+[0-9]+", ident):
+            continue
+        last = parts[-1]
+        if last.isdigit():
+            count, unbounded = int(last), False
+        elif last.endswith("unbounded"):
+            count, unbounded = 0, True
+        else:
             continue
         rows.append({"name": parts[0], "type": parts[1], "dim": parts[3],
-                     "bind": parts[5], "count": int(parts[-1])})
+                     "bind": parts[5], "count": count, "unbounded": unbounded})
     return rows
 
 

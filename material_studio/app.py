@@ -2593,17 +2593,19 @@ class MmtrReadOnlyPanel(QWidget):
             names = self._auto_resource_names(off, size)
         names = names or []
         top = QTreeWidgetItem(["PSV0 · shader 资源声明 (%d)" % psv["count"], "", "", ""])
+        # rtype → 寄存器前缀（PSV 的资源大类；仅用于显示）
+        prefix = {1: "s", 2: "cb", 3: "t", 4: "t", 5: "t", 7: "u"}
         for i, r in enumerate(psv["resources"]):
-            # dxc 的 Resource Bindings 只列 DXIL 元数据里存在的项；PSV0 会保留未使用的槽位，
-            # 所以末尾几条没有名字是正常的（不是解析失败）。
-            nm = names[i]["name"] if i < len(names) else "(DXIL 未列出)"
-            slot = "id=%d" % r["id"]
-            if r["lower"] == 0xFFFFFFFF:
-                slot += " lower=unbounded"
-            elif r["lower"] != r["id"]:
-                slot += " lower=%d" % r["lower"]
-            top.addChild(QTreeWidgetItem([nm, r["kind_name"],
-                                          "space%d" % r["space"], slot]))
+            nm = names[i]["name"] if i < len(names) else "(未解析)"
+            p = prefix.get(r["rtype"], "?")
+            slot = "%s%d" % (p, r["lower"])
+            if r["space"]:
+                slot += " space%d" % r["space"]
+            if r["unbounded"]:
+                slot += " unbounded"
+            elif r["upper"] != r["lower"]:
+                slot += " [%d..%d]" % (r["lower"], r["upper"])
+            top.addChild(QTreeWidgetItem([nm, r["kind_name"], slot, ""]))
         top.setExpanded(True)
         self.tree_bind.addTopLevelItem(top)
 
