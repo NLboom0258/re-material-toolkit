@@ -2601,7 +2601,8 @@ class Mdf2Panel(QWidget):
         self.obj = None
         self.path = None
         self._container = container
-        self._readonly = False      # mdf2.45 等：可看不可改（写入尚未适配）
+        self._struct_readonly = False   # 完全只读（当前没有版本用到）
+        self._patch_only = False        # 非 10 版本：只允许改值（补丁写回，不改结构）
         self._raw = None            # 原文件字节（只读时导出原件）
 
         hb = QHBoxLayout()
@@ -2728,6 +2729,15 @@ class Mdf2Panel(QWidget):
         attach_menu(self.tree_param, self._menu_param)
         self.tree_param.reordered.connect(self._on_param_moved)
 
+    @property
+    def _readonly(self):
+        """结构类编辑是否禁用（非 10 版本 = 只改值）。
+
+        既有的编辑入口都按 `self._readonly` 拦结构改动；改成属性后
+        “只改值”模式自动继承同样的拦截，不需要逐个改判断。
+        """
+        return self._struct_readonly or self._patch_only
+
     def doc_title(self):
         """标签页标题: 已打开文件用文件名; 未命名(新建)用 NewMDF2.mdf2.10。"""
         return os.path.basename(self.path) if self.path else "NewMDF2.mdf2.10"
@@ -2740,7 +2750,10 @@ class Mdf2Panel(QWidget):
             self._raw = f.read()
         self.obj = Mdf2.load(path)
         self.path = path
-        self._readonly = self.obj.game_version != 10
+        # 非 DMC5(version 10) 还没有结构写入；但参数值/flags/着色类型是定长
+        # 字段，可以原地补丁写回（不改长度/偏移/字符串池）。
+        self._patch_only = self.obj.game_version != 10
+        self._struct_readonly = False
         self._apply_mode()
         self.refresh_mats()
         self._emit_title()
@@ -2758,7 +2771,8 @@ class Mdf2Panel(QWidget):
         """把本面板重置为一个空的 mdf2(DMC5, version 10)。"""
         self.obj = Mdf2.new(10)
         self.path = None
-        self._readonly = False
+        self._struct_readonly = False
+        self._patch_only = False
         self._raw = None
         self._apply_mode()
         self.refresh_mats()
@@ -2766,7 +2780,8 @@ class Mdf2Panel(QWidget):
 
     def _apply_mode(self):
         """按 mdf2 版本/游戏切换只读态与着色类型名表（mdf2.45 = MHWS）。"""
-        ro = self._readonly
+        ro = self._readonly              # 结构类编辑禁用（含“只改值”模式）
+        block = self._struct_readonly    # 完全只读
         game = (self.obj.game if self.obj else "DMC5") or ""
         names = [n for n, _ in shading_types(game)]
         if not names:
@@ -2777,24 +2792,33 @@ class Mdf2Panel(QWidget):
         self.cmb_shading.clear()
         self.cmb_shading.addItems(names)
         self.cmb_shading.blockSignals(False)
-        self.cmb_shading.setEnabled(not ro)
-        self.btn_set.setEnabled(not ro)
-        self.btn_exp.setText("导出原件" if ro else "导出 mdf2")
+        # 只改值模式下：着色类型 / flags 可改（定长字段）；mmtr 路径与结构项禁用。
+        self.cmb_shading.setEnabled(not block)
+        self.btn_set.setEnabled(not block)
+        self.btn_exp.setText("导出原件" if block
+                             else ("导出 mdf2（仅改值）" if self._patch_only
+                                   else "导出 mdf2"))
         self.ed_mmtr.setReadOnly(ro)
         for cb in self.flag_checks.values():
-            cb.setEnabled(not ro)
+            cb.setEnabled(not block)
         for sp in self.flag_spins.values():
-            sp.setEnabled(not ro)
+            sp.setEnabled(not block)
         trig = (QAbstractItemView.NoEditTriggers if ro
                 else QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         for tree in (self.tree_mat, self.tree_tex, self.tree_param):
             tree.setEditTriggers(trig)
         self.tree_param.setDragEnabled(not ro)
         self.tree_param.setAcceptDrops(not ro)
-        if ro:
+        if block:
             self.lbl_mode.setText(
-                "只读：mdf2.%d（%s）。写入/编辑尚未适配，导出 = 原样写出；"
+                "只读：mdf2.%d（%s）。导出 = 原样写出；"
                 "着色类型名表与 flags 按该游戏解析。"
+                % (self.obj.game_version, game or "未登记游戏"))
+        elif self._patch_only:
+            self.lbl_mode.setText(
+                "仅改值：mdf2.%d（%s）。参数值 / 着色类型 / flags 可改，导出时"
+                "原地补丁写回（长度与偏移不变）；名称 / 贴图路径 / 增删项 / "
+                "类型变更尚未适配。"
                 % (self.obj.game_version, game or "未登记游戏"))
         else:
             self.lbl_mode.setText("")
@@ -2840,11 +2864,13 @@ class Mdf2Panel(QWidget):
         for t in m.textures:
             it = QTreeWidgetItem([t.texture_type, ""])
             it.setData(0, Qt.UserRole, ("tex", t.texture_type))
-            it.setFlags(it.flags() | Qt.ItemIsEditable)   # type 可双击改名
+            if not self._readonly:
+                it.setFlags(it.flags() | Qt.ItemIsEditable)   # type 可双击改名
             self.tree_tex.addTopLevelItem(it)
             # 路径列: 常驻输入框(改完失焦/回车即写回)
             le = QLineEdit(t.texture_path)
             le.setPlaceholderText("(留空 = Null.tex 占位)")
+            le.setReadOnly(self._readonly)     # 结构类改动未适配：路径只读
             le.editingFinished.connect(
                 lambda ty=t.texture_type, w=le: self._commit_tex_path(ty, w.text()))
             self.tree_tex.setItemWidget(it, 1, le)
@@ -2866,7 +2892,8 @@ class Mdf2Panel(QWidget):
         for pr in m.properties:
             it = QTreeWidgetItem(["", pr.name, "", "", f"0x{pr.data_offset:04x}"])
             it.setData(0, Qt.UserRole, ("param", pr.name))
-            it.setFlags(it.flags() | Qt.ItemIsEditable)   # 参数名可双击内联改名
+            if not self._readonly:
+                it.setFlags(it.flags() | Qt.ItemIsEditable)   # 参数名可双击内联改名
             it.setIcon(0, _grip_icon())
             it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)   # 仅同级重排(不嵌套)
             self.tree_param.addTopLevelItem(it)
@@ -2874,13 +2901,18 @@ class Mdf2Panel(QWidget):
             cb = NoWheelComboBox()
             cb.addItems(names)
             cb.setMinimumWidth(type_w)
+            cb.setEnabled(not self._readonly)   # 改类型 = 改分量/结构
             if pr.type in names:
                 cb.setCurrentText(pr.type)
             cb.currentTextChanged.connect(
                 lambda t, nm=pr.name: self._defer_set_type(nm, t))
             self.tree_param.setItemWidget(it, 2, cb)
             # 值列: 类型化控件(分量输入框; float3/4 带颜色块)
-            self.tree_param.setItemWidget(it, 3, ValueEditor(pr))
+            ve = ValueEditor(pr)
+            if self._readonly and len(pr.values) > 4:
+                # 矩阵用逗号文本，改个数 = 结构改动；结构写入未适配时禁用
+                ve.setEnabled(False)
+            self.tree_param.setItemWidget(it, 3, ve)
         fit_columns(self.tree_param, [1, 4], pad=24, min_w=90, max_w=420)
         self.tree_param.setColumnWidth(2, type_w + 12)
         # 值列按当前材质最大分量数给初宽（矩阵在 mdf2 页是逗号文本，给 360）
@@ -2999,7 +3031,7 @@ class Mdf2Panel(QWidget):
             self.lbl_flags_b.setText("")
 
     def _apply_shading(self, name):
-        if self._readonly:
+        if self._struct_readonly:
             return
         m = self._cur_material()
         if m is None:
@@ -3018,7 +3050,7 @@ class Mdf2Panel(QWidget):
         m.mmtr_path = self.ed_mmtr.text().strip()
 
     def _apply_flag(self, name, val):
-        if self._readonly:
+        if self._struct_readonly:
             return
         m = self._cur_material()
         if m is None:
@@ -3051,6 +3083,21 @@ class Mdf2Panel(QWidget):
 
     def export_mdf2(self):
         if self.obj is None:
+            return
+        if self._patch_only:
+            p = _get_save_path(self, "导出 mdf2（仅改值）", self.path or "out.mdf2.45",
+                               "mdf2 (*.mdf2.*);;所有文件 (*)")
+            if not p:
+                return
+            try:
+                data = self.obj.patch_bytes(self._raw or b"")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "失败", str(e))
+                return
+            open(p, "wb").write(data)
+            QMessageBox.information(
+                self, "导出",
+                f"已写出（仅改值，{len(data)} 字节，长度与偏移不变）:\n{p}")
             return
         if self._readonly:
             p = _get_save_path(self, "导出 mdf2 原件", self.path or "out.mdf2.45",

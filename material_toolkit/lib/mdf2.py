@@ -89,6 +89,10 @@ class ParamWriteError(ValueError):
     """参数值写回失败（参数名/值个数与 mdf2 不匹配）。"""
 
 
+class PatchError(ValueError):
+    """只改值写回失败（结构不匹配 / 偏移越界 / 模型里出现了结构改动）。"""
+
+
 def patch_param_floats(data: bytearray, mat, changes: dict, strict=True):
     """把 {参数名: [float...]} **原地**写进 data 里 mat 的值区。
 
@@ -299,7 +303,9 @@ class Property:
         self.utf16_hash = 0
         self.ascii_hash = 0
         self.param_count = 0
+        self.orig_param_count = 0  # 加载时的分量数（补丁写回只允许改值，不允许改个数）
         self.data_offset = 0
+        self.value_offset = 0     # 值区在文件中的绝对偏移（补丁写回用，load() 填充）
         self.name = ""
         self.values = []
         self.cb_offset = None   # 若不为 None,值区按此(cbuffer 内偏移)定位,而非顺序累加
@@ -336,6 +342,11 @@ class Material:
         self.shader_lod_num = 0       # mdf2 >= 31
         self.mdf_version = 10
         self.game = "DMC5"
+        # 字段在文件中的绝对偏移（只改值写回用；load() 填充）
+        self.header_offset = 0
+        self.shader_type_offset = 0
+        self.flags_offset = 0
+        self.shader_lod_num_offset = 0
         self.prop_headers_offset = 0
         self.tex_headers_offset = 0
         self.prop_data_offset = 0
@@ -479,6 +490,7 @@ class Mdf2:
         pos = 16
         for _ in range(count):
             mat = Material()
+            mat.header_offset = pos
             mat.mdf_version = ver
             mat.game = game_for_mdf_version(ver)
             mat.name_offset = _u64(data, pos); pos += 8
@@ -491,14 +503,16 @@ class Mdf2:
             if ver >= 31:
                 pos += 4  # bakeTextureArraySize
             mat.shader_type = _i32(data, pos); pos += 4
+            mat.shader_type_offset = pos - 4
             if ver >= 31:
-                mat.flags = _u64(data, pos); pos += 8      # v31+: 8 字节(低 32 位同 v21)
+                mat.flags = _u64(data, pos); mat.flags_offset = pos; pos += 8      # v31+: 8 字节(低 32 位同 v21)
                 mat.flags_width = 8
                 if ver >= 51:
                     pos += 8  # v51 unknown u64(在 shaderLODNum 之前)
-                mat.shader_lod_num = _u32(data, pos); pos += 4
+                mat.shader_lod_num = _u32(data, pos)
+                mat.shader_lod_num_offset = pos; pos += 4
             else:
-                mat.flags = _i32(data, pos); pos += 4
+                mat.flags = _i32(data, pos); mat.flags_offset = pos; pos += 4
             mat.prop_headers_offset = _u64(data, pos); pos += 8
             mat.tex_headers_offset = _u64(data, pos); pos += 8
             if ver >= 19:
@@ -541,7 +555,9 @@ class Mdf2:
                     pr.param_count = _i32(data, p); p += 4
                     pr.data_offset = _i32(data, p); p += 4
                 pr.name = read_utf16(data, pr.name_offset)
+                pr.orig_param_count = pr.param_count
                 vbase = mat.prop_data_offset + pr.data_offset
+                pr.value_offset = vbase
                 pr.values = [_f32(data, vbase + i * 4) for i in range(pr.param_count)]
                 mat.properties.append(pr)
         return m
@@ -765,6 +781,54 @@ class Mdf2:
         out += prop_data
         open(path, "wb").write(out)
         return len(out)
+
+    # ---- 只改值写回（不改结构；mdf2.45 等尚未适配结构写入的版本用） ----
+    def patch_bytes(self, original: bytes) -> bytes:
+        """把**允许改值的字段**写回原始字节：长度、偏移、字符串池一律不动。
+
+        可写：参数浮点值（分量数必须与原来一致）、着色类型、material_flags、
+        shaderLODNum。名称 / mmtr 路径 / 贴图路径 / 增删项 / 类型变更都不会写
+        （GUI 已对这些禁改；模型里若出现结构改动，这里会报 PatchError）。
+        """
+        if len(original) < 16 or original[:4] != b"MDF\0":
+            raise PatchError("not an MDF file")
+        out = bytearray(original)
+        for mat in self.materials:
+            if not mat.shader_type_offset or not mat.flags_offset:
+                raise PatchError("未记录字段偏移，无法补丁写回：%r" % (mat.name,))
+            if mat.shader_type_offset + 4 > len(out):
+                raise PatchError("着色类型偏移越界：%r" % (mat.name,))
+            struct.pack_into("<i", out, mat.shader_type_offset, int(mat.shader_type))
+            if mat.flags_offset + mat.flags_width > len(out):
+                raise PatchError("flags 偏移越界：%r" % (mat.name,))
+            if mat.flags_width == 8:
+                struct.pack_into("<Q", out, mat.flags_offset,
+                                 int(mat.flags) & 0xFFFFFFFFFFFFFFFF)
+            else:
+                struct.pack_into("<I", out, mat.flags_offset,
+                                 int(mat.flags) & 0xFFFFFFFF)
+            if mat.shader_lod_num_offset:
+                if mat.shader_lod_num_offset + 4 > len(out):
+                    raise PatchError("shaderLODNum 偏移越界：%r" % (mat.name,))
+                struct.pack_into("<I", out, mat.shader_lod_num_offset,
+                                 int(mat.shader_lod_num) & 0xFFFFFFFF)
+            for pr in mat.properties:
+                want = pr.orig_param_count or pr.param_count
+                if len(pr.values) != want:
+                    raise PatchError(
+                        "参数 %r 的分量数 %d != 原 %d（改类型属于结构改动，不能用补丁写回）"
+                        % (pr.name, len(pr.values), want))
+                if pr.orig_param_count and pr.param_count != pr.orig_param_count:
+                    raise PatchError(
+                        "参数 %r 的 param_count 被改动（结构类改动）" % (pr.name,))
+                if not pr.value_offset:
+                    raise PatchError("参数 %r 缺少值区偏移" % (pr.name,))
+                if pr.value_offset + want * 4 > len(out):
+                    raise PatchError("参数 %r 的值区越界" % (pr.name,))
+                if want:
+                    struct.pack_into("<%df" % want, out, pr.value_offset,
+                                     *[float(v) for v in pr.values])
+        return bytes(out)
 
     def dump(self):
         print(f"Mdf2 game_version={self.game_version} file_version={self.file_version} "
