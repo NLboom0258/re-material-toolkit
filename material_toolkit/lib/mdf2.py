@@ -26,6 +26,7 @@ def _u32(b, o): return struct.unpack_from("<I", b, o)[0]
 def _u64(b, o): return struct.unpack_from("<Q", b, o)[0]
 def _i32(b, o): return struct.unpack_from("<i", b, o)[0]
 def _f32(b, o): return struct.unpack_from("<f", b, o)[0]
+def _i64(b, o): return struct.unpack_from("<q", b, o)[0]
 
 
 # 参数类型表:(类型名, 字节大小)。mdf2 本身不存"类型", 只存"值的个数";
@@ -317,6 +318,13 @@ def read_utf16(data: bytes, off: int) -> str:
     return data[off:end].decode("utf-16-le", errors="replace")
 
 
+def _read_gpbf(data: bytes, off: int) -> dict:
+    """GPBF 条目（16B）：name_off q + utf16_hash I + ascii_hash I。"""
+    return {"name": read_utf16(data, _u64(data, off)),
+            "utf16_hash": _u32(data, off + 8),
+            "ascii_hash": _u32(data, off + 12)}
+
+
 def guess_game_version(path: str):
     """从文件名后缀推断游戏版本,如 xxx.mdf2.10 -> 10。"""
     import os, re
@@ -331,6 +339,8 @@ class TextureBinding:
         self.utf16_hash = 0
         self.ascii_hash = 0
         self.path_offset = 0
+        self.locked = 0          # mdf2 >= 13（原样保留）
+        self.reserved = 0        # mdf2 >= 13 的 4 字节保留位
         self.texture_type = ""
         self.texture_path = ""
 
@@ -345,6 +355,7 @@ class Property:
         self.ascii_hash = 0
         self.param_count = 0
         self.orig_param_count = 0  # 加载时的分量数（补丁写回只允许改值，不允许改个数）
+        self.component_locked = 0 # mdf2 >= 13：条目头高 16 位（原样保留）
         self.data_offset = 0
         self.value_offset = 0     # 值区在文件中的绝对偏移（补丁写回用，load() 填充）
         self.name = ""
@@ -381,6 +392,15 @@ class Material:
         self.flags = 0
         self.flags_width = 4          # mdf2 >= 31 为 8 字节
         self.shader_lod_num = 0       # mdf2 >= 31
+        # ---- mdf2 >= 19 / >= 31 的额外数据块（结构写回时原样搬运） ----
+        self.gpbf_name_count = 0
+        self.gpbf_data_count = 0
+        self.gpbf_offset = 0
+        self.bake_texture_array_size = 0
+        self.unk51 = 0                  # v51 的未知 8 字节（原样保留）
+        self.shader_lod_redirects_offset = 0
+        self.gpu_buffers = []           # [(name_hdr, data_hdr)]，每条 16B 的不透明条目
+        self.shader_lod_redirects = []  # v31+ 且 shaderLODNum>0：[(counts, elems)]
         self.mdf_version = 10
         self.game = "DMC5"
         # 字段在文件中的绝对偏移（只改值写回用；load() 填充）
@@ -540,16 +560,17 @@ class Mdf2:
             mat.property_count = _i32(data, pos); pos += 4
             mat.texture_count = _i32(data, pos); pos += 4
             if ver >= 19:
-                pos += 8  # GPBFBufferNameCount + GPBFBufferPathCount
+                mat.gpbf_name_count = _i32(data, pos); pos += 4
+                mat.gpbf_data_count = _i32(data, pos); pos += 4
             if ver >= 31:
-                pos += 4  # bakeTextureArraySize
+                mat.bake_texture_array_size = _u32(data, pos); pos += 4
             mat.shader_type = _i32(data, pos); pos += 4
             mat.shader_type_offset = pos - 4
             if ver >= 31:
                 mat.flags = _u64(data, pos); mat.flags_offset = pos; pos += 8      # v31+: 8 字节(低 32 位同 v21)
                 mat.flags_width = 8
                 if ver >= 51:
-                    pos += 8  # v51 unknown u64(在 shaderLODNum 之前)
+                    mat.unk51 = _u64(data, pos); pos += 8
                 mat.shader_lod_num = _u32(data, pos)
                 mat.shader_lod_num_offset = pos; pos += 4
             else:
@@ -557,11 +578,11 @@ class Mdf2:
             mat.prop_headers_offset = _u64(data, pos); pos += 8
             mat.tex_headers_offset = _u64(data, pos); pos += 8
             if ver >= 19:
-                pos += 8  # GPUBufferOffset
+                mat.gpbf_offset = _u64(data, pos); pos += 8
             mat.prop_data_offset = _u64(data, pos); pos += 8
             mat.mmtr_path_offset = _u64(data, pos); pos += 8
             if ver >= 31:
-                pos += 8  # mmtrsDataOffset
+                mat.shader_lod_redirects_offset = _u64(data, pos); pos += 8
             m.materials.append(mat)
 
         # 逐材质读取名字/mmtr/贴图/参数
@@ -577,7 +598,8 @@ class Mdf2:
                 tb.ascii_hash = _u32(data, p); p += 4
                 tb.path_offset = _u64(data, p); p += 8
                 if ver >= 13:
-                    p += 8
+                    tb.locked = _i32(data, p); p += 4
+                    tb.reserved = _i32(data, p); p += 4
                 tb.texture_type = read_utf16(data, tb.type_offset)
                 tb.texture_path = read_utf16(data, tb.path_offset)
                 mat.textures.append(tb)
@@ -591,7 +613,7 @@ class Mdf2:
                 if ver >= 13:
                     pr.data_offset = _i32(data, p); p += 4
                     pr.param_count = _u16(data, p); p += 2
-                    p += 2  # unknFlag
+                    pr.component_locked = _u16(data, p); p += 2
                 else:
                     pr.param_count = _i32(data, p); p += 4
                     pr.data_offset = _i32(data, p); p += 4
@@ -601,6 +623,27 @@ class Mdf2:
                 pr.value_offset = vbase
                 pr.values = [_f32(data, vbase + i * 4) for i in range(pr.param_count)]
                 mat.properties.append(pr)
+            # GPBF 表（v19+）：每对 (name, data) 各 16B，名字/哈希原样保留
+            if ver >= 19 and mat.gpbf_offset and mat.gpbf_name_count > 0:
+                p = mat.gpbf_offset
+                for _ in range(mat.gpbf_name_count):
+                    nh = _read_gpbf(data, p); p += 16
+                    dh = _read_gpbf(data, p); p += 16
+                    mat.gpu_buffers.append((nh, dh))
+            # shaderLODRedirects（v31+）：2*N 个 int64 偏移，再各自 [count][items]
+            if ver >= 31 and mat.shader_lod_redirects_offset and mat.shader_lod_num > 0:
+                p = mat.shader_lod_redirects_offset
+                tbl = [_i64(data, p + i * 8) for i in range(mat.shader_lod_num * 2)]
+                for i in range(mat.shader_lod_num):
+                    counts, elems = [], []
+                    co, eo = tbl[i * 2], tbl[i * 2 + 1]
+                    if co:
+                        c = _i32(data, co)
+                        counts = [_i32(data, co + 4 + k * 4) for k in range(max(0, c))]
+                    if eo:
+                        c = _i32(data, eo)
+                        elems = [_i32(data, eo + 4 + k * 4) for k in range(max(0, c))]
+                    mat.shader_lod_redirects.append((counts, elems))
         return m
 
     @classmethod
@@ -714,10 +757,15 @@ class Mdf2:
         raise ValueError(f"material {material_name!r} not found")
 
     def save(self, path: str):
-        """写入 mdf2(重排所有偏移 + 重算 hash)。version<19 的布局。"""
+        """写入 mdf2（重排所有偏移 + 重算 hash）。
+
+        version 10（DMC5）走旧布局；version>=31（MHWS 等）走 `_save_v31`。
+        """
         ver = self.game_version
+        if ver >= 31:
+            return self._save_v31(path)
         if ver >= 19:
-            raise NotImplementedError("当前仅支持 version<19(DMC5/RE2/RE3)写入")
+            raise NotImplementedError("version 19-30 的写入尚未适配（v10 与 v31+ 已支持）")
         strings = self._collect_strings()
 
         # 字符串表(UTF-16LE + 00 00)
@@ -820,6 +868,225 @@ class Mdf2:
                 for i, v in enumerate(pr.values):
                     struct.pack_into("<f", prop_data, off + i * 4, v)
         out += prop_data
+        open(path, "wb").write(out)
+        return len(out)
+
+    # ---- version>=31 的结构写入（布局参考 REasy 的 mdf 实现，并用原版文件往返校验） ----
+    @staticmethod
+    def _v31_record_offsets(ver):
+        """v31+ 材质记录的字段偏移（相对记录起点；v51 在 flags 后多一个 u64）。"""
+        o, p = {}, 0
+
+        def take(key, size):
+            nonlocal p
+            o[key] = p
+            p += size
+
+        take("name", 8); take("name_hash", 4)
+        take("params_size", 4); take("param_count", 4); take("tex_count", 4)
+        if ver >= 19:
+            take("gpbf_name_count", 4); take("gpbf_data_count", 4)
+        if ver >= 31:
+            take("bake", 4)
+        take("shader_type", 4)
+        if ver >= 31:
+            take("flags", 8)
+            if ver >= 51:
+                take("unk51", 8)
+            take("lod", 4)
+        else:
+            take("flags", 4)
+        take("prop_hdr", 8); take("tex_hdr", 8)
+        if ver >= 19:
+            take("gpbf", 8)
+        take("params", 8); take("mmtr", 8)
+        if ver >= 31:
+            take("lod_redir", 8)
+        o["_size"] = p
+        return o
+
+    def _save_v31(self, path):
+        """写 version>=31 的 mdf2（结构写回）。
+
+        区域顺序（与 REasy 实现、原版文件实测一致）：
+          文件头 → 材质记录 → tex 头(按材质) → param 头(按材质) → GPBF 表(按材质)
+          → 字符串池 → 各材质参数值区 → shaderLODRedirects。
+        v>=40 时空表共享同一偏移（原版做法）。
+        """
+        ver = self.game_version
+        n = len(self.materials)
+        fo = self._v31_record_offsets(ver)
+        out = bytearray(b"MDF\0" + struct.pack("<HHQ", 1, n, self.material_flags))
+
+        rec = []
+        for _ in self.materials:
+            rec.append(len(out))
+            out += b"\x00" * fo["_size"]
+
+        shared = {} if ver >= 40 else None
+
+        def table(kind, items):
+            if shared is None or items:
+                return len(out)
+            return shared.setdefault(kind, len(out))
+
+        tex_pos = []
+        for mat in self.materials:
+            mat.tex_headers_offset = table("tex", mat.textures)
+            for tb in mat.textures:
+                tex_pos.append((tb, len(out)))
+                out += b"\x00" * 32          # v>=13 的 tex 条目
+        prop_pos = []
+        for mat in self.materials:
+            mat.prop_headers_offset = table("prop", mat.properties)
+            for pr in mat.properties:
+                prop_pos.append((pr, len(out)))
+                out += b"\x00" * 24
+        gpbf_pos = []
+        for mat in self.materials:
+            mat.gpbf_offset = table("gpbf", mat.gpu_buffers)
+            mat.gpbf_name_count = mat.gpbf_data_count = len(mat.gpu_buffers)
+            for nh, dh in mat.gpu_buffers:
+                gpbf_pos.append((nh, len(out), False)); out += b"\x00" * 16
+                gpbf_pos.append((dh, len(out), True)); out += b"\x00" * 16
+
+        # 参数值区：先按原 rel 偏移分配偏移（保留原文件的对齐/空洞），再算块大小
+        for mat in self.materials:
+            cursor = 0
+            for pr in mat.properties:
+                pr.param_count = len(pr.values)
+                off = pr.data_offset if pr.data_offset >= cursor else cursor
+                pr.data_offset = off
+                cursor = off + pr.param_count * 4
+            orig = int(mat.prop_block_size or 0)
+            mat.prop_block_size = orig if orig >= cursor else self._align16(cursor)
+
+        # 字符串池：每个占位都写一份（原版**不删重复串**，否则总长对不上），
+        # 但偏移指向该串**首次出现**的位置（同一串共享偏移）。
+        str_base = len(out)
+        pool = bytearray()
+        first = {}
+
+        def set_str(field_pos, text):
+            text = text or ""
+            cur = str_base + len(pool)
+            off = first.setdefault(text, cur)
+            pool.extend(text.encode("utf-16-le") + b"\x00\x00")
+            struct.pack_into("<Q", out, field_pos, off)
+
+        for mat, rp in zip(self.materials, rec):
+            set_str(rp + fo["name"], mat.name)
+            set_str(rp + fo["mmtr"], mat.mmtr_path)
+        for tb, tp in tex_pos:
+            if tb.texture_type:
+                set_str(tp, tb.texture_type)
+            if tb.texture_path:
+                set_str(tp + 16, tb.texture_path)
+        for pr, pp in prop_pos:
+            set_str(pp, pr.name)
+        for h, hp, _is_val in gpbf_pos:
+            set_str(hp, h["name"])
+        out += pool
+
+        # 参数值区
+        for mat in self.materials:
+            base = len(out)
+            mat.prop_data_offset = base
+            for pr in mat.properties:
+                target = base + pr.data_offset
+                if target > len(out):
+                    out += b"\x00" * (target - len(out))
+                pr.value_offset = len(out)
+                if pr.param_count:
+                    out += struct.pack("<%df" % pr.param_count,
+                                       *[float(v) for v in pr.values[:pr.param_count]])
+            want = base + mat.prop_block_size
+            if want > len(out):
+                out += b"\x00" * (want - len(out))
+
+        # shaderLODRedirects（v31+ 且 shaderLODNum>0）
+        for mat in self.materials:
+            if ver >= 31 and mat.shader_lod_num > 0:
+                mat.shader_lod_redirects_offset = len(out)
+                table_pos = len(out)
+                out += b"\x00" * (mat.shader_lod_num * 16)
+                offsets = []
+                for i in range(mat.shader_lod_num):
+                    counts, elems = [], []
+                    if i < len(mat.shader_lod_redirects):
+                        counts, elems = mat.shader_lod_redirects[i]
+                    offsets.append(len(out))
+                    out += struct.pack("<i", len(counts))
+                    out += b"".join(struct.pack("<i", int(v)) for v in counts)
+                    offsets.append(len(out))
+                    out += struct.pack("<i", len(elems))
+                    out += b"".join(struct.pack("<i", int(v)) for v in elems)
+                for j, ofs in enumerate(offsets):
+                    struct.pack_into("<q", out, table_pos + j * 8, ofs)
+            else:
+                mat.shader_lod_redirects_offset = 0
+
+        # 回填材质记录
+        for mat, rp in zip(self.materials, rec):
+            mat.name_hash = utf16_hash(mat.name)
+            mat.texture_count = len(mat.textures)
+            mat.property_count = len(mat.properties)
+            struct.pack_into("<I", out, rp + fo["name_hash"], mat.name_hash & 0xFFFFFFFF)
+            struct.pack_into("<i", out, rp + fo["params_size"], int(mat.prop_block_size))
+            struct.pack_into("<i", out, rp + fo["param_count"], mat.property_count)
+            struct.pack_into("<i", out, rp + fo["tex_count"], mat.texture_count)
+            if ver >= 19:
+                struct.pack_into("<i", out, rp + fo["gpbf_name_count"], mat.gpbf_name_count)
+                struct.pack_into("<i", out, rp + fo["gpbf_data_count"], mat.gpbf_data_count)
+                struct.pack_into("<q", out, rp + fo["gpbf"], mat.gpbf_offset)
+            if ver >= 31:
+                struct.pack_into("<I", out, rp + fo["bake"],
+                                 mat.bake_texture_array_size & 0xFFFFFFFF)
+                struct.pack_into("<Q", out, rp + fo["flags"],
+                                 int(mat.flags) & 0xFFFFFFFFFFFFFFFF)
+                if ver >= 51:
+                    struct.pack_into("<Q", out, rp + fo["unk51"],
+                                     int(mat.unk51) & 0xFFFFFFFFFFFFFFFF)
+                struct.pack_into("<I", out, rp + fo["lod"],
+                                 int(mat.shader_lod_num) & 0xFFFFFFFF)
+            else:
+                struct.pack_into("<I", out, rp + fo["flags"], int(mat.flags) & 0xFFFFFFFF)
+            struct.pack_into("<i", out, rp + fo["shader_type"], int(mat.shader_type))
+            struct.pack_into("<q", out, rp + fo["prop_hdr"], mat.prop_headers_offset)
+            struct.pack_into("<q", out, rp + fo["tex_hdr"], mat.tex_headers_offset)
+            struct.pack_into("<q", out, rp + fo["params"], mat.prop_data_offset)
+            if ver >= 31:
+                struct.pack_into("<q", out, rp + fo["lod_redir"],
+                                 mat.shader_lod_redirects_offset)
+
+        # 贴图头（type/path 为空写 0；hashes 重算）
+        for tb, tp in tex_pos:
+            if not tb.texture_type:
+                struct.pack_into("<Q", out, tp, 0)
+            else:
+                struct.pack_into("<II", out, tp + 8,
+                                 utf16_hash(tb.texture_type) & 0xFFFFFFFF,
+                                 ascii_hash(tb.texture_type) & 0xFFFFFFFF)
+            if not tb.texture_path:
+                struct.pack_into("<Q", out, tp + 16, 0)
+            struct.pack_into("<ii", out, tp + 24, int(tb.locked), int(tb.reserved))
+        # 参数头
+        for pr, pp in prop_pos:
+            struct.pack_into("<II", out, pp + 8,
+                             utf16_hash(pr.name) & 0xFFFFFFFF,
+                             ascii_hash(pr.name) & 0xFFFFFFFF)
+            struct.pack_into("<i", out, pp + 16, int(pr.data_offset))
+            comp = ((int(pr.component_locked) & 0xFFFF) << 16) | (int(pr.param_count) & 0xFFFF)
+            struct.pack_into("<I", out, pp + 20, comp)
+        # GPBF 条目（data 条目的 hashes 固定 0/1）
+        for h, hp, is_val in gpbf_pos:
+            if is_val:
+                uh, ah = 0, 1
+            else:
+                uh = utf16_hash(h["name"]) & 0xFFFFFFFF
+                ah = ascii_hash(h["name"]) & 0xFFFFFFFF
+            struct.pack_into("<II", out, hp + 8, uh, ah)
+
         open(path, "wb").write(out)
         return len(out)
 

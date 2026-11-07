@@ -2717,6 +2717,15 @@ class Mdf2Panel(QWidget):
         """
         return self._struct_readonly or self._patch_only
 
+    def _relayout(self, m):
+        """按 d3dcompiler cbuffer 布局重排参数偏移（只对 v<19 成立）。
+
+        v31+（MHWS）的参数偏移由母材质给定，重排会破坏绑定；新参数交给
+        `Mdf2._save_v31` 追加到块尾。
+        """
+        if m is not None and m.mdf_version < 19:
+            relayout_offsets(m)
+
     def _rebuild_flag_widgets(self, version):
         """按 mdf2 版本重建 flags 控件：只显示该版本真正存在的字段。
 
@@ -2775,9 +2784,10 @@ class Mdf2Panel(QWidget):
             self._raw = f.read()
         self.obj = Mdf2.load(path)
         self.path = path
-        # 非 DMC5(version 10) 还没有结构写入；但参数值/flags/着色类型是定长
-        # 字段，可以原地补丁写回（不改长度/偏移/字符串池）。
-        self._patch_only = self.obj.game_version != 10
+        # v10（DMC5）走旧结构写入；v31+（MHWS）走 _save_v31；其余非 10 版本
+        # （目前没遇到）只能改值，用原地补丁写回。
+        ver = self.obj.game_version
+        self._patch_only = ver != 10 and ver < 31
         self._struct_readonly = False
         self._apply_mode()
         self.refresh_mats()
@@ -2845,7 +2855,11 @@ class Mdf2Panel(QWidget):
                 "类型变更尚未适配。"
                 % (self.obj.game_version, game or "未登记游戏"))
         else:
-            self.lbl_mode.setText("")
+            self.lbl_mode.setText(
+                "可编辑：mdf2.%d（%s）。参数/贴图/名称可改，导出 = 重建全文件；"
+                "GPBF 表与 shaderLODRedirects 原样搬运。"
+                % (self.obj.game_version, game or "未登记游戏")
+                if self.obj.game_version >= 31 else "")
 
     def refresh_mats(self):
         keep = self.cur_mat()
@@ -2965,7 +2979,7 @@ class Mdf2Panel(QWidget):
             self.refresh_params()
             return
         m.properties = [by[n] for n in order]
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_params()
 
     # ---- 材质级编辑(新增/删除/改名 + 着色类型/flags) ----
@@ -3131,8 +3145,8 @@ class Mdf2Panel(QWidget):
                 open(p, "wb").write(self._raw)
                 QMessageBox.information(self, "导出", f"已原样写出 {len(self._raw)} 字节:\n{p}")
             return
-        p = _get_save_path(self, "导出 mdf2", self.path or "out.mdf2.10",
-                           "mdf2 (*.mdf2.10);;所有文件 (*)")
+        p = _get_save_path(self, "导出 mdf2", self.path or ("out.mdf2.%d" % self.obj.game_version),
+                           "mdf2 (*.mdf2.*);;所有文件 (*)")
         if p:
             self.obj.save(p)
             QMessageBox.information(self, "导出", f"已写出:\n{p}")
@@ -3191,7 +3205,7 @@ class Mdf2Panel(QWidget):
         if ty is None:
             return
         m.add_parameter(name, ty)
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_detail()
 
     def set_param_type(self, name):
@@ -3207,7 +3221,7 @@ class Mdf2Panel(QWidget):
         if ty is None:
             return
         pr.set_type(ty)
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_detail()
 
     def _param_name(self, item):
@@ -3231,7 +3245,7 @@ class Mdf2Panel(QWidget):
             pr.set_type(new_ty)
         except ValueError:
             return
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_detail()
 
     def _commit_param_rename(self, key, text):
@@ -3251,7 +3265,7 @@ class Mdf2Panel(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "失败", str(e))
             return
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_detail()
 
     def delete_param(self, name):
@@ -3262,7 +3276,7 @@ class Mdf2Panel(QWidget):
             return
         if not m.delete_parameter(name):
             return
-        relayout_offsets(m)
+        self._relayout(m)
         self.refresh_detail()
 
     def _tex_name(self, item):

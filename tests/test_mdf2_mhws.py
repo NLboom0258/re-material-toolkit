@@ -64,13 +64,11 @@ def _case_real_optional():
             for pr in mat.properties[:5]:
                 assert all(abs(x) < 1e7 for x in pr.values), (p, mat.name, pr.name)
         with tempfile.TemporaryDirectory() as td:
-            try:
-                m.save(os.path.join(td, "x.mdf2.45"))
-            except NotImplementedError:
-                pass
-            else:
-                raise AssertionError("save() must reject mdf2.45")
-    print("real MHWS: %d files parsed, names/flags ok, save rejected" % min(3, len(files)))
+            dst = os.path.join(td, "x.mdf2.45")
+            m.save(dst)
+            # v31+ 的结构写入已适配：未改动的文件必须逐字节一致
+            assert open(dst, "rb").read() == open(p, "rb").read(), p
+    print("real MHWS: %d files parsed, names/flags ok, round-trip identical" % min(3, len(files)))
 
 
 if __name__ == "__main__":
