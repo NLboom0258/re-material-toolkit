@@ -52,7 +52,7 @@ from material_toolkit.lib import mmtr_scan as SCAN  # noqa: E402
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, disassemble_dxil, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler,
-    blob_signatures, mask_str,
+    blob_signatures, mask_str, parse_psv0, psv0_names_from_dxc,
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
@@ -2319,6 +2319,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.records = []
         self.blobs = []
         self.usage = {}
+        self._psv_names = {}      # blob off -> dxc 补来的资源名（懒加载）
         self._container = container
 
         hb = QHBoxLayout()
@@ -2350,7 +2351,19 @@ class MmtrReadOnlyPanel(QWidget):
         self.lbl_param.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.tree_bind, "资源绑定")
+        bind_page = QWidget()
+        bl = QVBoxLayout(bind_page)
+        bl.setContentsMargins(0, 0, 0, 0)
+        rowr = QHBoxLayout()
+        self.btn_bind_names = QPushButton("补名字(dxc)")
+        self.btn_bind_names.setToolTip(
+            "PSV0 只存类型/槽位/区间，不含名字；点这里用 dxc -dumpbin 的 "
+            "Resource Bindings 表补上（只读，可用 DXC_EXE 指定 dxc）")
+        rowr.addWidget(self.btn_bind_names)
+        rowr.addStretch(1)
+        bl.addLayout(rowr)
+        bl.addWidget(self.tree_bind, 1)
+        self.tabs.addTab(bind_page, "资源绑定")
         self.tabs.addTab(self.tree_sig, "签名")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
@@ -2385,6 +2398,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_blob_detail())
         self.btn_blob_info.clicked.connect(lambda *_: self.refresh_blob_detail())
         self.btn_blob_dis.clicked.connect(self.disasm_blob)
+        self.btn_bind_names.clicked.connect(self.fill_resource_names)
 
     # ---- 打开 / 导出 ----
     def doc_title(self):
@@ -2489,6 +2503,7 @@ class MmtrReadOnlyPanel(QWidget):
             return
         off, size = self.blobs[idx]
         self.refresh_signature(off, size)
+        self.refresh_shader_resources(off, size)
         refs = self._blob_ref_records(off)
         seen = set()
         for r in refs:
@@ -2562,6 +2577,46 @@ class MmtrReadOnlyPanel(QWidget):
             top.setExpanded(True)
             self.tree_sig.addTopLevelItem(top)
         fit_columns(self.tree_sig, list(range(8)), pad=18, min_w=60, max_w=260)
+
+    def refresh_shader_resources(self, off, size):
+        """资源绑定页顶部：PSV0（shader 自己声明的资源）。
+
+        下面是“引擎侧”视角：哪些记录引用这个 blob、各自的 5 张绑定表。
+        PSV0 不含名字，名字需要点“补名字(dxc)”从 dxc 文本补（缓存）。
+        """
+        psv = parse_psv0(self.data[off:off + size])
+        if not psv or not psv["resources"]:
+            return
+        names = self._psv_names.get(off) or []
+        top = QTreeWidgetItem(["PSV0 · shader 资源声明 (%d)" % psv["count"], "", "", ""])
+        for i, r in enumerate(psv["resources"]):
+            nm = names[i]["name"] if i < len(names) else "(无名字)"
+            slot = "id=%d" % r["id"]
+            if r["lower"] == 0xFFFFFFFF:
+                slot += " lower=unbounded"
+            elif r["lower"] != r["id"]:
+                slot += " lower=%d" % r["lower"]
+            top.addChild(QTreeWidgetItem([nm, r["kind_name"],
+                                          "space%d" % r["space"], slot]))
+        top.setExpanded(True)
+        self.tree_bind.addTopLevelItem(top)
+
+    def fill_resource_names(self):
+        """用 dxc 的 Resource Bindings 表给当前 blob 的 PSV0 补资源名。"""
+        idx = self.cur_blob()
+        if idx is None or not (0 <= idx < len(self.blobs)):
+            return
+        off, size = self.blobs[idx]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rows = psv0_names_from_dxc(self.data[off:off + size])
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "补名字(dxc)", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._psv_names[off] = rows
+        self.refresh_blob_detail()
 
     def disasm_blob(self):
         """反汇编选中的 DXIL blob（dxc -dumpbin；只读，不能写回）。"""

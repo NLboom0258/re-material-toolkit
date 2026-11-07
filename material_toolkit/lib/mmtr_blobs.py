@@ -443,6 +443,96 @@ def blob_signatures(blob):
     return out
 
 
+# ---------------------------------------------------------------- PSV0（DXIL 资源声明）
+# DXIL 没有 RDEF，资源声明在 PSV0 chunk 里（实测 MHWS，与 `dxc -dumpbin` 的
+# Resource Bindings 表逐项对应）：
+#   payload + 0x00..0x40   头部（+0x20 = signature vectors 打包, +0x38 = 资源数,
+#                          +0x3C = 条目步长）
+#   payload + 0x40         资源表：每条 6×u32 =
+#                          [f0(未定), f1(未定/首条 RawBuffer=1), id/register,
+#                           lower_bound, kind, space]
+# lower_bound = 0xFFFFFFFF 表示无界（bindless 的 RawBuffer）。
+# 名字不在 PSV0 里（dxc 的名字来自 DXIL 元数据），需要 dxc/RDAT 兜底。
+PSV0_HEADER = 0x40
+
+# DXIL::ResourceKind
+RESOURCE_KIND_NAMES = {
+    1: "Texture1D", 2: "Texture2D", 3: "Texture2DMS", 4: "Texture3D",
+    5: "TextureCube", 6: "Texture1DArray", 7: "Texture2DArray",
+    8: "Texture2DMSArray", 9: "TextureCubeArray", 10: "TypedBuffer",
+    11: "RawBuffer", 12: "StructuredBuffer", 13: "CBuffer", 14: "Sampler",
+    15: "TBuffer", 16: "RTAccelerationStructure", 17: "FeedbackTexture2D",
+    18: "FeedbackTexture2DArray",
+}
+
+
+def parse_psv0(blob):
+    """解析 PSV0 资源表 -> {count, stride, sig, resources}；没有 PSV0 返回 None。
+
+    每条资源：{index, id, lower, kind, kind_name, space, f0, f1}
+    （id = HLSL register；lower = 绑定区间起点，0xFFFFFFFF 表示无界）。
+    """
+    for tag, off, size in dxbc_chunks(blob):
+        if tag != "PSV0":
+            continue
+        payload = off + 8
+        end = min(payload + size, len(blob))
+        if payload + PSV0_HEADER > end:
+            return None
+        sig = struct.unpack_from("<I", blob, payload + 0x20)[0]
+        count = struct.unpack_from("<I", blob, payload + 0x38)[0]
+        stride = struct.unpack_from("<I", blob, payload + 0x3C)[0]
+        if not (0 < stride <= 64) or count > 256:
+            return None
+        if payload + PSV0_HEADER + count * stride > end:
+            return None
+        out = []
+        for i in range(count):
+            base = payload + PSV0_HEADER + i * stride
+            f0, f1, rid, lower, kind, space = struct.unpack_from("<6I", blob, base)
+            out.append({
+                "index": i, "f0": f0, "f1": f1, "id": rid, "lower": lower,
+                "kind": kind,
+                "kind_name": RESOURCE_KIND_NAMES.get(kind, "kind%d" % kind),
+                "space": space,
+            })
+        return {"count": count, "stride": stride, "sig": sig, "resources": out}
+    return None
+
+
+def psv0_names_from_dxc(blob):
+    """用 dxc -dumpbin 的 Resource Bindings 表取资源名（PSV0 本身不含名字）。
+
+    返回按 dxc 资源顺序的 [{name,type,dim,bind,count}]；解析失败返回 []。
+    仅用于显示，不参与二进制解析。
+    """
+    try:
+        text = disassemble_dxil(blob)
+    except Exception:  # noqa: BLE001
+        return []
+    rows, keep = [], False
+    for line in text.splitlines():
+        if "Resource Bindings:" in line:
+            keep = True
+            continue
+        if not keep:
+            continue
+        s = line.strip()
+        if s == ";":
+            continue
+        if not line.startswith("; "):
+            keep = False
+            continue
+        parts = line[1:].split()
+        if len(parts) < 7 or parts[0] == "Name" or parts[1].startswith("-"):
+            continue
+        if not parts[-1].isdigit():
+            continue
+        rows.append({"name": parts[0], "type": parts[1], "dim": parts[3],
+                     "bind": parts[5], "count": int(parts[-1])})
+    return rows
+
+
 def _run_exe(exe, args, workdir):
     p = subprocess.run([exe] + args, cwd=workdir, capture_output=True,
                        text=True, timeout=600)
