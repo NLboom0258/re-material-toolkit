@@ -40,7 +40,7 @@ from material_toolkit.lib.binding import (  # noqa: E402
     rename_name_global,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
-    Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES, FLAG_B_FIELDS,
+    Mdf2, PARAM_TYPES, SHADING_TYPES, FLAG_B_FIELDS,
     encode_flags, flag_fields, shading_type_value, shading_types,
 )
 from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
@@ -2660,35 +2660,14 @@ class Mdf2Panel(QWidget):
         self.ed_mmtr.editingFinished.connect(self._apply_mmtr_path)
         rowm.addWidget(self.ed_mmtr, 1)
         mv.addLayout(rowm)
-        gb = QGroupBox("材质 flags")
-        grid = QGridLayout(gb)
+        # flags 的字段随 mdf2 版本变化（v10 / v19 / v21+ 的 TessFactor 与两侧位不同），
+        # 所以控件在打开文件后按版本重建（见 _rebuild_flag_widgets），而不是灰置。
+        self.box_flags = QGroupBox("材质 flags")
+        self.grid_flags = QGridLayout(self.box_flags)
         self.flag_checks = {}
         self.flag_spins = {}
-        ints = []
-        r = c = 0
-        for name, width in MATERIAL_FLAG_FIELDS:
-            if width == 1:
-                cb = QCheckBox(name)
-                cb.toggled.connect(lambda v, nm=name: self._apply_flag(nm, v))
-                self.flag_checks[name] = cb
-                grid.addWidget(cb, r, c)
-                c += 1
-                if c >= 3:
-                    c = 0
-                    r += 1
-            else:
-                ints.append((name, width))
-        if c != 0:
-            r += 1
-        for name, width in ints:
-            sp = QSpinBox()
-            sp.setRange(0, (1 << width) - 1)
-            sp.valueChanged.connect(lambda v, nm=name: self._apply_flag(nm, v))
-            self.flag_spins[name] = sp
-            grid.addWidget(QLabel(name), r, 0)
-            grid.addWidget(sp, r, 1)
-            r += 1
-        mv.addWidget(gb)
+        self._flag_version = None
+        mv.addWidget(self.box_flags)
         self.lbl_flags_b = QLabel("")
         self.lbl_flags_b.setWordWrap(True)
         self.lbl_flags_b.setStyleSheet("color:#888;")
@@ -2737,6 +2716,52 @@ class Mdf2Panel(QWidget):
         “只改值”模式自动继承同样的拦截，不需要逐个改判断。
         """
         return self._struct_readonly or self._patch_only
+
+    def _rebuild_flag_widgets(self, version):
+        """按 mdf2 版本重建 flags 控件：只显示该版本真正存在的字段。
+
+        DMC5(v10) 与 v19/v21+ 的差异不是“某项能不能改”，而是位定义本身不同：
+        v10 的 TessFactor 是 8 位@8（该字节就是一个数，没有 Forced/TwoSide/ZPost），
+        v19 是 6 位@10，v21+ 才是 5 位@11 + 三个布尔。灰置会误导，所以直接换控件集。
+        """
+        if version == self._flag_version:
+            return
+        self._flag_version = version
+        grid = self.grid_flags
+        while grid.count():
+            item = grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.flag_checks.clear()
+        self.flag_spins.clear()
+        ints = []
+        r = c = 0
+        for name, width, _bit in flag_fields(version):
+            if width == 1:
+                cb = QCheckBox(name)
+                cb.toggled.connect(lambda v, nm=name: self._apply_flag(nm, v))
+                self.flag_checks[name] = cb
+                grid.addWidget(cb, r, c)
+                c += 1
+                if c >= 3:
+                    c = 0
+                    r += 1
+            else:
+                ints.append((name, width))
+        if c != 0:
+            r += 1
+        for name, width in ints:
+            sp = QSpinBox()
+            sp.setRange(0, (1 << width) - 1)
+            sp.valueChanged.connect(lambda v, nm=name: self._apply_flag(nm, v))
+            self.flag_spins[name] = sp
+            grid.addWidget(QLabel(name), r, 0)
+            grid.addWidget(sp, r, 1)
+            r += 1
+        self.box_flags.setTitle("材质 flags（mdf2.%d）" % version)
+        for w in list(self.flag_checks.values()) + list(self.flag_spins.values()):
+            w.setEnabled(not self._struct_readonly)
 
     def doc_title(self):
         """标签页标题: 已打开文件用文件名; 未命名(新建)用 NewMDF2.mdf2.10。"""
@@ -2799,10 +2824,9 @@ class Mdf2Panel(QWidget):
                              else ("导出 mdf2（仅改值）" if self._patch_only
                                    else "导出 mdf2"))
         self.ed_mmtr.setReadOnly(ro)
-        for cb in self.flag_checks.values():
-            cb.setEnabled(not block)
-        for sp in self.flag_spins.values():
-            sp.setEnabled(not block)
+        self._rebuild_flag_widgets(self.obj.game_version if self.obj else 10)
+        for w in list(self.flag_checks.values()) + list(self.flag_spins.values()):
+            w.setEnabled(not block)
         trig = (QAbstractItemView.NoEditTriggers if ro
                 else QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         for tree in (self.tree_mat, self.tree_tex, self.tree_param):
@@ -3015,31 +3039,16 @@ class Mdf2Panel(QWidget):
         self.ed_mmtr.blockSignals(True)
         self.ed_mmtr.setText(m.mmtr_path or "")
         self.ed_mmtr.blockSignals(False)
+        self._rebuild_flag_widgets(m.mdf_version)
         d = m.flags_dict()
-        # 位宽按版本：DMC5 v10 的 TessFactor 是 8 位(0..255)，v21+ 只有 5 位(0..31)。
-        # 控件创建时用的是 v21 表，这里必须按当前版本重设范围，否则 47 会被夹成 31。
-        fields = {n: (w, b) for n, w, b in flag_fields(m.mdf_version)}
         for name, cb in self.flag_checks.items():
             cb.blockSignals(True)
             cb.setChecked(bool(d.get(name, False)))
             cb.blockSignals(False)
         for name, sp in self.flag_spins.items():
             sp.blockSignals(True)
-            if name in fields:
-                sp.setRange(0, (1 << fields[name][0]) - 1)
             sp.setValue(int(d.get(name, 0)))
             sp.blockSignals(False)
-        # 只启用本版本真正定义的位（DMC5 v10 与 v19/v21 的 TessFactor / 两侧位不同），
-        # 否则勾一个“不存在的位”会静默不生效。
-        avail = set(fields)
-        for name, cb in self.flag_checks.items():
-            cb.setEnabled(not self._struct_readonly and name in avail)
-            cb.setToolTip("" if name in avail
-                          else "mdf2.%d 没有定义这个位" % m.mdf_version)
-        for name, sp in self.flag_spins.items():
-            sp.setEnabled(not self._struct_readonly and name in avail)
-            sp.setToolTip("" if name in avail
-                          else "mdf2.%d 没有定义这个位" % m.mdf_version)
         if m.mdf_version >= 31:
             extra = ["%s=%s" % (n, d.get(n)) for n, _b, _w, _s in FLAG_B_FIELDS]
             self.lbl_flags_b.setText("flagsB: " + "  ".join(extra))
