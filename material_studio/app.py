@@ -52,6 +52,7 @@ from material_toolkit.lib import mmtr_scan as SCAN  # noqa: E402
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, disassemble_dxil, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler,
+    blob_signatures, mask_str,
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
@@ -2333,6 +2334,8 @@ class MmtrReadOnlyPanel(QWidget):
         self.tree_blob.setHeaderLabels(["#", "阶段", "大小", "组", "SRV"])
         self.tree_bind = QTreeWidget()
         self.tree_bind.setHeaderLabels(["类 / 资源名", "类型", "阶段", "槽位"])
+        self.tree_sig = QTreeWidget()
+        self.tree_sig.setHeaderLabels(["方向", "名字", "序号", "寄存器", "掩码", "可用", "类型", "系统值"])
         self.tree_group = QTreeWidget()
         self.tree_group.setHeaderLabels(["记录 / 表", "描述符", "名称池", "条数"])
         self.tree_pool = QTreeWidget()
@@ -2348,6 +2351,7 @@ class MmtrReadOnlyPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tree_bind, "资源绑定")
+        self.tabs.addTab(self.tree_sig, "签名")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
         self.tabs.addTab(self.lbl_param, "材质参数")
@@ -2428,7 +2432,8 @@ class MmtrReadOnlyPanel(QWidget):
                v.rec_stride, v.shape.rows, v.shape.cols))
         self.lbl_param.setText(
             "DXIL(SM6) 构建没有 RDEF 反射数据；本工具的材质参数页依赖 RDEF 的\n"
-            "UserMaterial cbuffer，所以暂不解析（不影响记录/绑定/blob 查看）。\n\n"
+            "UserMaterial cbuffer，所以暂不解析（不影响记录/绑定/blob 查看）。\n"
+            "输入/输出签名见「签名」页（直接读 ISG1/OSG1，不依赖 RDEF）。\n\n"
             "blob 编辑同样暂不可用：内置汇编器只支持 SM5.0，而这里的\n"
             "DXIL 是 SM6+，且每个 blob 后还跟 8 字节运行时缓存键。")
 
@@ -2477,11 +2482,13 @@ class MmtrReadOnlyPanel(QWidget):
         """选中 blob：列出引用它的记录组（绑定表）+ 容器 chunk/hex。"""
         idx = self.cur_blob()
         self.tree_bind.clear()
+        self.tree_sig.clear()
         self.tree_group.clear()
         if idx is None or not (0 <= idx < len(self.blobs)):
             self.txt_blob.clear()
             return
         off, size = self.blobs[idx]
+        self.refresh_signature(off, size)
         refs = self._blob_ref_records(off)
         seen = set()
         for r in refs:
@@ -2525,6 +2532,36 @@ class MmtrReadOnlyPanel(QWidget):
             lines.append("  %04X  %s  %s" % (i, chunk.hex(" "),
                                              "".join(chr(c) if 32 <= c < 127 else "." for c in chunk)))
         self.txt_blob.setPlainText("\n".join(lines))
+
+    def refresh_signature(self, off, size):
+        """签名页：直接解析 ISG1/OSG1（32B/元素）/ ISGN/OSGN（24B），不依赖 RDEF。
+
+        MHWS 的 DXIL 与 DMC5 的 SM5 共用这一套；没有签名 chunk 时给出容器
+        里的 fourcc，避免让人误以为解析失败。
+        """
+        self.tree_sig.clear()
+        try:
+            sg = blob_signatures(self.data[off:off + size])
+        except Exception:  # noqa: BLE001
+            sg = {"input": [], "output": [], "patch": [], "chunks": []}
+        if not (sg["input"] or sg["output"] or sg["patch"]):
+            self.tree_sig.addTopLevelItem(QTreeWidgetItem(
+                ["(无签名 chunk)", "容器: " + (" ".join(sg["chunks"]) or "?")] + [""] * 6))
+            fit_columns(self.tree_sig, list(range(8)), pad=18, min_w=60, max_w=300)
+            return
+        for kind, label in (("input", "输入"), ("output", "输出"), ("patch", "补丁常量")):
+            rows = sg[kind]
+            if not rows:
+                continue
+            top = QTreeWidgetItem([label, "%d 项" % len(rows)] + [""] * 6)
+            for p in rows:
+                top.addChild(QTreeWidgetItem([
+                    label, p["name"], str(p["index"]), str(p["register"]),
+                    mask_str(p["mask"]), mask_str(p["used"]),
+                    p["type_name"], p["system_value_name"]]))
+            top.setExpanded(True)
+            self.tree_sig.addTopLevelItem(top)
+        fit_columns(self.tree_sig, list(range(8)), pad=18, min_w=60, max_w=260)
 
     def disasm_blob(self):
         """反汇编选中的 DXIL blob（dxc -dumpbin；只读，不能写回）。"""

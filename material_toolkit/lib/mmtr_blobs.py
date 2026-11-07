@@ -317,6 +317,132 @@ def disassemble_dxil(blob, timeout=60):
             pass
 
 
+# ---------------------------------------------------------------- 签名 chunk（ISG1/OSG1/…）
+# DXBC 签名 chunk 里的 name 偏移**相对 chunk 数据起点**（fourcc+size 之后的 payload），
+# 元素布局（实测 MHWS DXIL，与 `dxc -dumpbin` 的输入/输出表逐项一致）：
+#   ISG1 / OSG1 / PSG1  32B：stream u32, name u32, sem_idx u32, sysval u32,
+#                            comptype u32, register u32, mask u8, used u8,
+#                            pad u16, min_precision u32
+#   ISGN / OSGN / PCSG  24B：name/sem_idx/sysval/comptype/register (5×u32),
+#                            mask u8, used u8, pad u16
+#   OSG5                28B：stream u32 + 同 24B（无 min precision）
+# 说明：DMC5(SM5.0/5.1) 与 MHWS(SM6/DXIL) 都能用这一套解析，只是 tag 不同。
+SIGNATURE_KINDS = {
+    "ISGN": "input", "ISG1": "input", "ISG5": "input",
+    "OSGN": "output", "OSG1": "output", "OSG5": "output",
+    "PCSG": "patch", "PSG1": "patch",
+}
+
+# D3D_NAME（system value）；64+ 是 D3D_NAME_TARGET 一族（输出签名用）。
+SYSTEM_VALUE_NAMES = {
+    0: "NONE", 1: "POS", 2: "CLIP_DISTANCE", 3: "CULL_DISTANCE",
+    4: "RENDER_TARGET_ARRAY_INDEX", 5: "VIEWPORT_ARRAY_INDEX", 6: "VERTEX_ID",
+    7: "PRIMITIVE_ID", 8: "INSTANCE_ID", 9: "IS_FRONT_FACE", 10: "SAMPLE_INDEX",
+    11: "FINAL_QUAD_EDGE_TESSFACTOR", 12: "FINAL_QUAD_INSIDE_TESSFACTOR",
+    13: "FINAL_TRI_EDGE_TESSFACTOR", 14: "FINAL_TRI_INSIDE_TESSFACTOR",
+    15: "FINAL_LINE_DETAIL_TESSFACTOR", 16: "FINAL_LINE_DENSITY_TESSFACTOR",
+    17: "BARYCENTRICS", 18: "SHADINGRATE", 19: "CULL_PRIMITIVE",
+    64: "TARGET", 65: "DEPTH", 66: "COVERAGE", 67: "DEPTH_GREATER_EQUAL",
+    68: "DEPTH_LESS_EQUAL", 69: "STENCIL_REF",
+}
+
+# D3D_REGISTER_COMPONENT_TYPE
+COMPONENT_TYPE_NAMES = {
+    0: "unknown", 1: "uint", 2: "int", 3: "float", 4: "uint16", 5: "int16",
+    6: "float16", 7: "uint64", 8: "int64", 9: "float64",
+}
+
+
+def mask_str(mask):
+    """分量掩码 -> "xyzw" 子集（0 -> "-"）。"""
+    s = "".join(c for i, c in enumerate("xyzw") if (mask >> i) & 1)
+    return s or "-"
+
+
+def dxbc_chunks(blob):
+    """独立 DXBC blob 的 chunk 列表 -> [(fourcc, 相对偏移, 大小)]（读不出返回 []）。"""
+    if len(blob) < 32 or blob[:4] != b"DXBC":
+        return []
+    n = struct.unpack_from("<I", blob, 28)[0]
+    if n <= 0 or n > 64:
+        return []
+    out = []
+    for i in range(n):
+        off = struct.unpack_from("<I", blob, 32 + i * 4)[0]
+        if off + 8 > len(blob):
+            break
+        out.append((blob[off:off + 4].decode("latin1"), off,
+                    struct.unpack_from("<I", blob, off + 4)[0]))
+    return out
+
+
+def parse_signature(blob, tag, off, size):
+    """解析一个签名 chunk -> [{name,index,register,mask,used,stream,...}]。
+
+    注意 chunk 头(8B) 里的 size 是 **payload 长度**（不含 fourcc/size 本身），
+    name 偏移也相对 payload —— 两处都以 payload 为基准，否则会截掉最后一个名字。
+    """
+    payload = off + 8
+    end = min(payload + size, len(blob))
+    if payload + 8 > end:
+        return []
+    count = struct.unpack_from("<I", blob, payload)[0]
+    if count > 256:
+        return []
+    if tag == "OSG5":
+        stride, stream_prefix, has_min_precision = 28, True, False
+    elif tag.endswith("1") or tag.endswith("5"):
+        stride, stream_prefix, has_min_precision = 32, True, True
+    else:
+        stride, stream_prefix, has_min_precision = 24, False, False
+    entries = payload + 8
+    out = []
+    for i in range(count):
+        e = entries + i * stride
+        if e + stride > end:
+            break
+        if stream_prefix:
+            stream = struct.unpack_from("<I", blob, e)[0]
+            base = e + 4
+        else:
+            stream, base = 0, e
+        name_off, sem_idx, sysval, comptype, register = struct.unpack_from("<5I", blob, base)
+        mask, used = blob[base + 20], blob[base + 21]
+        min_prec = 0
+        if has_min_precision and base + 28 <= e + stride:
+            min_prec = struct.unpack_from("<I", blob, base + 24)[0]
+        name = ""
+        np = payload + name_off
+        if payload <= np < end:
+            z = blob.find(b"\x00", np, end)
+            name = blob[np:z].decode("latin1", "replace") if z >= 0 else ""
+        out.append({
+            "name": name, "index": sem_idx, "register": register,
+            "system_value": sysval,
+            "system_value_name": SYSTEM_VALUE_NAMES.get(sysval, "0x%X" % sysval),
+            "component_type": comptype,
+            "type_name": COMPONENT_TYPE_NAMES.get(comptype, "type%d" % comptype),
+            "mask": mask, "used": used, "stream": stream,
+            "min_precision": min_prec,
+        })
+    return out
+
+
+def blob_signatures(blob):
+    """一个 DXBC/DXIL blob 的签名 -> {input, output, patch, chunks}（缺失给空列表）。
+
+    `chunks` 是容器里的 fourcc 列表（便于在界面上说明为何没有签名）。
+    """
+    out = {"input": [], "output": [], "patch": [], "chunks": []}
+    for tag, off, size in dxbc_chunks(blob):
+        out["chunks"].append(tag)
+        kind = SIGNATURE_KINDS.get(tag)
+        if not kind or out[kind]:
+            continue
+        out[kind] = parse_signature(blob, tag, off, size)
+    return out
+
+
 def _run_exe(exe, args, workdir):
     p = subprocess.run([exe] + args, cwd=workdir, capture_output=True,
                        text=True, timeout=600)
