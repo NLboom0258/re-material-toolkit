@@ -2643,14 +2643,8 @@ class MmtrReadOnlyPanel(QWidget):
 
     @staticmethod
     def _pass_family(name):
-        """记录名 -> pass 家族（只用前缀规则；未知归「其它」）。"""
-        rules = ("PreTransform", "Meshlet", "GBuffer", "Foward", "Forward", "Fwd",
-                 "Deferred", "SpeedTree", "ZPrePass", "Shadow", "Pick",
-                 "Water", "VFX", "GUI", "Depth", "Trans", "Emissive")
-        for p in rules:
-            if (name or "").startswith(p):
-                return "Forward" if p == "Foward" else p
-        return "其它"
+        """pass 家族（规则在 lib/mmtr_scan.pass_family，纯逻辑便于测试）。"""
+        return SCAN.pass_family(name)
 
     def refresh_tech(self):
         """变体页（与 DMC5 同构）：pass -> 技术名 -> 目标行（PS/VS/… 的 blob 下标）。"""

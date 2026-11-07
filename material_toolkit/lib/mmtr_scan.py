@@ -217,3 +217,54 @@ def stage_label(mask):
 
 def type_label(code):
     return TYPE_LABELS.get(code, "0x%02x" % code)
+
+
+def pass_family(name):
+    """记录名 -> pass 家族（MHWS / DMC5 通用，按用途词判定）。
+
+    不能只看开头：MHWS 的名字普遍带 A/TS/ATS 前缀（alpha-test / two-sided），
+    如 `ADeferredStatic`、`ADepthOutputDepthWritePreTransform`；SpeedTree 与
+    Meshlet 还会把用途写在中间（`SpeedTreeV8ATreeFoliageO0Forward`）。
+    优先级：SpeedTree/Meshlet 细分 → GBuffer（Deferred）→ Forward → Shadow →
+    Pick → Stencil → Depth/PrePass → 其它用途。实测 MHWS 语料 0 个“其它”。
+    """
+    low = (name or "").casefold()
+    if "speedtree" in low:
+        if "gbuffer" in low:
+            return "SpeedTree · GBuffer"
+        if "shadow" in low:
+            return "SpeedTree · Shadow"
+        if "depth" in low:
+            return "SpeedTree · Depth"
+        if "forward" in low or "foward" in low:
+            return "SpeedTree · Forward"
+        return "SpeedTree"
+    if "meshlet" in low:
+        if "gbuffer" in low:
+            return "Meshlet · GBuffer"
+        if "shadow" in low:
+            return "Meshlet · Shadow"
+        return "Meshlet"
+    if "deferred" in low or "gbuffer" in low:
+        return "GBuffer"
+    if "forward" in low or "foward" in low:
+        return "Forward"
+    if "shadow" in low:
+        return "Shadow"
+    if "pick" in low:
+        return "Pick"
+    if "stencil" in low:
+        return "Stencil"
+    if any(t in low for t in ("depthwrite", "depthoutput", "prepass", "zprepass")):
+        return "Depth/PrePass"
+    if "velocity" in low:
+        return "Velocity"
+    if "water" in low:
+        return "Water"
+    if "gui" in low:
+        return "GUI"
+    if "emissiveonly" in low:
+        return "Emissive"
+    if low.endswith("cs") or "compute" in low:
+        return "Compute"
+    return "其它"
