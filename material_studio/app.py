@@ -41,7 +41,7 @@ from material_toolkit.lib.binding import (  # noqa: E402
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
     Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES, FLAG_B_FIELDS,
-    encode_material_flags, shading_type_value, shading_types,
+    encode_flags, flag_fields, shading_type_value, shading_types,
 )
 from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from material_toolkit.lib.mmtr_info import (  # noqa: E402
@@ -3016,14 +3016,30 @@ class Mdf2Panel(QWidget):
         self.ed_mmtr.setText(m.mmtr_path or "")
         self.ed_mmtr.blockSignals(False)
         d = m.flags_dict()
+        # 位宽按版本：DMC5 v10 的 TessFactor 是 8 位(0..255)，v21+ 只有 5 位(0..31)。
+        # 控件创建时用的是 v21 表，这里必须按当前版本重设范围，否则 47 会被夹成 31。
+        fields = {n: (w, b) for n, w, b in flag_fields(m.mdf_version)}
         for name, cb in self.flag_checks.items():
             cb.blockSignals(True)
             cb.setChecked(bool(d.get(name, False)))
             cb.blockSignals(False)
         for name, sp in self.flag_spins.items():
             sp.blockSignals(True)
+            if name in fields:
+                sp.setRange(0, (1 << fields[name][0]) - 1)
             sp.setValue(int(d.get(name, 0)))
             sp.blockSignals(False)
+        # 只启用本版本真正定义的位（DMC5 v10 与 v19/v21 的 TessFactor / 两侧位不同），
+        # 否则勾一个“不存在的位”会静默不生效。
+        avail = set(fields)
+        for name, cb in self.flag_checks.items():
+            cb.setEnabled(not self._struct_readonly and name in avail)
+            cb.setToolTip("" if name in avail
+                          else "mdf2.%d 没有定义这个位" % m.mdf_version)
+        for name, sp in self.flag_spins.items():
+            sp.setEnabled(not self._struct_readonly and name in avail)
+            sp.setToolTip("" if name in avail
+                          else "mdf2.%d 没有定义这个位" % m.mdf_version)
         if m.mdf_version >= 31:
             extra = ["%s=%s" % (n, d.get(n)) for n, _b, _w, _s in FLAG_B_FIELDS]
             self.lbl_flags_b.setText("flagsB: " + "  ".join(extra))
@@ -3057,7 +3073,7 @@ class Mdf2Panel(QWidget):
             return
         d = m.flags_dict()
         d[name] = val
-        m.flags = encode_material_flags(d)
+        m.flags = encode_flags(d, m.mdf_version)
 
     def set_texture(self):
         if self._readonly:
@@ -7899,7 +7915,7 @@ _FLAG_TIPS = {
     "ForcedTwoSideEnable": "强制双面（不论其它条件）",
     "TwoSideEnable": "双面渲染",
     "TransparentZPostPassEnable": "透明材质参与 Z 后处理 pass",
-    "TessFactor": "细分因子（5 位）",
+    "TessFactor": "细分因子（v10=8 位@8；v21+=5 位@11）",
     "PhongFactor": "Phong 高光强度（8 位）",
     "RoughTransparentEnable": "粗糙半透明",
     "ForcedAlphaTestEnable": "强制 alpha 测试",
@@ -8889,7 +8905,9 @@ class MaterialAttrsDialog(QDialog):
         g = QGridLayout(box)
         g.setVerticalSpacing(4)
         col = rowi = 0
-        for name, width, bit in mdf2lib.FLAG_BIT_OFFSETS:
+        # DMC5 = mdf2 v10：TessFactor 是 8 位@8（v21 的 Forced/TwoSide/ZPost 位在 v10 里
+        # 属于 TessFactor 的值），所以这里按 v10 的字段表建控件。
+        for name, width, bit in mdf2lib.flag_fields(10):
             cur_v = cur["flags"].get(name)
             if width == 1:
                 w = QCheckBox("%s  (bit %d)" % (name, bit))
@@ -8941,7 +8959,7 @@ class MaterialAttrsDialog(QDialog):
         d = {}
         for name, w in self._w.items():
             d[name] = w.isChecked() if isinstance(w, QCheckBox) else w.value()
-        return mdf2lib.encode_material_flags(d) & 0xFFFFFFFF
+        return mdf2lib.encode_flags(d, 10) & 0xFFFFFFFF
 
     def _refresh_flags_label(self):
         lbl = getattr(self, "lbl_new", None)

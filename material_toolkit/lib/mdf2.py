@@ -190,8 +190,36 @@ def shading_type_value(name: str, game="DMC5"):
     return dict(shading_types(game)).get(name)
 
 
-# 材质 flags(4B) 位布局(LSB 在前; 参考 RE-Mesh-Editor 的 MDFFlags)。
-# 每项 (名字, 位宽): 位宽=1 为布尔; TessFactor/PhongFactor 为整数。
+# 材质 flags 位布局**按 MDF 版本分**（2026-11-07 用 DMC5 语料自证）：
+#   v10(DMC5) bits0-7 基础布尔 / bits8-15 TessFactor(8 位) / 16-23 PhongFactor /
+#              24 ForcedAlphaTestEnable / 25 AlphaTestEnable
+#   v13       TessFactor 8 位@8，bits24-26 Rough/ForcedAlpha/Alpha
+#   v19       插入 Forced/TwoSide(bits8-9)，TessFactor 移到 bit10(6 位)
+#   v21+      再加 bit10 TransparentZPostPassEnable，TessFactor 移到 bit11(5 位)
+#   v31+      material_flags 为 8 字节，高 32 位见 FLAG_B_FIELDS
+# 证据：DMC5 解包 2054 个 mdf2 / 10013 个材质中，bits8-15 非零的 82 个材质该字节恒为
+# 0x2F（= 47）；按 v21 读会变成 ForcedTwoSide+TwoSide+ZPost 三个布尔 + TessFactor=5。
+# 每项 (名字, 位宽): 位宽=1 为布尔；TessFactor/PhongFactor 为整数。
+_BASE_FLAG_NAMES = (
+    "BaseTwoSideEnable", "BaseAlphaTestEnable", "ShadowCastDisable", "VertexShaderUsed",
+    "EmissiveUsed", "TessellationEnable", "EnableIgnoreDepth", "AlphaMaskUsed",
+)
+
+V10_FLAG_FIELDS = [
+    *[(n, 1) for n in _BASE_FLAG_NAMES], ("TessFactor", 8), ("PhongFactor", 8),
+    ("ForcedAlphaTestEnable", 1), ("AlphaTestEnable", 1),
+]
+V13_FLAG_FIELDS = [
+    *[(n, 1) for n in _BASE_FLAG_NAMES], ("TessFactor", 8), ("PhongFactor", 8),
+    ("RoughTransparentEnable", 1), ("ForcedAlphaTestEnable", 1), ("AlphaTestEnable", 1),
+]
+V19_FLAG_FIELDS = [
+    *[(n, 1) for n in _BASE_FLAG_NAMES], ("ForcedTwoSideEnable", 1),
+    ("TwoSideEnable", 1), ("TessFactor", 6), ("PhongFactor", 8),
+    ("RoughTransparentEnable", 1), ("ForcedAlphaTestEnable", 1),
+    ("AlphaTestEnable", 1), ("SSSProfileUsed", 1), ("EnableStencilPriority", 1),
+    ("RequireDualQuaternion", 1), ("PixelDepthOffsetUsed", 1), ("NoRayTracing", 1),
+]
 MATERIAL_FLAG_FIELDS = [
     ("BaseTwoSideEnable", 1), ("BaseAlphaTestEnable", 1), ("ShadowCastDisable", 1),
     ("VertexShaderUsed", 1), ("EmissiveUsed", 1), ("TessellationEnable", 1),
@@ -204,30 +232,43 @@ MATERIAL_FLAG_FIELDS = [
 ]
 
 
-def _flag_bit_offsets():
+def _flag_offsets(fields):
     out, bit = [], 0
-    for name, width in MATERIAL_FLAG_FIELDS:
+    for name, width in fields:
         out.append((name, width, bit))
         bit += width
     return out
 
 
-FLAG_BIT_OFFSETS = _flag_bit_offsets()
+FLAG_BIT_OFFSETS = _flag_offsets(MATERIAL_FLAG_FIELDS)   # v21+（兼容旧调用）
 
 
-def decode_material_flags(v: int) -> dict:
-    """u32 -> {名字: True/False 或 整数(TessFactor/PhongFactor)}。"""
+def flag_fields(version=10):
+    """按 mdf2 版本返回 [(名字, 位宽, 位偏移)]（未知的位不列）。"""
+    if version >= 21:
+        return FLAG_BIT_OFFSETS
+    if version >= 19:
+        return _flag_offsets(V19_FLAG_FIELDS)
+    if version >= 13:
+        return _flag_offsets(V13_FLAG_FIELDS)
+    return _flag_offsets(V10_FLAG_FIELDS)
+
+
+def decode_material_flags(v: int, version=None) -> dict:
+    """u32 -> {名字: True/False 或 整数}；version=None 用 v21+ 布局（兼容旧调用）。"""
+    fields = FLAG_BIT_OFFSETS if version is None else flag_fields(version)
     out = {}
-    for name, width, bit in FLAG_BIT_OFFSETS:
+    for name, width, bit in fields:
         val = (v >> bit) & ((1 << width) - 1)
         out[name] = bool(val) if width == 1 else val
     return out
 
 
-def encode_material_flags(d: dict) -> int:
-    """{名字: 值} -> u32(未提供的位视作 0)。"""
+def encode_material_flags(d: dict, version=None) -> int:
+    """{名字: 值} -> u32（未提供的位视作 0；不在该版本布局里的名字忽略）。"""
+    fields = FLAG_BIT_OFFSETS if version is None else flag_fields(version)
     out = 0
-    for name, width, bit in FLAG_BIT_OFFSETS:
+    for name, width, bit in fields:
         val = int(d.get(name, 0)) & ((1 << width) - 1)
         out |= val << bit
     return out
@@ -250,7 +291,7 @@ FLAG_B_FIELDS = [
 
 def decode_flags(v: int, version: int = 10) -> dict:
     """按 mdf2 版本解 flags：<31 为 u32；>=31 为 u64(低 32 位同名，高 32 位见 FLAG_B_FIELDS)。"""
-    out = decode_material_flags(v & 0xFFFFFFFF)
+    out = decode_material_flags(v & 0xFFFFFFFF, version)
     if version >= 31:
         for name, bit, width, signed in FLAG_B_FIELDS:
             val = (int(v) >> bit) & ((1 << width) - 1)
@@ -261,7 +302,7 @@ def decode_flags(v: int, version: int = 10) -> dict:
 
 
 def encode_flags(d: dict, version: int = 10) -> int:
-    out = encode_material_flags(d)
+    out = encode_material_flags(d, version)
     if version >= 31:
         for name, bit, width, signed in FLAG_B_FIELDS:
             val = int(d.get(name, 0)) & ((1 << width) - 1)
