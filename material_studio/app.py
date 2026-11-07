@@ -2594,7 +2594,9 @@ class MmtrReadOnlyPanel(QWidget):
         names = names or []
         top = QTreeWidgetItem(["PSV0 · shader 资源声明 (%d)" % psv["count"], "", "", ""])
         for i, r in enumerate(psv["resources"]):
-            nm = names[i]["name"] if i < len(names) else "(无名字)"
+            # dxc 的 Resource Bindings 只列 DXIL 元数据里存在的项；PSV0 会保留未使用的槽位，
+            # 所以末尾几条没有名字是正常的（不是解析失败）。
+            nm = names[i]["name"] if i < len(names) else "(DXIL 未列出)"
             slot = "id=%d" % r["id"]
             if r["lower"] == 0xFFFFFFFF:
                 slot += " lower=unbounded"
