@@ -268,3 +268,71 @@ def pass_family(name):
     if low.endswith("cs") or "compute" in low:
         return "Compute"
     return "其它"
+
+
+# ---------------------------------------------------------------- 变体归并（DMC5/MHWS 共用）
+# 记录名 = [标志前缀] + 技术名。前缀来自 mdf2 的 alpha-test / two-sided 标志，
+# DMC5 与 MHWS 同一套字母，但 MHWS 还多出 `Direct`（以及 TSDirect）
+# —— 实测 base_otomo_equip_gold：914 个名字 = 206 个技术 × 下列前缀。
+# 顺序必须长优先，否则 `ATSDirect` 会被拆成 `A` + `TSDirect`。
+VARIANT_PREFIXES = ("ATSDirect", "TSDirect", "ADirect", "Direct", "ATS", "TS", "A")
+STAGE_ORDER = ("ps", "vs", "hs", "ds", "gs", "cs")
+
+
+def split_prefix(name):
+    """记录名 -> (标志前缀, 技术名)。`ATSShadowStatic` -> ('ATS', 'ShadowStatic')。
+
+    只按字母表切，不校验剩余部分；调用方如果需要防误拆，用 `group_variants`
+    （它会先用本文件的“无前缀名字”做白名单）。
+    """
+    n = name or ""
+    for p in VARIANT_PREFIXES:
+        if n.startswith(p):
+            return p, n[len(p):]
+    return "", n
+
+
+def group_variants(records, cols):
+    """真实记录 -> {技术名: [程序组]}，技术名已去掉标志前缀。
+
+    程序组 = 程序元组 `(ps, vs, hs, ds, gs, cs)` 完全相同的记录集合，
+    保留它们用到的前缀与“行号”（row = 记录下标 // cols；记录表是行主序，
+    同一列的各行共用一个技术名，实测 DMC5/MHWS 全部文件 0 例外）。
+
+    前缀白名单：只有“去掉前缀后能在本文件的无前缀名字里找到”时才拆，
+    避免把恰好以 A/TS 开头的普通技术名误拆。
+
+    返回：
+      {tech: [ {programs, prefixes, rows, indices} ]}（组内已排序）
+    """
+    recs = [e for e in records if e.get("has_program")]
+    base_names = set()
+    for e in recs:
+        pre, tech = split_prefix(e["name"])
+        if not pre:
+            base_names.add(tech)
+    out = {}
+    for e in recs:
+        name = e["name"] or ""
+        pre, tech = split_prefix(name)
+        if pre and tech not in base_names:
+            pre, tech = "", name
+        key = tuple(e["stages"][k][0] for k in STAGE_ORDER)
+        row = (e["index"] // cols) if cols else 0
+        groups = out.setdefault(tech, {})
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"programs": key, "prefixes": set(),
+                               "rows": set(), "indices": []}
+        g["prefixes"].add(pre)
+        g["rows"].add(row)
+        g["indices"].append(e["index"])
+    ret = {}
+    for tech, groups in out.items():
+        items = []
+        for g in groups.values():
+            g["prefixes"] = sorted(g["prefixes"])
+            g["rows"] = sorted(g["rows"])
+            items.append(g)
+        ret[tech] = sorted(items, key=lambda x: (x["rows"], x["prefixes"], x["programs"]))
+    return ret

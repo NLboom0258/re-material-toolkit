@@ -443,6 +443,25 @@ def blob_signatures(blob):
     return out
 
 
+def dxil_version(blob):
+    """DXIL chunk 里的 DXIL 版本 -> "1.2"/"1.6" 这类字符串；不是 DXIL 返回 None。
+
+    DXIL chunk 的 payload 是一个 98B 头：
+        +0x00 header size | +0x04 bitcode offset | +0x08 "DXIL"
+        +0x0C version(低字节=minor, 高字节=major) | ...
+    实测 MHWS：行 0 = 1.2（≈SM6.2），其余行 = 1.6（≈SM6.6）。
+    """
+    for tag, off, size in dxbc_chunks(blob):
+        if tag != "DXIL":
+            continue
+        p = off + 8
+        if p + 16 > len(blob) or blob[p + 8:p + 12] != b"DXIL":
+            return None
+        minor, major = blob[p + 12], blob[p + 13]
+        return "%d.%d" % (major, minor)
+    return None
+
+
 # ---------------------------------------------------------------- PSV0（DXIL 资源声明）
 # DXIL 没有 RDEF，资源声明在 PSV0 chunk 里（实测 MHWS，与 `dxc -dumpbin` 的
 # Resource Bindings 表逐项对应）：

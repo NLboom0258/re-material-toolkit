@@ -26,19 +26,20 @@
   stage 位掩码: 0x01=VS / 0x10=PS / 0x11=VS|PS(共享)。
 名称池 16B: [name_off(u64)][hash(u32)][0(u32)]。
 """
-import re
 import struct
 
 try:
     from .binding import blob_list, discover_groups, _u32, _u64, _str
     from .mmtr import Mmtr
     from . import game_profile as _GP
+    from .mmtr_scan import split_prefix as _split_prefix
 except ImportError:  # 允许脚本直接 import
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from binding import blob_list, discover_groups, _u32, _u64, _str
     from mmtr import Mmtr
     import game_profile as _GP
+    from mmtr_scan import split_prefix as _split_prefix
 
 HEADER_MAGIC = b"SDF\0"
 
@@ -120,16 +121,15 @@ def stage_label(mask):
     return "|".join(labs) if labs else f"0x{mask:02x}"
 
 
-_PREFIX_RE = re.compile(r"^(ATSDirect|ADirect|ATS|A|TS)?")
-
-
 def split_variant_name(name):
-    """变体名 -> (标志前缀, 技术名)。如 'ATSShadowStatic' -> ('ATS', 'ShadowStatic')。"""
+    """变体名 -> (标志前缀, 技术名)。如 'ATSShadowStatic' -> ('ATS', 'ShadowStatic')。
+
+    规则统一在 `mmtr_scan.VARIANT_PREFIXES`（DMC5 / MHWS 共用，长前缀优先：
+    MHWS 还有 `Direct` / `TSDirect`；对 DMC5 现有名字行为不变）。
+    """
     if not name:
         return "", ""
-    m = _PREFIX_RE.match(name)
-    pre = m.group(1) or ""
-    return pre, name[len(pre):]
+    return _split_prefix(name)
 
 
 class VariantRecord:

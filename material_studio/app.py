@@ -52,7 +52,7 @@ from material_toolkit.lib import mmtr_scan as SCAN  # noqa: E402
 from material_toolkit.lib.mmtr_blobs import (  # noqa: E402
     extract_blob, disassemble_dxbc, disassemble_dxil, assemble_asm, verify_dxbc,
     find_translator, run_translator, check_asm, find_assembler,
-    blob_signatures, mask_str, parse_psv0, psv0_names_from_dxc,
+    blob_signatures, mask_str, parse_psv0, psv0_names_from_dxc, dxil_version,
 )
 from material_toolkit.lib.mmtr_model import MmtrModel  # noqa: E402
 from material_toolkit.lib.mmtr_material import MaterialModel, parse_technology  # noqa: E402
@@ -2343,7 +2343,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.tree_pool = QTreeWidget()
         self.tree_pool.setHeaderLabels(["SRV 名", "引用记录数"])
         self.tree_tech = QTreeWidget()
-        self.tree_tech.setHeaderLabels(["pass / 技术 / 程序", "程序 (PS·VS·CS)", "目标"])
+        self.tree_tech.setHeaderLabels(["pass / 技术 / 前缀", "程序 (PS·VS·CS)", "行 / DXIL"])
         self.txt_blob = QPlainTextEdit()
         self.txt_blob.setReadOnly(True)
         self.txt_blob.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -2417,6 +2417,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.data = bytes(data)
         self.path = path
         self.view = view
+        self._row_ver = None          # 行 -> DXIL 版本（换文件时重算）
         self.records = SCAN.record_entries(self.data, view)
         self.blobs = SCAN.blob_list(self.data, view, self.records)
         self.usage = SCAN.blob_usage(self.data, view, self.records)
@@ -2670,27 +2671,68 @@ class MmtrReadOnlyPanel(QWidget):
         """pass 家族（规则在 lib/mmtr_scan.pass_family，纯逻辑便于测试）。"""
         return SCAN.pass_family(name)
 
+    def _row_dxil(self):
+        """行号 -> DXIL 版本（每行取第一个有程序的 blob；结果缓存）。
+
+        实测：行 0 的 DXIL 是 1.2（≈SM6.2），其余行是 1.6（≈SM6.6）——
+        所以“行”不是渲染目标，而是引擎按设备/能力选的编译档。
+        """
+        if getattr(self, "_row_ver", None) is not None:
+            return self._row_ver
+        cols = self.view.shape.cols or 0
+        out = {}
+        if cols:
+            for e in self.records:
+                if not e["has_program"]:
+                    continue
+                r = e["index"] // cols
+                if r in out:
+                    continue
+                for key in ("ps", "vs", "cs", "hs", "ds", "gs"):
+                    off, size = e["stages"][key]
+                    if off and size:
+                        ver = dxil_version(self.data[off:off + size])
+                        if ver:
+                            out[r] = ver
+                            break
+        self._row_ver = out
+        return out
+
     def refresh_tech(self):
-        """变体页（与 DMC5 同构）：pass -> 技术名 -> 目标行（PS/VS/… 的 blob 下标）。"""
+        """变体页（与 DMC5 同构）：pass -> 技术（去标志前缀）-> 程序组。
+
+        与 DMC5 的差别只在“行”：DMC5 的 4 行字节相同（设备冗余副本），程序
+        元组自然合一；MHWS 各行是不同 DXIL 档，所以程序组会按行分开，
+        第三列标出行号与 DXIL 版本。
+        """
+        cols = self.view.shape.cols or 0
+        groups = SCAN.group_variants(self.records, cols)
+        row_ver = self._row_dxil()
         fams = {}
-        for e in self.records:
-            if e["has_program"]:
-                fams.setdefault(self._pass_family(e["name"]), {}).setdefault(
-                    e["name"] or "(未命名)", []).append(e)
+        for tech in groups:
+            fams.setdefault(self._pass_family(tech), []).append(tech)
         self.tree_tech.clear()
         for fam, techs in sorted(fams.items()):
             fitem = QTreeWidgetItem(["pass: %s" % fam, "%d 技术" % len(techs), ""])
-            for tech, es in sorted(techs.items()):
-                titem = QTreeWidgetItem([tech, "%d 目标" % len(es), ""])
-                for t, e in enumerate(es):
+            for tech in sorted(techs):
+                items = groups[tech]
+                slots = sum(len(g["indices"]) for g in items)
+                titem = QTreeWidgetItem([tech, "%d 组程序" % len(items),
+                                         "%d 个槽" % slots])
+                for g in items:
+                    plab = ", ".join(p or "(无标志)" for p in g["prefixes"])
+                    pr = dict(zip(SCAN.STAGE_ORDER, g["programs"]))
                     progs = []
                     for key, lab in (("ps", "PS"), ("vs", "VS"), ("cs", "CS"),
                                      ("hs", "HS"), ("ds", "DS"), ("gs", "GS")):
-                        ptr = e["stages"][key][0]
+                        ptr = pr.get(key) or 0
                         if ptr:
                             progs.append("%s=%s" % (lab, self._blob_at.get(ptr, "?")))
-                    titem.addChild(QTreeWidgetItem(["target %d" % t,
-                                                    " ".join(progs) or "-", ""]))
+                    rows = ", ".join(
+                        "行%d%s" % (r, ("·DXIL" + row_ver[r]) if r in row_ver else "")
+                        for r in g["rows"])
+                    titem.addChild(QTreeWidgetItem(["<- %s" % plab,
+                                                    " ".join(progs) or "-", rows]))
                 fitem.addChild(titem)
             self.tree_tech.addTopLevelItem(fitem)
         self.tree_tech.expandToDepth(1)
