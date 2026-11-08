@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""mmtr 最小写入：同尺寸 blob 替换（Stage B 第一步）。
+"""mmtr 写入：同尺寸替换 + 改尺寸重排（Stage B）。
 
-只做一件事
-----------
-把某条记录的某个 stage 的 DXBC 容器**原地**换掉（尺寸必须相同），并重算
-blob 后的 8 字节缓存键（MHWS；DMC5 没有）。不改偏移、不改尺寸、不改计数，
-因此不需要重排，也不影响其他记录。
+两个入口
+--------
+`replace_blob_at()` / `replace_blob()`
+    把某个 blob **原地**换掉（尺寸必须相同），重算 8 字节缓存键。不改偏移。
+`resize_blob_at()` / `resize_blob()`
+    **任意尺寸**：按顺序重建 blob 区、平移所有 stage 指针、重算全部 8 字节键。
+    这是“换一个尺寸不同的 shader”的唯一入口。
 
-为什么这是安全的第一步
-----------------------
-* 容器里没有任何“整文件校验和”，8 字节键只依赖 blob 自身（`xxh64(seed=0xFFFFFFFF)`）；
-* 记录里的 (ptr, size) 不变 ⇒ 描述符表、名称池、其他 blob 全部不受影响；
-* 替换后可以立刻自校验：`blob_cache_key(new) == 写回的键`。
+为什么改尺寸是干净的（偏移普查，2026-11-09）
+--------------------------------------------
+全文件头部区里**只有记录里的 7 个 stage 指针**指向 blob 区；
+描述符表/名称池/字符串池全部指向头部区，不需要平移；文件尾也没有索引。
+所以重排 = 平移这些指针 + 改目标记录的尺寸 + 重算键。
 
-**注意：blob 是跨记录共享的**（MHWS 里 585 个 blob 中 498 个被多条记录引用，最多 88 条）。
-本函数按 (ptr, size) 原地替换，所以**所有引用它的记录会一起变**。若只想改一条记录的
-program，需要先给这条记录复制一份 blob——那属于“改尺寸/新增 blob”，不在本函数范围。
-先调用 `blob_refs()` 看清共享范围。
+前置校验：首块必须从 `blob_start` 开始、彼此连续、末块 + trailer == 文件尾；
+否则拒绝（宁可不写）。改写前建议先 `blob_refs()` 看共享范围 ——
+blob 跨记录共享，改一个就是改所有引用它的记录。
 
 不做（留给后续 Stage）
 ----------------------
-* 改尺寸（会导致后续 blob 全部位移，需要重排 + 重写所有指针）；
 * 新增/删除 blob（容器尾部没有索引可挂）；
 * 改绑定表、状态块、声明块（这些块的尾哈希算法未解，只能整块复制）；
 * 改 per-stage 计数（同尺寸替换不改变绑定数量）。
@@ -147,3 +147,99 @@ def verify_trailers(data, view):
             if len(details) < 5:
                 details.append((ptr, size, want, got))
     return ok, bad, details
+
+
+# ---------------------------------------------------------------- 改尺寸重排
+def _blob_layout(data, view):
+    """blob 区按位置排序的 [(ptr, size)]，并校验“首块在 blob_start、彼此连续、到文件尾”。"""
+    try:
+        from .mmtr_scan import blob_list
+    except ImportError:  # pragma: no cover
+        from mmtr_scan import blob_list
+    blobs = blob_list(data, view)
+    if not blobs:
+        raise PatchError("没有找到 blob")
+    trailer = view.profile.blob_trailer
+    cur = view.blob_start
+    for ptr, size in blobs:
+        if ptr != cur:
+            raise PatchError("blob 区不连续：期望 0x%X，实际 0x%X" % (cur, ptr))
+        cur = ptr + size + trailer
+    if cur != len(data):
+        raise PatchError("blob 区未到文件尾：0x%X != %d" % (cur, len(data)))
+    return blobs
+
+
+def resize_blob_at(data, view, ptr, new_blob):
+    """把 ptr 处的 blob 换成**任意尺寸**，返回 (新 bytes, info)。
+
+    重排 = 重建 blob 区 + 平移所有 stage 指针 + 重算全部 8 字节键。
+    只更新引用目标 blob 的记录的尺寸；其余记录除指针外不动。
+    """
+    if not isinstance(new_blob, (bytes, bytearray, memoryview)):
+        raise PatchError("new_blob 必须是 bytes")
+    new_blob = bytes(new_blob)
+    if new_blob[:4] != DXBC_MAGIC:
+        raise PatchError("不是 DXBC 容器（magic=%r）" % new_blob[:4])
+    blobs = _blob_layout(data, view)
+    sizes = dict(blobs)
+    if ptr not in sizes:
+        raise PatchError("ptr=0x%X 不是 blob 起点" % ptr)
+    trailer = view.profile.blob_trailer
+
+    # 1) 按顺序重建 blob 区（内容不变的块直接搬，键按内容重算）
+    out = bytearray(data[:view.blob_start])
+    pos = {}
+    cur = view.blob_start
+    keyed = 0
+    for p, s in blobs:
+        body = new_blob if p == ptr else bytes(data[p:p + s])
+        pos[p] = cur
+        out += body
+        cur += len(body)
+        if trailer:
+            out += struct.pack("<Q", blob_cache_key(body))
+            cur += trailer
+            keyed += 1
+    if cur != len(out):
+        raise PatchError("重建后长度不符：%d != %d" % (cur, len(out)))
+
+    # 2) 平移记录里的指针，并把引用目标的记录尺寸改成新尺寸
+    new_size = len(new_blob)
+    slots = 0
+    touched = set()
+    for i in range(view.n_records):
+        rec = view.rec_base + i * view.rec_stride
+        rec_hit = False
+        for slot in view.profile.stages:
+            o = rec + slot.ptr_off
+            old = struct.unpack_from("<Q", out, o)[0]
+            if not old:
+                continue
+            np = pos.get(old)
+            if np is None:
+                raise PatchError("记录 %d %s 指向未知 blob 0x%X" % (i, slot.key, old))
+            if np != old:
+                struct.pack_into("<Q", out, o, np)
+            if old == ptr:
+                struct.pack_into("<I", out, rec + slot.size_off, new_size)
+                slots += 1
+                rec_hit = True
+        if rec_hit:
+            touched.add(i)
+
+    info = {"old_ptr": ptr, "new_ptr": pos[ptr], "old_size": sizes[ptr],
+            "new_size": new_size, "delta": new_size - sizes[ptr],
+            "trailer": trailer, "trailers_recomputed": keyed,
+            "stage_slots_updated": slots, "records_updated": len(touched)}
+    return bytes(out), info
+
+
+def resize_blob(data, view, rec_index, stage, new_blob):
+    """按 (记录, stage) 改尺寸替换，返回 (新 bytes, info)。"""
+    ptr, size, _old = record_blob(data, view, rec_index, stage)
+    if not ptr:
+        raise PatchError("记录 %d 的 %s 没有程序" % (rec_index, stage))
+    out, info = resize_blob_at(data, view, ptr, new_blob)
+    info.update({"rec_index": rec_index, "stage": stage})
+    return out, info

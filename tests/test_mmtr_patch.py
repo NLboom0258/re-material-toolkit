@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from material_toolkit.lib import dxbc_container as DC  # noqa: E402
 from material_toolkit.lib import game_profile as GP  # noqa: E402
 from material_toolkit.lib import hashes as H  # noqa: E402
 from material_toolkit.lib import mmtr_patch as PT  # noqa: E402
@@ -135,10 +136,106 @@ def _case_dmc5():
     print("DMC5: rec#%d %s diff=%d (no trailer) ok" % (e["index"], e["name"], len(diff)))
 
 
+def _case_resize_mhws():
+    if not os.path.exists(MHWS):
+        print("no MHWS sample, skip resize")
+        return
+    data, view = _load(MHWS)
+    e = _pick_rec_with_ps(data, view)
+    ptr, size, old = PT.record_blob(data, view, e["index"], "ps")
+    refs = PT.blob_refs(data, view, ptr)
+    n_blobs = len(SC.blob_list(data, view))
+
+    # 合法的“大 100 字节”容器：把 ISG1 撑大（与容器重建串起来用）
+    bigger = DC.replace(old, "ISG1", DC.chunk(old, "ISG1") + bytes(100))
+    assert len(bigger) == size + 100
+
+    out, info = PT.resize_blob(data, view, e["index"], "ps", bigger)
+    assert len(out) == len(data) + 100, (len(out), len(data))
+    assert info["delta"] == 100
+    assert info["records_updated"] == len({r for r, _ in refs}), (
+        info["records_updated"], len(refs))
+    assert info["stage_slots_updated"] == len(refs)
+    assert info["trailers_recomputed"] == n_blobs
+
+    # 重新解析：每个非空 stage 指针都能读出完整容器
+    v2 = GP.resolve(out, int(MHWS.rsplit(".", 1)[1]))
+    assert len(SC.blob_list(out, v2)) == n_blobs
+    for e2 in SC.record_entries(out, v2):
+        for st, (p, s) in e2["stages"].items():
+            if not p:
+                continue
+            assert out[p:p + 4] == b"DXBC", (e2["index"], st, hex(p))
+            assert DC.parse(bytes(out[p:p + s]))["total"] == s, (e2["index"], st)
+    p2, s2, b2 = PT.record_blob(out, v2, e["index"], "ps")
+    assert (s2, b2) == (size + 100, bigger)
+    ok, bad, _ = PT.verify_trailers(out, v2)
+    assert bad == 0 and ok == n_blobs, (ok, bad)
+
+    # 往返：换回原 blob ⇒ 逐字节还原
+    back, _ = PT.resize_blob_at(out, v2, p2, old)
+    assert back == data, "resize roundtrip is not byte-identical"
+    print("MHWS resize: %d -> %d (+100), ptr shifted, %d keys ok, roundtrip identical"
+          % (len(data), len(out), ok))
+
+
+def _case_resize_dmc5():
+    if not os.path.exists(DMC5):
+        print("no DMC5 sample, skip resize")
+        return
+    data, view = _load(DMC5)
+    e = _pick_rec_with_ps(data, view)
+    ptr, size, old = PT.record_blob(data, view, e["index"], "ps")
+    n_blobs = len(SC.blob_list(data, view))
+    bigger = DC.replace(old, "STAT", DC.chunk(old, "STAT") + bytes(64))
+    out, info = PT.resize_blob(data, view, e["index"], "ps", bigger)
+    assert len(out) == len(data) + 64 and info["trailer"] == 0
+    v2 = GP.resolve(out, 1808168797)
+    assert len(SC.blob_list(out, v2)) == n_blobs
+    p2, s2, b2 = PT.record_blob(out, v2, e["index"], "ps")
+    assert s2 == size + 64 and b2 == bigger
+    back, _ = PT.resize_blob_at(out, v2, p2, old)
+    assert back == data
+    print("DMC5 resize: +64 bytes, no trailer, roundtrip identical")
+
+
+def _case_resize_guards():
+    if not os.path.exists(MHWS):
+        print("no MHWS sample, skip resize guards")
+        return
+    data, view = _load(MHWS)
+    e = _pick_rec_with_ps(data, view)
+    ptr, size, old = PT.record_blob(data, view, e["index"], "ps")
+    try:
+        PT.resize_blob_at(data, view, ptr + 1, old)   # 不是 blob 起点
+    except PT.PatchError:
+        pass
+    else:
+        raise AssertionError("must reject non-blob ptr")
+    try:
+        PT.resize_blob_at(data, view, ptr, b"XXXX" + old[4:])
+    except PT.PatchError:
+        pass
+    else:
+        raise AssertionError("must reject bad magic")
+    # 破坏连续性（在 blob 区中间插 4 字节）
+    broken = data[:ptr] + bytes(4) + data[ptr:]
+    try:
+        PT.resize_blob_at(broken, view, ptr, old)
+    except PT.PatchError:
+        pass
+    else:
+        raise AssertionError("must reject broken blob layout")
+    print("resize guards: non-blob / bad-magic / broken-layout all rejected")
+
+
 def main():
     _case_mhws()
     _case_guards()
     _case_dmc5()
+    _case_resize_mhws()
+    _case_resize_dmc5()
+    _case_resize_guards()
     print("OK")
 
 
