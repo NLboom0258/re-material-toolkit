@@ -26,11 +26,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from material_toolkit.lib import mdf2 as M  # noqa: E402
 
 MHWS_ROOT = r"E:\Project\Other\Mod\REEngine\MH\MHWs\Unpack\natives\stm"
+# 解包目录不在时回退到入库的原版样本（主仓 assets/original；不要用 mod 产出的 mdf2 当基准）
+ORIGINAL_ASSETS = r"E:\Project\Other\REEngine-mmtrReverse\assets\original"
 TMP = os.path.join(os.environ.get("TEMP", "."), "_mdf2_v31_test.mdf2.45")
 
 
 def _sample_files(limit=8):
     files = glob.glob(os.path.join(MHWS_ROOT, "**", "*.mdf2.45"), recursive=True)
+    if not files:
+        files = glob.glob(os.path.join(ORIGINAL_ASSETS, "*.mdf2.45"))
     if not files:
         return []
     random.seed(7)
