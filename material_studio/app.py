@@ -2350,6 +2350,14 @@ class MmtrReadOnlyPanel(QWidget):
         self.lbl_param = QLabel()
         self.lbl_param.setWordWrap(True)
         self.lbl_param.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.lbl_param.setStyleSheet("color:#888;")
+        self.tree_param = QTreeWidget()
+        self.tree_param.setHeaderLabels(["参数", "偏移", "大小", "类型"])
+        param_page = QWidget()
+        pv = QVBoxLayout(param_page)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.addWidget(self.lbl_param)
+        pv.addWidget(self.tree_param, 1)
 
         self.tabs = QTabWidget()
         bind_page = QWidget()
@@ -2368,7 +2376,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.tabs.addTab(self.tree_sig, "签名")
         self.tabs.addTab(self.tree_group, "组")
         self.tabs.addTab(self.tree_pool, "资源名池")
-        self.tabs.addTab(self.lbl_param, "材质参数")
+        self.tabs.addTab(param_page, "材质参数")
         self.tabs.addTab(self.tree_tech, "变体")
         blob_page = QWidget()
         bv = QVBoxLayout(blob_page)
@@ -2424,6 +2432,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.refresh_info()
         self.refresh_blobs()
         self.refresh_pool()
+        self.refresh_params()
         self.refresh_tech()
         self.refresh_blob_detail()
         self._emit_title()
@@ -2446,12 +2455,37 @@ class MmtrReadOnlyPanel(QWidget):
             "%s · 版本 %s · 记录 %d（有程序 %d）· blob %d · 步长 0x%X · 表 %d×%d"
             % (v.profile.game, ver or "?", v.n_records, used, len(self.blobs),
                v.rec_stride, v.shape.rows, v.shape.cols))
+
+    def refresh_params(self):
+        """材质参数页：读 mmtr 的 UserMaterial 成员表（DXIL 无 RDEF，但表仍在）。
+
+        Deferred/GBuffer 的记录不绑 UserMaterial（PS 走 bindless），所以这里按
+        “文件里出现过的表”展示，而不是按选中 blob；同一母材质通常只有一张表。
+        只读：不做和 mdf2 的一致性校验，也不写回。
+        """
+        self.tree_param.clear()
+        tables = SCAN.user_material_tables(self.data, self.view, self.records)
+        if not tables:
+            self.lbl_param.setText(
+                "本文件没有 UserMaterial 成员表（该母材质可能不声明材质参数）。")
+            return
         self.lbl_param.setText(
-            "DXIL(SM6) 构建没有 RDEF 反射数据；本工具的材质参数页依赖 RDEF 的\n"
-            "UserMaterial cbuffer，所以暂不解析（不影响记录/绑定/blob 查看）。\n"
-            "输入/输出签名见「签名」页（直接读 ISG1/OSG1，不依赖 RDEF）。\n\n"
-            "blob 编辑同样暂不可用：内置汇编器只支持 SM5.0，而这里的\n"
-            "DXIL 是 SM6+，且每个 blob 后还跟 8 字节运行时缓存键。")
+            "取自 mmtr 的 UserMaterial 成员表（池条目 32B + 成员 16B："
+            "name / hash / offset(u16) | size(u16)）。mdf2 参数按 名称+顺序+偏移 对应；"
+            "CAPCOM_* 是引擎保留项（mdf2 里没有）。Deferred/GBuffer 的 PS 走 bindless，"
+            "所以表来自 Shadow / PreTransform 等记录。")
+        for t in tables[:4]:
+            top = QTreeWidgetItem(["UserMaterial · %d B / %d 项" % (t["size"], t["count"]),
+                                   "", "", ""])
+            if t["records"]:
+                top.setToolTip(0, "引用记录: " + ", ".join(t["records"]))
+            for m in t["members"]:
+                top.addChild(QTreeWidgetItem([m["name"], str(m["offset"]),
+                                              "%d" % m["size"],
+                                              SCAN.member_type_label(m["size"])]))
+            top.setExpanded(True)
+            self.tree_param.addTopLevelItem(top)
+        fit_columns(self.tree_param, [0, 1, 2, 3], pad=18, min_w=60, max_w=420)
 
     def _blob_ref_records(self, off):
         """blob -> 引用它的记录下标（去重、保序）。"""

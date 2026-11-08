@@ -193,6 +193,69 @@ def record_bindings(data, view, rec_off):
     return {d.key: bindings(data, view, rec_off, d.key) for d in view.desc_tables}
 
 
+def cbuffer_members(data, view, rec_off, name="UserMaterial", kind="cb"):
+    """读某条记录里某个 cbuffer 的成员表 -> {name,size,count,members[]} 或 None。
+
+    池条目 32B：name u64 / hash / 0 / size u32 / nvar u32 / members u64；
+    成员 16B：name u64 / hash u32 / packed(offset u16 | size u16)。
+    DMC5 与 MHWS 格式相同。MHWS 的 Deferred/GBuffer PS 不绑 UserMaterial
+    （走 BindlessBuffer / raw buffer），但 Shadow / PreTransform 等记录里仍是
+    这张表，且布局与 mdf2 参数按「名称 + 顺序 + 偏移」逐项对应。
+    """
+    d = view.profile.desc(kind)
+    pool = _u32(data, rec_off + d.pool_off)
+    if not pool:
+        return None
+    bs = view.blob_start
+    for b in bindings(data, view, rec_off, kind):
+        if b["name"] != name:
+            continue
+        po = pool + b["idx"] * 32
+        if po + 32 > len(data):
+            return None
+        size, nvar, members = _u32(data, po + 16), _u32(data, po + 20), _u64(data, po + 24)
+        out = []
+        if members and nvar and members + nvar * 16 <= min(bs, len(data)):
+            for i in range(nvar):
+                mo = members + i * 16
+                packed = _u32(data, mo + 12)
+                out.append({"name": cstring(data, _u64(data, mo), bs),
+                            "hash": _u32(data, mo + 8),
+                            "offset": packed & 0xFFFF,
+                            "size": packed >> 16})
+        return {"name": b["name"], "size": size, "count": nvar, "members": out}
+    return None
+
+
+def user_material_tables(data, view, entries=None):
+    """文件里所有不同的 UserMaterial 成员表 -> [{size,count,members,records[]}]。
+
+    同一母材质里多处记录共用一张表；按成员（名/偏移/大小）去重，
+    records 保留前几个引用它的记录名，便于界面说明来源。
+    """
+    groups = {}
+    order = []
+    for e in (entries if entries is not None else record_entries(data, view)):
+        t = cbuffer_members(data, view, e["off"])
+        if not t or not t["members"]:
+            continue
+        key = (t["size"], tuple((m["name"], m["offset"], m["size"]) for m in t["members"]))
+        if key not in groups:
+            groups[key] = {"size": t["size"], "count": t["count"],
+                           "members": t["members"], "records": []}
+            order.append(key)
+        g = groups[key]
+        if e["name"] and e["name"] not in g["records"] and len(g["records"]) < 6:
+            g["records"].append(e["name"])
+    return [groups[k] for k in order]
+
+
+def member_type_label(nbytes):
+    """成员字节数 -> float / float2 / ... / float4x4（其它给 \"N B\"）。"""
+    return {4: "float", 8: "float2", 12: "float3", 16: "float4",
+            48: "float4x3", 64: "float4x4"}.get(nbytes, "%d B" % nbytes)
+
+
 def name_vocabulary(data, view, entries=None):
     """SRV 名称池里出现的名字 -> 引用记录数（按真实绑定表统计）。"""
     vocab = {}
