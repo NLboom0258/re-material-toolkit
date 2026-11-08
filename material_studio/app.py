@@ -39,8 +39,8 @@ from material_toolkit.lib.binding import (  # noqa: E402
     rename_name_global,
 )
 from material_toolkit.lib.mdf2 import (  # noqa: E402
-    Mdf2, MATERIAL_FLAG_FIELDS, PARAM_TYPES, SHADING_TYPES,
-    encode_material_flags, shading_type_value,
+    Mdf2, PARAM_TYPES, SHADING_TYPES,
+    shading_type_value,
 )
 from material_toolkit.lib.mmtr import Mmtr  # noqa: E402
 from material_toolkit.lib.mmtr_info import (  # noqa: E402
@@ -2366,35 +2366,14 @@ class Mdf2Panel(QWidget):
         self.ed_mmtr.editingFinished.connect(self._apply_mmtr_path)
         rowm.addWidget(self.ed_mmtr, 1)
         mv.addLayout(rowm)
-        gb = QGroupBox("材质 flags")
-        grid = QGridLayout(gb)
+        # flags 的字段随 mdf2 版本变化（v10 / v19 / v21+ 的 TessFactor 与两侧位不同），
+        # 所以控件在打开文件后按版本重建（见 _rebuild_flag_widgets），而不是灰置。
+        self.box_flags = QGroupBox("材质 flags")
+        self.grid_flags = QGridLayout(self.box_flags)
         self.flag_checks = {}
         self.flag_spins = {}
-        ints = []
-        r = c = 0
-        for name, width in MATERIAL_FLAG_FIELDS:
-            if width == 1:
-                cb = QCheckBox(name)
-                cb.toggled.connect(lambda v, nm=name: self._apply_flag(nm, v))
-                self.flag_checks[name] = cb
-                grid.addWidget(cb, r, c)
-                c += 1
-                if c >= 3:
-                    c = 0
-                    r += 1
-            else:
-                ints.append((name, width))
-        if c != 0:
-            r += 1
-        for name, width in ints:
-            sp = QSpinBox()
-            sp.setRange(0, (1 << width) - 1)
-            sp.valueChanged.connect(lambda v, nm=name: self._apply_flag(nm, v))
-            self.flag_spins[name] = sp
-            grid.addWidget(QLabel(name), r, 0)
-            grid.addWidget(sp, r, 1)
-            r += 1
-        mv.addWidget(gb)
+        self._flag_version = None
+        mv.addWidget(self.box_flags)
         mv.addStretch(1)
         self.cmb_shading.currentTextChanged.connect(self._apply_shading)
 
@@ -2425,6 +2404,50 @@ class Mdf2Panel(QWidget):
         attach_menu(self.tree_tex, self._menu_tex)
         attach_menu(self.tree_param, self._menu_param)
         self.tree_param.reordered.connect(self._on_param_moved)
+
+    def _rebuild_flag_widgets(self, version):
+        """按 mdf2 版本重建 flags 控件：只显示该版本真正存在的字段。
+
+        DMC5(v10) 与 v19/v21+ 的差异不是“某项能不能改”，而是位定义本身不同：
+        v10 的 TessFactor 是 8 位@8（该字节就是一个数，没有 Forced/TwoSide/ZPost），
+        v19 是 6 位@10，v21+ 才是 5 位@11 + 三个布尔。灰置会误导，所以直接换控件集。
+        """
+        if version == self._flag_version:
+            return
+        self._flag_version = version
+        grid = self.grid_flags
+        while grid.count():
+            item = grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.flag_checks.clear()
+        self.flag_spins.clear()
+        ints = []
+        r = c = 0
+        for name, width, _bit in mdf2lib.flag_fields(version):
+            if width == 1:
+                cb = QCheckBox(name)
+                cb.toggled.connect(lambda v, nm=name: self._apply_flag(nm, v))
+                self.flag_checks[name] = cb
+                grid.addWidget(cb, r, c)
+                c += 1
+                if c >= 3:
+                    c = 0
+                    r += 1
+            else:
+                ints.append((name, width))
+        if c != 0:
+            r += 1
+        for name, width in ints:
+            sp = QSpinBox()
+            sp.setRange(0, (1 << width) - 1)
+            sp.valueChanged.connect(lambda v, nm=name: self._apply_flag(nm, v))
+            self.flag_spins[name] = sp
+            grid.addWidget(QLabel(name), r, 0)
+            grid.addWidget(sp, r, 1)
+            r += 1
+        self.box_flags.setTitle("材质 flags（mdf2.%d）" % version)
 
     def doc_title(self):
         """标签页标题: 已打开文件用文件名; 未命名(新建)用 NewMDF2.mdf2.10。"""
@@ -2457,6 +2480,7 @@ class Mdf2Panel(QWidget):
 
     def refresh_mats(self):
         keep = self.cur_mat()
+        self._rebuild_flag_widgets(self.obj.game_version if self.obj else 10)
         self.tree_mat.clear()
         for m in self.obj.materials:
             it = QTreeWidgetItem([m.name])
@@ -2635,6 +2659,7 @@ class Mdf2Panel(QWidget):
         self.ed_mmtr.blockSignals(True)
         self.ed_mmtr.setText(m.mmtr_path or "")
         self.ed_mmtr.blockSignals(False)
+        self._rebuild_flag_widgets(m.mdf_version)
         d = m.flags_dict()
         for name, cb in self.flag_checks.items():
             cb.blockSignals(True)
@@ -2666,7 +2691,7 @@ class Mdf2Panel(QWidget):
             return
         d = m.flags_dict()
         d[name] = val
-        m.flags = encode_material_flags(d)
+        m.flags = mdf2lib.encode_flags(d, m.mdf_version)
 
     def set_texture(self):
         if self.obj is None:
@@ -8445,7 +8470,9 @@ class MaterialAttrsDialog(QDialog):
         g = QGridLayout(box)
         g.setVerticalSpacing(4)
         col = rowi = 0
-        for name, width, bit in mdf2lib.FLAG_BIT_OFFSETS:
+        # DMC5 = mdf2 v10：TessFactor 是 8 位@8（v21 的 Forced/TwoSide/ZPost 位在 v10 里
+        # 属于 TessFactor 的值），所以这里按 v10 的字段表建控件。
+        for name, width, bit in mdf2lib.flag_fields(10):
             cur_v = cur["flags"].get(name)
             if width == 1:
                 w = QCheckBox("%s  (bit %d)" % (name, bit))
@@ -8497,7 +8524,7 @@ class MaterialAttrsDialog(QDialog):
         d = {}
         for name, w in self._w.items():
             d[name] = w.isChecked() if isinstance(w, QCheckBox) else w.value()
-        return mdf2lib.encode_material_flags(d) & 0xFFFFFFFF
+        return mdf2lib.encode_material_flags(d, 10) & 0xFFFFFFFF
 
     def _refresh_flags_label(self):
         lbl = getattr(self, "lbl_new", None)
