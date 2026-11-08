@@ -174,7 +174,6 @@ def derive_stringpool(data):
     注: cbuffer **成员名**(如 VAR_*) **不在**头区(实测), 故不纳入。
     """
     model = MmtrModel(data)
-    size_of = dict(model.blobs)
     names = set()
     for off, sz in model.blobs:
         b = data[off:off + sz]

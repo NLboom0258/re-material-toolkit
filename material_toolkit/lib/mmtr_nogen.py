@@ -26,7 +26,6 @@ try:
     from .mmtr_build import SKELETON_HI, REC_LO, REC_SIZE, normalize_base_records
     from .hashes import ascii_hash
 except ImportError:  # 允许脚本直接 import
-    import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import mmtr_blobs as B

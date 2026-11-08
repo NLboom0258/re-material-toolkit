@@ -4,7 +4,6 @@
 HLSL, 再用 d3dcompiler 编译成 ps_5_0。模板负责输入解包 / 法线基 / GBuffer 打包。
 """
 import os
-import re
 
 from . import mmtr_blobs as B
 

@@ -140,7 +140,6 @@ class Mmtr:
         """
         data = self.data
         blob_start = self.blob_start
-        pool_lo, pool_hi = self.string_pool_lo, self.string_pool_hi
 
         # 1. 定位 cbuffer 绑定条目
         cb_entries = self._scan_cbuffer_entries(cbuffer_name)

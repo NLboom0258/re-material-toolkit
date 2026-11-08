@@ -82,7 +82,6 @@ class PakArchive:
             self.error = "%s: %s" % (type(e).__name__, e)
 
     def _load(self):
-        size = os.path.getsize(self.path)
         with open(self.path, "rb") as f:
             head = f.read(16)
             if len(head) < 16:

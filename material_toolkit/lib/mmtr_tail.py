@@ -246,7 +246,7 @@ class TailModel:
         print(f"  tail sections: pool=0x{b['pool']:x} cbuffer=0x{b['cbuffer']:x} "
               f"param=0x{b['param']:x} desc=0x{b['desc']:x} string=0x{b['string']:x} "
               f"blob_start=0x{b['blob_start']:x}")
-        print(f"    sizes: " + " ".join(
+        print("    sizes: " + " ".join(
             f"{k}=0x{len(v):x}" for k, v in self.sections.items()))
         print(f"    pools={len(self.pool_entries)} cbuffers={len(self.cbuffer_entries)} "
               f"params={len(self.param_entries)} desc={len(self.desc_entries)} "
