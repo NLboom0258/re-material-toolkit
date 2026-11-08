@@ -56,6 +56,84 @@ def utf16_hash(name: str) -> int:
     return murmur3_32(name.encode("utf-16-le"), MURMUR3_SEED)
 
 
+# ---------------------------------------------------------------- xxh64
+# MHWS(mmtr 0x110)把每个 shader blob 的缓存键写成 8 字节小端 u64，
+# 值 = XXH64(blob, seed=0xFFFFFFFF)。实测 600/600 个 blob 全中。
+# 这里给纯 Python 实现，避免给工具链加 xxhash 依赖（写入侧要用它重算键）。
+_XXH64_M = 0xFFFFFFFFFFFFFFFF
+_XXH64_P1 = 0x9E3779B185EBCA87
+_XXH64_P2 = 0xC2B2AE3D27D4EB4F
+_XXH64_P3 = 0x165667B19E3779F9
+_XXH64_P4 = 0x85EBCA77C2B2AE63
+_XXH64_P5 = 0x27D4EB2F165667C5
+XXH64_SEED = 0xFFFFFFFF
+
+
+def _rotl64(x, r):
+    return ((x << r) | (x >> (64 - r))) & _XXH64_M
+
+
+def _xxh64_round(acc, inp):
+    acc = (acc + inp * _XXH64_P2) & _XXH64_M
+    acc = _rotl64(acc, 31)
+    return (acc * _XXH64_P1) & _XXH64_M
+
+
+def _xxh64_merge(acc, val):
+    val = _xxh64_round(0, val)
+    acc ^= val
+    return (acc * _XXH64_P1 + _XXH64_P4) & _XXH64_M
+
+
+def xxh64(data: bytes, seed: int = 0) -> int:
+    """XXH64（纯 Python）。与 xxhash.xxh64_intdigest 逐位一致（已对拍）。"""
+    d = memoryview(data)
+    n = len(d)
+    i = 0
+    if n >= 32:
+        v1 = (seed + _XXH64_P1 + _XXH64_P2) & _XXH64_M
+        v2 = (seed + _XXH64_P2) & _XXH64_M
+        v3 = seed & _XXH64_M
+        v4 = (seed - _XXH64_P1) & _XXH64_M
+        while i <= n - 32:
+            v1 = _xxh64_round(v1, int.from_bytes(d[i:i + 8], "little"))
+            v2 = _xxh64_round(v2, int.from_bytes(d[i + 8:i + 16], "little"))
+            v3 = _xxh64_round(v3, int.from_bytes(d[i + 16:i + 24], "little"))
+            v4 = _xxh64_round(v4, int.from_bytes(d[i + 24:i + 32], "little"))
+            i += 32
+        h = (_rotl64(v1, 1) + _rotl64(v2, 7) + _rotl64(v3, 12) + _rotl64(v4, 18)) & _XXH64_M
+        h = _xxh64_merge(h, v1)
+        h = _xxh64_merge(h, v2)
+        h = _xxh64_merge(h, v3)
+        h = _xxh64_merge(h, v4)
+    else:
+        h = (seed + _XXH64_P5) & _XXH64_M
+    h = (h + n) & _XXH64_M
+    while i <= n - 8:
+        h ^= _xxh64_round(0, int.from_bytes(d[i:i + 8], "little"))
+        h = (_rotl64(h, 27) * _XXH64_P1 + _XXH64_P4) & _XXH64_M
+        i += 8
+    if i <= n - 4:
+        h ^= (int.from_bytes(d[i:i + 4], "little") * _XXH64_P1) & _XXH64_M
+        h = (_rotl64(h, 23) * _XXH64_P2 + _XXH64_P3) & _XXH64_M
+        i += 4
+    while i < n:
+        h ^= (d[i] * _XXH64_P5) & _XXH64_M
+        h = (_rotl64(h, 11) * _XXH64_P1) & _XXH64_M
+        i += 1
+    h ^= h >> 33
+    h = (h * _XXH64_P2) & _XXH64_M
+    h ^= h >> 29
+    h = (h * _XXH64_P3) & _XXH64_M
+    h ^= h >> 32
+    return h
+
+
+def blob_cache_key(blob: bytes) -> int:
+    """mmtr 里 blob 后的 8 字节缓存键（MHWS 用；seed 固定 0xFFFFFFFF）。"""
+    return xxh64(blob, XXH64_SEED)
+
+
 if __name__ == "__main__":
     # 自检:已知样本
     cases = {

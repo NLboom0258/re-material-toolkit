@@ -15,14 +15,6 @@ rows×cols（4×272 / 5×479 / 4×463 …）。
 """
 import struct
 
-try:
-    from . import game_profile as GP
-except ImportError:  # 允许脚本直接 import
-    import os
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import game_profile as GP
-
 _MAGIC = b"SDF\x00"
 
 
