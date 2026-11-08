@@ -2794,6 +2794,11 @@ class Mdf2Panel(QWidget):
             InlineNameDelegate(self.tree_param, 1, self._param_name,
                                self._commit_param_rename))
 
+        # GPBF 页: mdf2 v19+ 每材质一组 (槽位名, .gpbf 路径) 的 ByteAddressBuffer 引用
+        self.tree_gpbf = QTreeWidget()
+        self.tree_gpbf.setHeaderLabels(["槽位名", "路径 (.gpbf)", "槽位 hash", "路径 hash"])
+        self.tree_gpbf.header().setStretchLastSection(False)
+
         # 材质属性页: 着色类型 + flags 位 + Tess/Phong
         self.tab_matprops = QWidget()
         mv = QVBoxLayout(self.tab_matprops)
@@ -2832,6 +2837,18 @@ class Mdf2Panel(QWidget):
                          "贴图槽")
         self.tabs.addTab(wrap_with_add_button(self.tree_param, "＋ 新增参数", self.add_param),
                          "材质参数")
+        gpbf_page = QWidget()
+        gv = QVBoxLayout(gpbf_page)
+        gv.setContentsMargins(0, 0, 0, 0)
+        tip_gpbf = QLabel(
+            "GPBF = 每材质的 ByteAddressBuffer 引用（路径指向 "
+            "MasterMaterial/ByteAddressBuffer/*.gpbf）。路径可改（保存时重算 hash），"
+            "槽位名是 shader 绑定名，不在此页改。")
+        tip_gpbf.setWordWrap(True)
+        tip_gpbf.setStyleSheet("color:#888;")
+        gv.addWidget(tip_gpbf)
+        gv.addWidget(self.tree_gpbf, 1)
+        self.tabs.addTab(gpbf_page, "GPBF")
         self.tabs.addTab(self.tab_matprops, "材质属性")
 
         self.tree_mat_wrap = wrap_with_add_button(self.tree_mat, "＋ 新增材质",
@@ -3044,6 +3061,7 @@ class Mdf2Panel(QWidget):
     def refresh_detail(self):
         self.refresh_tex()
         self.refresh_params()
+        self.refresh_gpbf()
         self.refresh_mat_props()
 
     def refresh_tex(self):
@@ -3463,6 +3481,42 @@ class Mdf2Panel(QWidget):
         tb = m.get_texture(ty)
         if tb is not None:
             tb.texture_path = path
+
+    def refresh_gpbf(self):
+        """GPBF 页：材质引用的 ByteAddressBuffer（每对 槽位名 / .gpbf 路径）。
+
+        表在 mdf2 v19+ 才有；内容由引擎与 `.gpbf` 资源决定，工具只搬运。
+        路径可改（保存时写回字符串池并重算 hash）；槽位名是 shader 绑定名，不在此页改。
+        """
+        self.tree_gpbf.clear()
+        m = self._cur_material()
+        if m is None:
+            return
+        for nh, dh in m.gpu_buffers:
+            it = QTreeWidgetItem([
+                nh["name"], "",
+                "%08X/%08X" % (nh["utf16_hash"], nh["ascii_hash"]),
+                "%08X/%08X" % (dh["utf16_hash"], dh["ascii_hash"])])
+            self.tree_gpbf.addTopLevelItem(it)
+            le = QLineEdit(dh["name"])
+            le.setPlaceholderText("MasterMaterial/ByteAddressBuffer/<名字>.gpbf")
+            le.setReadOnly(self._readonly)
+            le.editingFinished.connect(
+                lambda d=dh, w=le: self._commit_gpbf_path(d, w))
+            self.tree_gpbf.setItemWidget(it, 1, le)
+        fit_columns(self.tree_gpbf, [0, 2, 3], pad=20, min_w=70, max_w=260)
+        self.tree_gpbf.setColumnWidth(1, 420)
+
+    def _commit_gpbf_path(self, dh, w):
+        """GPBF 路径写回（data 条目）。留空会让引擎找不到 buffer，直接拒绝。"""
+        if self._readonly:
+            return
+        new = (w.text() or "").strip()
+        if not new or new == dh["name"]:
+            w.setText(dh["name"])
+            return
+        dh["name"] = new
+        w.setText(new)
 
     def delete_tex(self, ty):
         if self._readonly:
