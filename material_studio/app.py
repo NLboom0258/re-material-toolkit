@@ -83,6 +83,8 @@ from material_toolkit.lib import psession as ps  # noqa: E402
 from material_toolkit.lib import mmatlib as mlab  # noqa: E402
 from material_toolkit.lib import mdf2 as mdf2lib  # noqa: E402
 from material_toolkit.lib import mat_attrs as mattr  # noqa: E402
+from material_toolkit.lib import dxil_asm as DXASM  # noqa: E402
+from material_toolkit.lib import mmtr_patch as PATCH  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     Qt, QTimer, QSize, QPointF, Signal, QRegularExpression, QObject, QRunnable, QThreadPool,
@@ -2347,6 +2349,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.txt_blob = QPlainTextEdit()
         self.txt_blob.setReadOnly(True)
         self.txt_blob.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self._edit_blob_idx = None     # 当前编辑区 IR 对应的 blob 下标
         self.lbl_param = QLabel()
         self.lbl_param.setWordWrap(True)
         self.lbl_param.setAlignment(Qt.AlignTop | Qt.AlignLeft)
@@ -2385,11 +2388,20 @@ class MmtrReadOnlyPanel(QWidget):
         self.btn_blob_info = QPushButton("容器信息")
         self.btn_blob_dis = QPushButton("反汇编(DXIL)")
         self.btn_blob_dis.setToolTip(
-            "用 Windows SDK 的 dxc -dumpbin 输出反汇编文本（只读；"
-            "DXIL 无可用汇编器，不能写回）。可用环境变量 DXC_EXE 指定 dxc.exe")
+            "用 dxcompiler 的 IDxcCompiler::Disassemble 输出 LLVM 文本 IR（可编辑）。"
+            "需要 dxcompiler.dll：放 libs/ 或设 REASY_DXCOMPILER_PATH")
+        self.btn_blob_apply = QPushButton("应用(汇编+放回)")
+        self.btn_blob_apply.setToolTip(
+            "把编辑框里的 IR 汇编回 DXIL，只替换本 blob 的 DXIL chunk（保留 ILDN/STAT 等），"
+            "再重排 mmtr 并重算缓存键")
+        self.btn_blob_apply.setEnabled(False)
+        self.lbl_blob_state = QLabel("")
+        self.lbl_blob_state.setStyleSheet("color:#888;")
         rowb.addWidget(self.btn_blob_info)
         rowb.addWidget(self.btn_blob_dis)
+        rowb.addWidget(self.btn_blob_apply)
         rowb.addStretch(1)
+        rowb.addWidget(self.lbl_blob_state)
         bv.addLayout(rowb)
         bv.addWidget(self.txt_blob, 1)
         self.tabs.addTab(blob_page, "Blob(shader)")
@@ -2407,6 +2419,7 @@ class MmtrReadOnlyPanel(QWidget):
         self.tree_blob.currentItemChanged.connect(lambda *_: self.refresh_blob_detail())
         self.btn_blob_info.clicked.connect(lambda *_: self.refresh_blob_detail())
         self.btn_blob_dis.clicked.connect(self.disasm_blob)
+        self.btn_blob_apply.clicked.connect(self.apply_blob)
         self.btn_bind_names.clicked.connect(self.fill_resource_names)
 
     # ---- 打开 / 导出 ----
@@ -2534,6 +2547,11 @@ class MmtrReadOnlyPanel(QWidget):
         self.tree_bind.clear()
         self.tree_sig.clear()
         self.tree_group.clear()
+        if idx != getattr(self, "_edit_blob_idx", None):
+            self.txt_blob.setReadOnly(True)
+            self._edit_blob_idx = None
+            self.btn_blob_apply.setEnabled(False)
+            self.lbl_blob_state.setText("")
         if idx is None or not (0 <= idx < len(self.blobs)):
             self.txt_blob.clear()
             return
@@ -2678,20 +2696,59 @@ class MmtrReadOnlyPanel(QWidget):
         self.refresh_blob_detail()
 
     def disasm_blob(self):
-        """反汇编选中的 DXIL blob（dxc -dumpbin；只读，不能写回）。"""
+        """反汇编选中的 DXIL blob（LLVM 文本 IR，可编辑后写回）。
+
+        用 ``dxil_asm.disassemble``（IDxcCompiler::Disassemble），输出的文本能直接
+        被 ``assemble`` 汇编回去；旧的 ``dxc -dumpbin`` 文本不可回编。
+        """
         idx = self.cur_blob()
         if idx is None or not (0 <= idx < len(self.blobs)):
             return
         off, size = self.blobs[idx]
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            text = disassemble_dxil(self.data[off:off + size])
+            text = DXASM.disassemble(self.data[off:off + size])
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "反汇编(DXIL)", str(e))
             return
         finally:
             QApplication.restoreOverrideCursor()
+        self._edit_blob_idx = idx
+        self.txt_blob.setReadOnly(False)
         self.txt_blob.setPlainText(text)
+        self.btn_blob_apply.setEnabled(True)
+        self.lbl_blob_state.setText("已反汇编（%d 行），可编辑后点「应用」" % text.count("\n"))
+
+    def apply_blob(self):
+        """把编辑框里的 IR 汇编回 DXIL，只换本 blob 的 DXIL chunk，再重排 mmtr。"""
+        idx = getattr(self, "_edit_blob_idx", None)
+        if idx is None or not (0 <= idx < len(self.blobs)):
+            return
+        off, size = self.blobs[idx]
+        text = self.txt_blob.toPlainText()
+        refs = len(self._blob_ref_records(off))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            assembled = DXASM.assemble(text)
+            DXASM.validate(assembled)
+            new_blob = DXASM.replace_dxil(self.data[off:off + size],
+                                          DXASM.container_part(assembled, "DXIL"))
+            data, info = PATCH.resize_blob_at(self.data, self.view, off, new_blob)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "应用失败", str(e)[:3000])
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.data = data
+        self.load_data(self.data, self.path, self.view)
+        self._edit_blob_idx = None
+        self.btn_blob_apply.setEnabled(False)
+        self.lbl_blob_state.setText("已应用")
+        QMessageBox.information(
+            self, "应用",
+            "已写回：blob %d -> %d 字节（%d 条记录引用）\n"
+            "缓存键重算 %d 个。记得用「导出副本」保存。"
+            % (size, len(new_blob), refs, info["trailers_recomputed"]))
 
     def refresh_pool(self):
         vocab = SCAN.name_vocabulary(self.data, self.view, self.records)
