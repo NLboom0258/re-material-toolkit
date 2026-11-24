@@ -9,7 +9,9 @@
   4. 缩短：params 段 -16 → 往返可精确还原；
   5. 段内编辑：30 项 srv pool 末尾插入一个名字条目 → 所有记录的绑定名不变、
      插入/删除往返逐字节还原（贴图槽加项的雏形）；
-  6. 错误路径：DMC5 profile（无 8B 尾部）/ 未知段名 / 长度非条目宽整数倍。
+  6. 新增贴图槽：pool +1 项 + strings 追加名字 + 引用记录 count +1 →
+     新槽可读、落在 `r[86].w`（第 26 个材质槽）；
+  7. 错误路径：DMC5 profile（无 8B 尾部）/ 未知段名 / 长度非条目宽整数倍。
 
 真实语料缺失时对应用例跳过。
 """
@@ -155,6 +157,46 @@ def _case_pool_edit():
     print("pool edit: bindings stable, insert/delete round-trip exact")
 
 
+def _case_add_slot():
+    """新增一个贴图槽：pool +1 项 + 新字符串 + 引用记录的 count +1。"""
+    if not os.path.isfile(TOON):
+        print("add slot: skipped (no ToonTest sample)")
+        return
+    from material_toolkit.lib.hashes import ascii_hash
+    data = open(TOON, "rb").read()
+    m = HEAD.parse(data, version=240906211)
+    v = GP.resolve(data, 240906211)
+    pool = None
+    refs = []
+    for e in SC.record_entries(data, v):
+        p = struct.unpack_from("<Q", data, e["off"] + 0x90)[0]
+        if data[e["off"] + 0xFC] == 30:
+            pool = p if pool is None else pool
+            if p == pool:
+                refs.append(e)
+    assert pool is not None and refs
+    out = m.rebuild(edits={
+        "strings": [(m.sec("strings").end, 0, b"CustomSlot26\x00", [])],
+        "names": [(pool + 30 * 16, 0,
+                   struct.pack("<QII", m.sec("strings").end, ascii_hash("CustomSlot26"), 0),
+                   [(0, 8)])],
+    })
+    buf = bytearray(out)
+    for e in refs:
+        buf[e["off"] + 0xFC] = 31
+    out = bytes(buf)
+    # 重新解析：pool 变成 31 项，末项是新名字，且它正好落在 r[86].w
+    m2 = HEAD.parse(out, version=240906211)
+    assert m2.sec("names").count == m.sec("names").count + 1
+    assert m2.sec("strings").size == m.sec("strings").size + 13
+    v2 = GP.resolve(out, 240906211)
+    b = SC.bindings(out, v2, SC.record_entries(out, v2)[refs[0]["index"]]["off"], "srv")
+    assert len(b) == 31 and b[-1]["name"] == "CustomSlot26", b[-1]
+    # 其余记录的绑定名与原来一致（只有该 pool 的前 30 项、其它 pool 全部不变）
+    assert HEAD.verify(out, version=240906211)[0]
+    print("add slot: 31 entries, new name readable, file still self-consistent")
+
+
 def _case_errors():
     dmc5 = sorted(glob.glob(os.path.join(ASSETS, "*.mmtr.1808168797")))
     if dmc5:
@@ -188,5 +230,6 @@ if __name__ == "__main__":
     _case_grow()
     _case_shrink()
     _case_pool_edit()
+    _case_add_slot()
     _case_errors()
     print("OK")

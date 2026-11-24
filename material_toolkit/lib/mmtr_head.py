@@ -94,6 +94,21 @@ class HeadModel:
     def span(self, name):
         return self.data[self._by_name[name].start:self._by_name[name].end]
 
+    def target_of(self, val, prefer_prev_end=False):
+        """指针目标段。
+
+        `prefer_prev_end=True`：若 val 恰好等于某段的末尾，归**前一段**。
+        只给「编辑字节内新增的指针」用——它们常指向「某段旧的末尾」（插入前
+        不存在的位置）；普通指针不能这么判，否则指向下一段起点的指针会被误归。
+        """
+        if prefer_prev_end:
+            if not hasattr(self, "_starts"):
+                self._index()
+            for s in self.sections:
+                if s.end == val:
+                    return s
+        return self.section_of(val)
+
     def sec(self, name):
         return self._by_name[name]
 
@@ -139,6 +154,7 @@ class HeadModel:
         out = bytearray()
         plan = {}          # name -> (new_start, old_start, new_len, edits)
         edit_abs = []      # [(out 内位置, body, rels)]
+        edit_out = {}      # (段名, 旧坐标起点) -> 该编辑输出在 out 里的起点
         for s in self.sections:
             items = sorted(edits.get(s.name) or [], key=lambda x: (x[0], x[1]))
             ov = overrides.get(s.name)
@@ -168,16 +184,29 @@ class HeadModel:
             prev = s.start
             for at, old_len, body, rels in items:
                 out += self.data[prev:at]
+                edit_out[(s.name, at)] = len(out)
                 edit_abs.append((len(out), body, rels))
                 out += body
                 prev = at + old_len
             out += self.data[prev:s.end]
 
-        def remap(sec_name, old):
-            """旧绝对地址 -> 新绝对地址（含段内编辑的净位移）。"""
+        def remap(sec_name, old, is_new=False):
+            """旧绝对地址 -> 新绝对地址（含段内编辑的净位移）。
+
+            `is_new=True` 用于**编辑字节内**的指针：
+              * 落在某个旧插入点的**新增内容范围**内 -> 映射到该内容的新位置；
+              * 恰好等于某个旧插入点 -> 指向新插入内容的起点（不累计位移）。
+            """
             new_start, old_start, _ln, items = plan[sec_name]
             off = old - old_start
-            extra = sum(len(b) - n for at, n, b, _ in items if (at - old_start) <= off)
+            if is_new:
+                for at, n, b, _ in items:
+                    a = at - old_start
+                    if b and a <= off < a + len(b):
+                        return edit_out[(sec_name, at)] + (off - a)
+            extra = sum(len(b) - n for at, n, b, _ in items
+                        if (at - old_start) < off
+                        or (not is_new and (at - old_start) == off))
             return new_start + off + extra
 
         # 结构指针
@@ -197,21 +226,33 @@ class HeadModel:
             old = _read(self.data, pos, width)
             if not old:
                 continue
-            tgt = self.section_of(old)
+            tgt = self.target_of(old)
             if tgt is None:
                 raise HeadError("指针 0x%X -> 0x%X 目标不在段内" % (pos, old))
             _write(out, remap(src.name, pos), remap(tgt.name, old), width)
 
         # 编辑字节内的指针（值按旧坐标系给出）
+        def find_new_target(old):
+            """新增指针的目标段。优先匹配「某编辑的新增内容范围」（旧坐标里越界的位置）。"""
+            for s2 in self.sections:
+                for at, _n, b, _r in plan[s2.name][3]:
+                    if b and at <= old < at + len(b):
+                        return s2, at
+            return self.target_of(old, prefer_prev_end=True), None
+
         for abs_pos, body, rels in edit_abs:
             for rel, width in (rels or ()):
                 old = _read(body, rel, width)
                 if not old:
                     continue
-                tgt = self.section_of(old)
+                tgt, hit_at = find_new_target(old)
                 if tgt is None:
                     raise HeadError("新增条目指针 0x%X 目标不在段内" % old)
-                _write(out, abs_pos + rel, remap(tgt.name, old), width)
+                if hit_at is not None:
+                    new_val = edit_out[(tgt.name, hit_at)] + (old - hit_at)
+                else:
+                    new_val = remap(tgt.name, old, is_new=True)
+                _write(out, abs_pos + rel, new_val, width)
 
         # 文件头的 blob_start 恒等于 blobs 段起点
         out[8:12] = struct.pack("<I", plan["blobs"][0])
@@ -391,11 +432,11 @@ def parse(data, view=None, version=None):
     m = HeadModel(data=bytes(data), view=view, sections=sections, pointers=ptr)
     m._index()
 
-    # 自检：每个非零指针都必须落在某个段内
+    # 自检：每个非零指针都必须落在某个段内（或段尾追加点）
     bad = []
     for pos, width in ptr:
         v = _read(data, pos, width)
-        if v and m.section_of(v) is None:
+        if v and m.target_of(v) is None:
             bad.append((pos, v))
     if bad:
         raise HeadError("%d 个指针目标不在段内，首个：0x%X -> 0x%X"
