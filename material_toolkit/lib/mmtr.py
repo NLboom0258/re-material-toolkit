@@ -129,7 +129,7 @@ class Mmtr:
         lo, hi = members_off, members_off + count * 16
         return [pr for pr in self.params if lo <= pr.entry_off < hi]
 
-    def add_cbuffer_param(self, cbuffer_name, param_name, size, offset):
+    def add_cbuffer_param(self, cbuffer_name, param_name, size, offset, blob_starts=None):
         """在指定 cbuffer 成员表末尾插入新参数,返回新的完整文件 bytes。
 
         头部变长插入会同步重映射三类绝对偏移:
@@ -137,6 +137,10 @@ class Mmtr:
           - blob 起点引用(>=blob_start): +16+len(name_bytes)(字符串池又变长)
           - 参数表后半偏移(insert_pos..pool_lo): +16
         并更新 cbuffer 绑定条目的 count/size 与文件头 blob_start。
+
+        `blob_starts`: 已知的 blob 起点集合。MHWS 的每个容器后跟 8 字节尾部,
+        按 `size@+24` 连续走会断,必须由调用方传入(mt:
+        `mmtr_scan.blob_list(data, view)`),否则只有第一个 blob 会被重定位。
         """
         data = self.data
         blob_start = self.blob_start
@@ -164,11 +168,15 @@ class Mmtr:
             while q < blob_start and data[q] != 0:
                 q += 1
             q += 1
-        blob_starts = set()
-        off = blob_start
-        while off + 4 <= len(data) and data[off:off + 4] == b"DXBC":
-            blob_starts.add(off)
-            off += struct.unpack_from("<I", data, off + 24)[0]
+        blob_starts_set = set()
+        if blob_starts is not None:
+            blob_starts_set = {v for v in blob_starts if blob_start <= v < len(data)}
+        else:
+            off = blob_start
+            while off + 4 <= len(data) and data[off:off + 4] == b"DXBC":
+                blob_starts_set.add(off)
+                off += struct.unpack_from("<I", data, off + 24)[0]
+        blob_starts = blob_starts_set
         # 参数段起点: 扫描"所有" cbuffer 绑定条目的 members_off(插入点之后的需 +16)
         seg_starts = set()
         for p in range(0, blob_start - 32, 4):
